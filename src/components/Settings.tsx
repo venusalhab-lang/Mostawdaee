@@ -1060,8 +1060,8 @@ CREATE INDEX idx_invoices_number ON invoices(invoice_number);`;
                         />
                         <span className="text-gray-400 font-bold">{t.unitsPlural}</span>
                       </div>
-                      <p className="text-xs text-gray-500 italic mx-2 flex items-center gap-2">
-                        <Info size={14} /> Global stock alert level.
+                      <p className="text-xs text-gray-500 mx-2 flex items-center gap-2">
+                        <Info size={14} /> {isRtl ? 'عند هذا العدد يظهر تنبيه نقص المخزون.' : 'Stock is flagged as low at or below this quantity.'}
                       </p>
                     </div>
 
@@ -1232,7 +1232,7 @@ CREATE INDEX idx_invoices_number ON invoices(invoice_number);`;
                   {/* Recalibrate Safe */}
                   <div className="p-8 bg-gray-50 dark:bg-gray-800/50 rounded-[2.5rem] border border-gray-200 dark:border-gray-700/50">
                     <div className="flex items-center gap-3 mb-6">
-                      <RefreshCw size={20} className="text-rose-500 animate-spin-slow" />
+                      <RefreshCw size={20} className="text-indigo-500" />
                       <h3 className="font-black dark:text-white uppercase">{t.recalibrateVault}</h3>
                     </div>
                      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
@@ -1246,6 +1246,9 @@ CREATE INDEX idx_invoices_number ON invoices(invoice_number);`;
                           <option value="JOD">JOD (د.أ)</option>
                           <option value="ILS">ILS (₪)</option>
                           <option value="USD">USD ($)</option>
+                          <option value="IQD">IQD (د.ع)</option>
+                          <option value="SAR">SAR (ر.س)</option>
+                          <option value="LYD">LYD (د.ل)</option>
                         </select>
                       </div>
                       <div className="md:col-span-1">
@@ -1259,10 +1262,10 @@ CREATE INDEX idx_invoices_number ON invoices(invoice_number);`;
                         />
                       </div>
                       <div className="md:col-span-2">
-                        <label className="text-xs font-black text-gray-400 uppercase block mb-1">Authorization Reason</label>
+                        <label className="text-xs font-black text-gray-400 uppercase block mb-1">{isRtl ? 'سبب المعايرة' : 'Reason'}</label>
                         <input
                           type="text"
-                          placeholder="e.g. Monthly Audit Check"
+                          placeholder={isRtl ? 'مثال: جرد شهري' : 'e.g. Monthly count'}
                           value={recalibrateData.reason}
                           onChange={(e) => setRecalibrateData({ ...recalibrateData, reason: e.target.value })}
                           className="w-full bg-white dark:bg-gray-900 rounded-xl px-4 py-3 border border-gray-200 dark:border-gray-700 font-bold dark:text-white"
@@ -1357,275 +1360,6 @@ CREATE INDEX idx_invoices_number ON invoices(invoice_number);`;
                       </label>
                     </div>
                   </div>
-
-                  {/* PostgreSQL Relational Migration Center */}
-                  <div className="p-8 bg-gray-50 dark:bg-gray-800/40 rounded-[2.5rem] border border-gray-200 dark:border-gray-700/50 space-y-6">
-                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                      <div className="flex items-center gap-3">
-                        <div className="w-12 h-12 bg-[#112229] border border-teal-500/20 text-[#00D2FF] rounded-xl flex items-center justify-center shadow-lg shadow-teal-500/5">
-                          <FileText size={24} />
-                        </div>
-                        <div>
-                          <h3 className="text-lg font-black dark:text-white uppercase tracking-tight">
-                            {isRtl ? "مُصدِّر ومطابق البيانات PostgreSQL" : "PostgreSQL Migration Engine"}
-                          </h3>
-                          <span className="text-[10px] text-teal-600 dark:text-teal-400 font-bold uppercase tracking-widest font-mono">
-                            🗄️ {isRtl ? "مطابقة نموذج البيانات المحاسبي" : "Schema-aligned SQL Backup Seed"}
-                          </span>
-                        </div>
-                      </div>
-                      
-                      {/* Control buttons */}
-                      <div className="flex items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={handleCopySqlToClipboard}
-                          className="px-4 py-2 text-xs font-bold bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700 border border-gray-200 dark:border-gray-700 rounded-xl flex items-center gap-1.5 shadow-sm active:scale-95 transition-all text-gray-700 dark:text-gray-300 cursor-pointer"
-                        >
-                          {isSqlCopied ? <Check size={14} className="text-emerald-500 animate-pulse" /> : <Copy size={14} />}
-                          {isSqlCopied ? (isRtl ? "تم النسخ!" : "Copied!") : (isRtl ? "نسخ الكود" : "Copy Block")}
-                        </button>
-                        
-                        <button
-                          type="button"
-                          onClick={handleDownloadFullSql}
-                          className="px-4 py-2 text-xs font-black bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl flex items-center gap-1.5 shadow-md active:scale-95 transition-all cursor-pointer"
-                        >
-                          <Download size={14} />
-                          {isRtl ? "تنزيل ملف .sql" : "Download SQL"}
-                        </button>
-                      </div>
-                    </div>
-
-                    <p className="text-xs text-gray-500 dark:text-gray-400 leading-relaxed">
-                      {isRtl 
-                        ? "تقوم هذه الأداة برسم بنية البيانات وإجراء مطابقة فورية بين جداول Firestore اللحظية وجدول فواتير المبيعات، تفاصيل الفواتير، العملات، وأصناف المستودع لتوليد ملفات SQL قياسية ومتوافقة تماماً مع البنية اللوجستية المطلوبة في PostgreSQL."
-                        : "This wizard inspects your local Firestore documents, active currencies, standard logistics markup codes, dynamic stock quantities, and customer invoice logs, compiling them into clean, index-optimized Postgres table rows."}
-                    </p>
-
-                    {/* Tabs indicator */}
-                    <div className="flex border-b border-gray-200 dark:border-gray-700">
-                      <button
-                        type="button"
-                        onClick={() => setSqlTab('schema')}
-                        className={`px-4 py-2 text-xs font-black uppercase border-b-2 transition-all ${
-                          sqlTab === 'schema'
-                            ? 'border-indigo-600 text-indigo-600 dark:border-indigo-400 dark:text-indigo-400'
-                            : 'border-transparent text-gray-400 hover:text-gray-600 dark:hover:text-gray-300'
-                        }`}
-                      >
-                        {isRtl ? "مخطط الجداول (DDL)" : "DDL Schema Layout"}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setSqlTab('inserts')}
-                        className={`px-4 py-2 text-xs font-black uppercase border-b-2 transition-all ${
-                          sqlTab === 'inserts'
-                            ? 'border-indigo-600 text-indigo-600 dark:border-indigo-400 dark:text-indigo-400'
-                            : 'border-transparent text-gray-400 hover:text-gray-600 dark:hover:text-gray-300'
-                        }`}
-                      >
-                        {isRtl ? "توليد بيانات الإدخال (DML)" : "DML Seed Inserts"}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setSqlTab('supabase')}
-                        className={`px-4 py-2 text-xs font-black uppercase border-b-2 transition-all ${
-                          sqlTab === 'supabase'
-                            ? 'border-emerald-600 text-emerald-600 dark:border-emerald-400 dark:text-emerald-400'
-                            : 'border-transparent text-gray-400 hover:text-gray-600 dark:hover:text-gray-300'
-                        }`}
-                      >
-                        ⚡ Supabase & RLS
-                      </button>
-                    </div>
-
-                    {/* SQL code block viewer */}
-                    <div className="relative">
-                      <pre className="p-5 bg-gray-900/95 dark:bg-[#080d10] text-[#00D2FF] font-mono text-[11px] sm:text-xs rounded-2xl overflow-x-auto max-h-[300px] border border-gray-800 dark:border-teal-950/20 custom-scrollbar leading-relaxed scrollbar-thin select-all">
-                        <code>
-                          {sqlTab === 'schema' ? ddlSchemaText : sqlTab === 'inserts' ? generateSqlInserts() : supabaseIntegrationText}
-                        </code>
-                      </pre>
-                      
-                      {/* Floating status metric */}
-                      <div className="absolute bottom-3 right-3 px-2.5 py-1 bg-gray-950/80 backdrop-blur border border-cyan-900/30 text-[9px] font-bold font-mono text-cyan-400 rounded-lg shadow-md uppercase tracking-wider font-mono">
-                        {sqlTab === 'schema' 
-                          ? (isRtl ? `4 جداول معرفة` : `4 tables mapped`) 
-                          : sqlTab === 'inserts'
-                            ? (isRtl ? `${products.length} منتج | ${invoices.length} فاتورة` : `${products.length} products | ${invoices.length} bills`)
-                            : (isRtl ? `تم توليد قوانين RLS` : `RLS & client ready`)}
-                      </div>
-                    </div>
-
-                    {/* Live Sandbox Interactive Supabase section */}
-                    {sqlTab === 'supabase' && (
-                      <div className="mt-4 p-6 bg-emerald-50/50 dark:bg-emerald-950/15 border border-emerald-100 dark:border-emerald-900/45 rounded-2xl space-y-4">
-                        <div className="flex items-center gap-3">
-                          <DatabaseZap className="text-emerald-500" size={24} />
-                          <div>
-                            <h4 className="text-sm font-black text-gray-900 dark:text-white uppercase tracking-wider">
-                              {isRtl ? "منصة اختبار ومزامنة Supabase Cloud" : "Supabase Cloud Sandbox & Realtime Sync"}
-                            </h4>
-                            <p className="text-xs text-gray-500 dark:text-gray-400">
-                              {isRtl 
-                                ? "اختبر كود جلب المنتجات ونفّذ السياسات مباشرة مع قاعدة بياناتك."
-                                : "Query cloud items and push current products list directly using your credentials."}
-                            </p>
-                          </div>
-                        </div>
-
-                        {/* Config status check */}
-                        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between py-2 border-b border-gray-200/50 dark:border-gray-800/50 gap-2">
-                          <span className="text-xs font-bold text-gray-600 dark:text-gray-400">
-                            {isRtl ? "حالة ربط الاتصال السحابي (VITE_SUPABASE) :" : "Supabase credentials status:"}
-                          </span>
-                          <div className="flex items-center gap-2">
-                            {localIsConfigured ? (
-                              <>
-                                <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black tracking-wide bg-emerald-100 text-emerald-800 dark:bg-emerald-900/50 dark:text-emerald-300">
-                                  {isRtl ? "مُهيئة ومزامنة" : "CONNECTED & ACTIVE"}
-                                </span>
-                                <button
-                                  type="button"
-                                  onClick={handleClearLocalSupabase}
-                                  className="px-2 py-0.5 rounded-lg text-[10px] font-bold bg-rose-50 hover:bg-rose-100 text-rose-600 dark:bg-rose-950/20 dark:text-rose-400 border border-rose-100 dark:border-rose-900/40 cursor-pointer"
-                                >
-                                  {isRtl ? "إعادة تعيين" : "Reset Keys"}
-                                </button>
-                              </>
-                            ) : (
-                              <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black tracking-wide bg-amber-100 text-amber-800 dark:bg-amber-900/45 dark:text-amber-300 flex items-center gap-1">
-                                <AlertTriangle size={10} />
-                                {isRtl ? "بانتظار مفاتيح الاتصال" : "PENDING CONFIG"}
-                              </span>
-                            )}
-                          </div>
-                        </div>
-
-                        {localIsConfigured ? (
-                          <div className="space-y-4">
-                            <div className="flex flex-wrap items-center gap-2">
-                              <button
-                                type="button"
-                                disabled={supabaseLoading}
-                                onClick={handleTestSupabaseFetch}
-                                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-xl text-xs font-black transition-all flex items-center gap-1.5 cursor-pointer shadow-md"
-                              >
-                                {supabaseLoading ? <RefreshCw size={12} className="animate-spin" /> : <DatabaseZap size={12} />}
-                                {isRtl ? "اختبار جلب المنتجات كودياً" : "Query with Client SDK"}
-                              </button>
-
-                              <button
-                                type="button"
-                                disabled={supabaseLoading}
-                                onClick={handleSyncToSupabase}
-                                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-xl text-xs font-black transition-all flex items-center gap-1.5 cursor-pointer shadow-md"
-                              >
-                                {supabaseLoading ? <RefreshCw size={12} className="animate-spin" /> : <RefreshCw size={12} />}
-                                {isRtl ? "مزامنة ورفع المنتجات المحلية" : "Sync Current Inventory to cloud"}
-                              </button>
-                            </div>
-
-                            {/* Status or response viewer */}
-                            {supabaseSuccess === true && (
-                              <div className="p-4 bg-emerald-100/50 dark:bg-emerald-950/20 text-emerald-800 dark:text-emerald-300 rounded-xl space-y-2 text-xs">
-                                <div className="flex items-center gap-1.5 font-bold font-mono">
-                                  <CheckSquare size={14} />
-                                  <span>{isRtl ? "تم الاتصال بنجاح!" : "Query Execution Successful!"}</span>
-                                </div>
-                                <p className="text-[11px] opacity-90 font-mono">
-                                  {isRtl
-                                    ? `تم العثور على ${supabaseLiveProducts.length} منتج مسجل في السحابة حالياً.`
-                                    : `Fetched ${supabaseLiveProducts.length} products currently residing on your PostgreSQL cloud instance.`}
-                                </p>
-                                {supabaseLiveProducts.length > 0 && (
-                                  <div className="mt-2 text-[10px] font-mono max-h-40 overflow-y-auto bg-black/10 dark:bg-black/40 p-2 rounded-lg scrollbar-thin">
-                                    <table className="w-full text-left" dir="ltr">
-                                      <thead>
-                                        <tr className="border-b border-white/20">
-                                          <th className="p-1">id</th>
-                                          <th className="p-1">product_name</th>
-                                          <th className="p-1">quantity</th>
-                                          <th className="p-1">price</th>
-                                        </tr>
-                                      </thead>
-                                      <tbody>
-                                        {supabaseLiveProducts.map((p, i) => (
-                                          <tr key={i} className="border-b border-white/10 opacity-80 hover:opacity-100 font-mono">
-                                            <td className="p-1">{p.id}</td>
-                                            <td className="p-1">{p.product_name}</td>
-                                            <td className="p-1">{p.quantity}</td>
-                                            <td className="p-1">{p.price}</td>
-                                          </tr>
-                                        ))}
-                                      </tbody>
-                                    </table>
-                                  </div>
-                                )}
-                              </div>
-                            )}
-
-                            {supabaseSuccess === false && (
-                              <div className="p-4 bg-rose-100/70 dark:bg-rose-950/30 text-rose-800 dark:text-rose-300 rounded-xl text-xs space-y-1">
-                                <span className="font-bold font-mono flex items-center gap-1.5">
-                                  <AlertTriangle size={14} />
-                                  {isRtl ? "فشل تنفيذ الاتفاقية البرمجية:" : "Execution Failure Log:"}
-                                </span>
-                                <p className="font-mono text-[10px] bg-black/10 p-2 rounded max-h-32 overflow-y-auto select-text font-bold">
-                                  {supabaseErrorMsg}
-                                </p>
-                              </div>
-                            )}
-                          </div>
-                        ) : (
-                          <form onSubmit={handleSaveLocalSupabase} className="space-y-3 pt-2 text-right" dir={isRtl ? "rtl" : "ltr"}>
-                            <p className="text-[11px] text-gray-500 dark:text-gray-400 leading-relaxed font-bold">
-                              {isRtl 
-                                ? "أدخل مفاتيح الاتصال أدناه لتفعيل الاتصال الحقيقي الفوري وجلب منتجات Supabase:"
-                                : "Input your project keys below to override current environment configurations dynamically:"}
-                            </p>
-                            <div className="space-y-2">
-                              <div>
-                                <label className="block text-[10px] font-bold text-gray-600 dark:text-gray-400 mb-1">
-                                  {isRtl ? "مخزن مشروع Supabase (URL)" : "Supabase Project URL"}
-                                </label>
-                                <input
-                                  type="text"
-                                  required
-                                  placeholder="https://kwvrtsnvadjknioqbbxs.supabase.co"
-                                  className="w-full bg-white dark:bg-gray-950 border border-gray-200 dark:border-gray-800 rounded-xl px-3 py-2 text-xs text-gray-950 dark:text-white font-mono focus:outline-none focus:border-emerald-500"
-                                  value={supabaseSetUrl}
-                                  onChange={(e) => setSupabaseSetUrl(e.target.value)}
-                                />
-                              </div>
-                              <div>
-                                <label className="block text-[10px] font-bold text-gray-600 dark:text-gray-400 mb-1">
-                                  {isRtl ? "مفتاح الربط العام (Anon API Key)" : "Anon API Key"}
-                                </label>
-                                <input
-                                  type="text"
-                                  required
-                                  placeholder="eyJhbGciOi..."
-                                  className="w-full bg-white dark:bg-gray-950 border border-gray-200 dark:border-gray-800 rounded-xl px-3 py-2 text-xs text-gray-950 dark:text-white font-mono focus:outline-none focus:border-emerald-500"
-                                  value={supabaseSetKey}
-                                  onChange={(e) => setSupabaseSetKey(e.target.value)}
-                                />
-                              </div>
-                            </div>
-                            <button
-                              type="submit"
-                              className="w-full px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-black transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-md"
-                            >
-                              <Save size={13} />
-                              <span>{isRtl ? "حفظ مفاتيح الاتصال" : "Save Database Keys"}</span>
-                            </button>
-                          </form>
-                        )}
-                      </div>
-                    )}
-                  </div>
-
                   {/* Language Toggle */}
                   <div className="flex items-center justify-between p-6 bg-white dark:bg-gray-800 rounded-[2rem] border border-gray-100 dark:border-gray-700">
                     <div className="flex items-center gap-4">

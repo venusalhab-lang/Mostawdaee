@@ -1,20 +1,23 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { 
-  Globe2, 
+import {
+  Globe2,
   Loader2,
   X,
   FileText,
   ShieldCheck,
-  UserCheck,
   Lock,
   Mail,
-  AlertTriangle
+  AlertTriangle,
+  Eye,
+  EyeOff,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { sounds } from '../lib/sounds';
 import Logo from './Logo';
 import { useAuth } from './AuthContext';
+import { supabase } from '../supabaseClient';
+import { APP_NAME_EN, appName } from '../lib/brand';
 
 interface Props {
   language?: 'en' | 'ar';
@@ -24,18 +27,51 @@ interface Props {
 }
 
 
-function friendlyAuthError(err: any, isRtl: boolean): string {
+type AuthErrorKey =
+  | 'empty'
+  | 'invalid'
+  | 'unconfirmed'
+  | 'registered'
+  | 'rate'
+  | 'weak'
+  | 'email'
+  | 'network'
+  | 'generic'
+  | 'reset_sent'
+  | 'reset_need_email'
+  | 'mismatch'
+  | { raw: string };
+
+function classifyAuthError(err: any): AuthErrorKey {
   const raw = String(err?.message || err || '');
   const lower = raw.toLowerCase();
+  if (lower.includes('invalid login credentials')) return 'invalid';
+  if (lower.includes('email not confirmed')) return 'unconfirmed';
+  if (lower.includes('user already registered') || lower.includes('already been registered')) return 'registered';
+  if (lower.includes('rate limit') || lower.includes('too many') || lower.includes('over_email_send_rate_limit')) return 'rate';
+  if (lower.includes('password should be at least') || lower.includes('weak password')) return 'weak';
+  if (lower.includes('unable to validate email') || lower.includes('invalid email')) return 'email';
+  if (lower.includes('failed to fetch') || lower.includes('networkerror') || lower.includes('network request failed') || lower.includes('load failed')) return 'network';
+  return raw ? { raw } : 'generic';
+}
+
+function authMessage(key: AuthErrorKey, isRtl: boolean): string {
   const t = (ar: string, en: string) => (isRtl ? ar : en);
-  if (lower.includes('invalid login credentials')) return t('البريد الإلكتروني أو كلمة المرور غير صحيحة.', 'Incorrect email or password.');
-  if (lower.includes('email not confirmed')) return t('لم يتم تأكيد البريد بعد. افتح رسالة التفعيل في بريدك ثم أعد المحاولة.', 'Email not confirmed yet. Open the confirmation message in your inbox and try again.');
-  if (lower.includes('user already registered') || lower.includes('already been registered')) return t('هذا البريد مسجل مسبقاً. استخدم تسجيل الدخول بدلاً من إنشاء حساب.', 'This email is already registered. Sign in instead.');
-  if (lower.includes('rate limit') || lower.includes('too many') || lower.includes('over_email_send_rate_limit')) return t('محاولات كثيرة خلال وقت قصير. انتظر دقائق ثم أعد المحاولة.', 'Too many attempts. Please wait a few minutes and try again.');
-  if (lower.includes('password should be at least') || lower.includes('weak password')) return t('كلمة المرور ضعيفة. استخدم 6 أحرف على الأقل.', 'Password is too weak. Use at least 6 characters.');
-  if (lower.includes('unable to validate email') || lower.includes('invalid email')) return t('صيغة البريد الإلكتروني غير صحيحة.', 'Invalid email address.');
-  if (lower.includes('failed to fetch') || lower.includes('networkerror') || lower.includes('network request failed') || lower.includes('load failed')) return t('تعذر الاتصال بالخادم. تحقق من الإنترنت ثم أعد المحاولة.', 'Cannot reach the server. Check your internet connection and try again.');
-  return raw || t('حدث خطأ غير متوقع أثناء تسجيل الدخول.', 'An unexpected sign-in error occurred.');
+  if (typeof key === 'object') return key.raw;
+  switch (key) {
+    case 'empty': return t('يرجى إدخال البريد الإلكتروني وكلمة المرور.', 'Please enter your email and password.');
+    case 'invalid': return t('البريد الإلكتروني أو كلمة المرور غير صحيحة.', 'Incorrect email or password.');
+    case 'unconfirmed': return t('لم يتم تأكيد البريد بعد. افتح رسالة التفعيل في بريدك ثم أعد المحاولة.', 'Email not confirmed yet. Open the confirmation message and try again.');
+    case 'registered': return t('هذا البريد مسجّل مسبقاً. سجّل الدخول بدلاً من إنشاء حساب.', 'This email is already registered. Sign in instead.');
+    case 'rate': return t('محاولات كثيرة خلال وقت قصير. انتظر دقائق ثم أعد المحاولة.', 'Too many attempts. Please wait a few minutes and try again.');
+    case 'weak': return t('كلمة المرور ضعيفة. استخدم 6 أحرف على الأقل.', 'Password is too weak. Use at least 6 characters.');
+    case 'email': return t('صيغة البريد الإلكتروني غير صحيحة.', 'Invalid email address.');
+    case 'network': return t('تعذر الاتصال بالخادم. تحقق من الإنترنت ثم أعد المحاولة.', 'Cannot reach the server. Check your internet connection and try again.');
+    case 'reset_sent': return t('إن كان البريد مسجّلاً، ستصل رسالة لإعادة تعيين كلمة المرور.', 'If this email is registered, a reset message is on its way.');
+    case 'reset_need_email': return t('أدخل بريدك أولاً لإرسال رابط إعادة التعيين.', 'Enter your email first so we can send a reset link.');
+    case 'mismatch': return t('كلمتا المرور غير متطابقتين.', 'The two passwords do not match.');
+    default: return t('حدث خطأ غير متوقع أثناء تسجيل الدخول.', 'An unexpected sign-in error occurred.');
+  }
 }
 
 export default function Auth({ language = 'ar', onLanguageToggle = () => {}, onLoginSuccess = () => {}, onContinueAsGuest }: Props) {
@@ -55,69 +91,116 @@ export default function Auth({ language = 'ar', onLanguageToggle = () => {}, onL
   // New Email/Password auth states
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [isSignUp, setIsSignUp] = useState(false);
-  const [authError, setAuthError] = useState<string | null>(null);
-  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [forgotMode, setForgotMode] = useState(false);
+  const [recoveryMode, setRecoveryMode] = useState(false);
+  const [authError, setAuthError] = useState<AuthErrorKey | null>(null);
+  const [successKey, setSuccessKey] = useState<'created' | 'reset_sent' | 'password_updated' | null>(null);
+
+  useEffect(() => {
+    const { data } = supabase.auth.onAuthStateChange((event) => {
+      if (event === 'PASSWORD_RECOVERY') {
+        setRecoveryMode(true);
+        setForgotMode(false);
+        setIsSignUp(false);
+        setAuthError(null);
+        setSuccessKey(null);
+      }
+    });
+    return () => {
+      try { data.subscription.unsubscribe(); } catch { /* ignore */ }
+    };
+  }, []);
 
   const handlePasswordSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
     sounds.playClick();
-    
+
+    if (recoveryMode) {
+      if (password.length < 6) {
+        setAuthError('weak');
+        return;
+      }
+      if (password !== confirmPassword) {
+        setAuthError('mismatch');
+        return;
+      }
+      setLoading(true);
+      setLoadingStage(isRtl ? 'جاري حفظ كلمة المرور...' : 'Saving your new password...');
+      setAuthError(null);
+      try {
+        const { error } = await supabase.auth.updateUser({ password });
+        if (error) throw error;
+        setSuccessKey('password_updated');
+        setRecoveryMode(false);
+        setPassword('');
+        setConfirmPassword('');
+        toast.success(isRtl ? 'تم تحديث كلمة المرور. يمكنك تسجيل الدخول الآن.' : 'Password updated. You can sign in now.');
+      } catch (err: any) {
+        setAuthError(classifyAuthError(err));
+      } finally {
+        setLoading(false);
+        setLoadingStage('');
+      }
+      return;
+    }
+
+    if (forgotMode) {
+      if (!email) {
+        setAuthError('reset_need_email');
+        return;
+      }
+      setLoading(true);
+      setLoadingStage(isRtl ? 'جاري إرسال رابط إعادة التعيين...' : 'Sending the reset link...');
+      setAuthError(null);
+      try {
+        const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), {
+          redirectTo: window.location.origin,
+        });
+        if (error) throw error;
+        setSuccessKey('reset_sent');
+        setForgotMode(false);
+      } catch (err: any) {
+        setAuthError(classifyAuthError(err));
+      } finally {
+        setLoading(false);
+        setLoadingStage('');
+      }
+      return;
+    }
+
     if (!email || !password) {
-      const msg = isRtl ? 'يرجى إدخال البريد الإلكتروني وكلمة المرور' : 'Please enter email and password';
-      setAuthError(msg);
-      toast.error(msg);
+      setAuthError('empty');
       return;
     }
 
     setLoading(true);
-    setLoadingStage(
-      isRtl 
-        ? 'جاري تشهير الاتصال الآمن والتحقق من البيانات...' 
-        : 'Initializing secure connection & verifying credentials...'
-    );
+    setLoadingStage(isSignUp
+      ? (isRtl ? 'جاري إنشاء الحساب...' : 'Creating your account...')
+      : (isRtl ? 'جاري تسجيل الدخول...' : 'Signing you in...'));
     setAuthError(null);
-    setSuccessMessage(null);
+    setSuccessKey(null);
 
     try {
       if (isSignUp) {
-        // Sign Up Flow
-        setLoadingStage(
-          isRtl 
-            ? 'جاري تسجيل مستخدم جديد وتهيئة قاعدة البيانات السحابية...' 
-            : 'Creating new user profile and establishing cloud database nodes...'
-        );
         await safeSignUpWithEmail(email, password);
-        const msg = isRtl
-          ? 'تم إنشاء الحساب وآيضاً تهيئته لـ Firestore بنجاح! إذا كان التفعيل مطلوباً، يرجى تفعيل حسابك من بريدك الإلكتروني.'
-          : 'Account created and initialized for Firestore successfully! If email confirmation is enabled, please check your inbox.';
-        setSuccessMessage(msg);
-        toast.success(msg);
+        setSuccessKey('created');
+        toast.success(isRtl
+          ? 'تم إنشاء الحساب. إن كان التأكيد مطلوباً فستصلك رسالة على بريدك.'
+          : 'Account created. If confirmation is required, check your inbox.');
       } else {
-        // Sign In Flow
-        setLoadingStage(
-          isRtl 
-            ? 'جاري استيراد رمز الوصول وفك تشفير الجلسة الدائمة...' 
-            : 'Exchanging security tokens & retrieving persistent session keys...'
-        );
         const u = await safeLoginWithEmail(email, password);
         if (u) {
-          setLoadingStage(
-            isRtl 
-              ? 'تم التحقق بنجاح! جاري توجيهك إلى لوحة التحكم الرئيسية...' 
-              : 'Credentials verified! Redirecting to main dashboard portal...'
-          );
-          toast.success(isRtl ? 'تم تسجيل الدخول بنجاح!' : 'Signed in successfully!');
+          toast.success(isRtl ? 'تم تسجيل الدخول بنجاح.' : 'Signed in successfully.');
           onLoginSuccess(u);
         } else {
-          throw new Error(isRtl ? 'لم يتم العثور على بيانات المستخدم' : 'Could not retrieve user data');
+          throw new Error('Could not retrieve user data');
         }
       }
     } catch (err: any) {
-      console.error('[Auth Error Logged]:', err);
-      const errMsg = friendlyAuthError(err, isRtl);
-      setAuthError(errMsg);
-      toast.error(isRtl ? `خطأ: ${errMsg}` : `Error: ${errMsg}`);
+      setAuthError(classifyAuthError(err));
     } finally {
       setLoading(false);
       setLoadingStage('');
@@ -127,18 +210,12 @@ export default function Auth({ language = 'ar', onLanguageToggle = () => {}, onL
   const handleGoogleSignIn = async () => {
     sounds.playClick();
     setLoading(true);
-    setLoadingStage(isRtl ? 'جاري إعادة توجيهك لمزود Google...' : 'Redirecting to Google for authentication...');
+    setLoadingStage(isRtl ? 'جاري فتح Google...' : 'Opening Google...');
     setAuthError(null);
     try {
-      // The provider redirects back to the app. The FirebaseProvider listener
-      // is the source of truth for the session after the redirect.
       await safeLoginWithGoogle();
-      toast.info(isRtl ? 'جاري استكمال عملية الدخول...' : 'Completing sign-in...');
     } catch (err: any) {
-      console.error('[Auth] Google sign-in error:', err);
-      const errMsg = friendlyAuthError(err, isRtl) || (isRtl ? 'فشل تسجيل الدخول بواسطة Google.' : 'Google authentication failed.');
-      setAuthError(errMsg);
-      toast.error(errMsg);
+      setAuthError(classifyAuthError(err));
     } finally {
       setLoading(false);
       setLoadingStage('');
@@ -147,29 +224,20 @@ export default function Auth({ language = 'ar', onLanguageToggle = () => {}, onL
 
   const handleContinueAsGuest = () => {
     sounds.playClick();
-    setLoading(true);
-    setLoadingStage(
-      isRtl 
-        ? 'جاري توليد رمز ضيف مؤقت للاستهلاك اللحظي...' 
-        : 'Generating simulated local token keys for instant trial...'
-    );
-    
-    setTimeout(() => {
-      safeContinueAsGuest();
-      toast.info(isRtl ? 'جارٍ تشغيل وضع التجربة والمعاينة (بدون حساب)...' : 'Starting local guest preview...');
-      setLoading(false);
-      setLoadingStage('');
-    }, 900);
+    safeContinueAsGuest();
   };
 
   return (
-    <div className="min-h-screen bg-gray-50 flex flex-col items-center justify-center p-4 relative font-sans text-gray-800">
+    <div
+      dir={isRtl ? 'rtl' : 'ltr'}
+      className="min-h-screen bg-gray-50 flex flex-col items-center justify-center p-4 relative font-sans text-gray-800"
+    >
       
       {/* Top Header Panel */}
       <div className="absolute top-6 left-6 right-6 flex justify-between items-center z-10 pointer-events-auto">
         <div className="flex items-center gap-2 select-none">
           <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse animate-duration-1000" />
-          <span className="text-xs font-black text-gray-400 uppercase tracking-widest leading-none">Mastawda'i</span>
+          <span className="text-xs font-black text-gray-400 uppercase tracking-widest leading-none">{APP_NAME_EN}</span>
         </div>
 
         <button
@@ -202,18 +270,9 @@ export default function Auth({ language = 'ar', onLanguageToggle = () => {}, onL
                 <Loader2 size={32} className="animate-spin text-indigo-600 absolute" />
               </div>
               <div className="space-y-1.5 text-center px-4">
-                <span className="text-xs font-black uppercase tracking-widest text-indigo-650 block">
-                  {isRtl ? 'رمز أمان مشفر' : 'Secure Session Claims'}
-                </span>
-                <p className="text-xs text-gray-600 font-bold leading-relaxed min-h-[36px] flex items-center justify-center">
-                  {loadingStage || (isRtl ? 'جاري المصادقة وتبادل المفاتيح بآمان...' : 'Verifying accounts and exchanging security tokens...')}
+                <p className="text-sm text-gray-600 font-semibold leading-relaxed min-h-[36px] flex items-center justify-center">
+                  {loadingStage || (isRtl ? 'يرجى الانتظار...' : 'Please wait...')}
                 </p>
-                <div className="pt-2">
-                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-black font-mono bg-emerald-50 text-emerald-700 leading-none">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping" />
-                    SSL ACTIVE
-                  </span>
-                </div>
               </div>
             </motion.div>
           )}
@@ -226,7 +285,7 @@ export default function Auth({ language = 'ar', onLanguageToggle = () => {}, onL
 
         {/* Welcome titles */}
         <h1 className="text-2xl font-bold text-gray-900 tracking-tight leading-tight">
-          {isRtl ? 'مرحبًا بك في مستودعي' : "Welcome to Mastawda'i"}
+          {isRtl ? `مرحبًا بك في ${appName(true)}` : `Welcome to ${appName(false)}`}
         </h1>
         
         <p className="text-sm text-gray-500 mt-2.5 mb-5 leading-relaxed font-normal">
@@ -237,34 +296,28 @@ export default function Auth({ language = 'ar', onLanguageToggle = () => {}, onL
 
         {/* --- ERROR & SUCCESS CHIPS --- */}
         {authError && (
-          <div className="w-full p-4 mb-5 bg-red-50 border border-red-200 rounded-2xl text-left flex items-start gap-2.5 transition">
+          <div className="w-full p-4 mb-5 bg-red-50 border border-red-200 rounded-2xl text-start flex items-start gap-2.5">
             <AlertTriangle className="text-red-500 shrink-0 mt-0.5" size={16} />
-            <div className="flex-1">
-              <p className="text-xs font-bold text-red-800">
-                {isRtl ? 'خطأ في التحقق:' : 'Authentication Error:'}
-              </p>
-              <p className="text-xs text-red-700 mt-1 break-words font-mono">
-                {authError}
-              </p>
-            </div>
+            <p className="text-xs text-red-800 font-semibold leading-relaxed">
+              {authMessage(authError, isRtl)}
+            </p>
           </div>
         )}
 
-        {successMessage && (
-          <div className="w-full p-4 mb-5 bg-emerald-50 border border-emerald-200 rounded-2xl text-left flex items-start gap-2.5 transition">
+        {successKey && (
+          <div className="w-full p-4 mb-5 bg-emerald-50 border border-emerald-200 rounded-2xl text-start flex items-start gap-2.5">
             <ShieldCheck className="text-emerald-500 shrink-0 mt-0.5" size={16} />
-            <div className="flex-1">
-              <p className="text-xs font-bold text-emerald-800">
-                {isRtl ? 'تم بنجاح:' : 'Success:'}
-              </p>
-              <p className="text-xs text-emerald-700 mt-1 break-words">
-                {successMessage}
-              </p>
-            </div>
+            <p className="text-xs text-emerald-800 font-semibold leading-relaxed">
+              {successKey === 'created'
+                ? (isRtl ? 'تم إنشاء الحساب. إن كان التأكيد مطلوباً فستصلك رسالة على بريدك.' : 'Account created. If confirmation is required, check your inbox.')
+                : successKey === 'reset_sent'
+                  ? authMessage('reset_sent', isRtl)
+                  : (isRtl ? 'تم تحديث كلمة المرور.' : 'Password updated.')}
+            </p>
           </div>
         )}
 
-        {/* Clean Sign-in with Google Button */}
+        {!forgotMode && !recoveryMode && (
         <button
           onClick={handleGoogleSignIn}
           disabled={loading}
@@ -281,44 +334,97 @@ export default function Auth({ language = 'ar', onLanguageToggle = () => {}, onL
             </svg>
           )}
           <span>
-            {loading 
-              ? (isRtl ? 'جاري الاتصال والتحقق...' : 'Connecting securely...') 
-              : (isRtl ? 'التسجيل عبر حساب Google' : 'Sign in with Google')}
+            {loading
+              ? (isRtl ? 'جاري الفتح...' : 'Opening...')
+              : (isRtl ? 'الدخول عبر Google' : 'Continue with Google')}
           </span>
         </button>
+        )}
 
         {/* Email & Password login form */}
         <form onSubmit={handlePasswordSignIn} className="w-full space-y-3">
-          <div className="relative">
-            <span className="absolute inset-y-0 left-4 flex items-center text-gray-400">
-              <Mail size={16} />
-            </span>
-            <input
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder={isRtl ? 'البريد الإلكتروني' : 'Email address'}
-              className="w-full pl-11 pr-4 py-3 bg-white border border-gray-200 hover:border-gray-300 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 rounded-2xl text-sm transition text-gray-800 placeholder-gray-400 outline-none"
-              disabled={loading}
-              required
-            />
-          </div>
+          {!recoveryMode && (
+            <div className="relative">
+              <span className="absolute inset-y-0 start-4 flex items-center text-gray-400">
+                <Mail size={16} />
+              </span>
+              <input
+                type="email"
+                autoComplete="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder={isRtl ? 'البريد الإلكتروني' : 'Email address'}
+                className="w-full ps-11 pe-4 py-3 bg-white border border-gray-200 hover:border-gray-300 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 rounded-2xl text-sm transition text-gray-800 placeholder-gray-400 outline-none"
+                disabled={loading}
+                required
+              />
+            </div>
+          )}
 
-          <div className="relative">
-            <span className="absolute inset-y-0 left-4 flex items-center text-gray-400">
-              <Lock size={16} />
-            </span>
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder={isRtl ? 'كلمة المرور' : 'Password'}
-              className="w-full pl-11 pr-4 py-3 bg-white border border-gray-200 hover:border-gray-300 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 rounded-2xl text-sm transition text-gray-800 placeholder-gray-400 outline-none"
-              disabled={loading}
-              minLength={6}
-              required
-            />
-          </div>
+          {!forgotMode && (
+            <div className="relative">
+              <span className="absolute inset-y-0 start-4 flex items-center text-gray-400">
+                <Lock size={16} />
+              </span>
+              <input
+                type={showPassword ? 'text' : 'password'}
+                autoComplete={isSignUp || recoveryMode ? 'new-password' : 'current-password'}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder={recoveryMode
+                  ? (isRtl ? 'كلمة المرور الجديدة' : 'New password')
+                  : (isRtl ? 'كلمة المرور' : 'Password')}
+                className="w-full ps-11 pe-12 py-3 bg-white border border-gray-200 hover:border-gray-300 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 rounded-2xl text-sm transition text-gray-800 placeholder-gray-400 outline-none"
+                disabled={loading}
+                minLength={6}
+                required={!forgotMode}
+              />
+              <button
+                type="button"
+                onClick={() => setShowPassword((v) => !v)}
+                className="absolute inset-y-0 end-3 flex items-center text-gray-400 hover:text-gray-600 cursor-pointer"
+                title={showPassword ? (isRtl ? 'إخفاء' : 'Hide') : (isRtl ? 'إظهار' : 'Show')}
+              >
+                {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+              </button>
+            </div>
+          )}
+
+          {recoveryMode && (
+            <div className="relative">
+              <span className="absolute inset-y-0 start-4 flex items-center text-gray-400">
+                <Lock size={16} />
+              </span>
+              <input
+                type={showPassword ? 'text' : 'password'}
+                autoComplete="new-password"
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                placeholder={isRtl ? 'تأكيد كلمة المرور' : 'Confirm password'}
+                className="w-full ps-11 pe-4 py-3 bg-white border border-gray-200 hover:border-gray-300 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 rounded-2xl text-sm transition text-gray-800 placeholder-gray-400 outline-none"
+                disabled={loading}
+                minLength={6}
+                required
+              />
+            </div>
+          )}
+
+          {!isSignUp && !forgotMode && !recoveryMode && (
+            <div className="text-end">
+              <button
+                type="button"
+                onClick={() => {
+                  sounds.playClick();
+                  setForgotMode(true);
+                  setAuthError(null);
+                  setSuccessKey(null);
+                }}
+                className="text-xs font-semibold text-indigo-600 hover:underline cursor-pointer"
+              >
+                {isRtl ? 'نسيت كلمة المرور؟' : 'Forgot password?'}
+              </button>
+            </div>
+          )}
 
           <button
             type="submit"
@@ -327,50 +433,69 @@ export default function Auth({ language = 'ar', onLanguageToggle = () => {}, onL
           >
             {loading && <Loader2 size={16} className="animate-spin text-white" />}
             <span>
-              {isSignUp 
-                ? (isRtl ? 'إنشاء حساب جديد' : 'Create New Account') 
-                : (isRtl ? 'تسجيل الدخول' : 'Sign In')}
+              {recoveryMode
+                ? (isRtl ? 'حفظ كلمة المرور' : 'Save new password')
+                : forgotMode
+                  ? (isRtl ? 'إرسال رابط إعادة التعيين' : 'Send reset link')
+                  : isSignUp
+                    ? (isRtl ? 'إنشاء حساب' : 'Create account')
+                    : (isRtl ? 'تسجيل الدخول' : 'Sign in')}
             </span>
           </button>
         </form>
 
         {/* Toggle between SignIn and SignUp */}
         <div className="mt-4 text-xs font-semibold text-gray-500">
-          <span>{isSignUp ? (isRtl ? 'لديك حساب بالفعل؟' : 'Already have an account?') : (isRtl ? 'ليس لديك حساب؟' : "Don't have an account?")} </span>
+          <span>
+            {forgotMode || recoveryMode
+              ? (isRtl ? 'تذكّرت كلمة المرور؟' : 'Remembered your password?')
+              : isSignUp
+                ? (isRtl ? 'لديك حساب بالفعل؟' : 'Already have an account?')
+                : (isRtl ? 'ليس لديك حساب؟' : "Don't have an account?")}
+            {' '}
+          </span>
           <button
             type="button"
             onClick={() => {
               sounds.playClick();
-              setIsSignUp(!isSignUp);
+              if (forgotMode || recoveryMode) {
+                setForgotMode(false);
+                setRecoveryMode(false);
+                setIsSignUp(false);
+              } else {
+                setIsSignUp(!isSignUp);
+              }
               setAuthError(null);
-              setSuccessMessage(null);
+              setSuccessKey(null);
             }}
             className="text-indigo-605 hover:text-indigo-700 hover:underline transition font-bold focus:outline-none cursor-pointer"
           >
-            {isSignUp ? (isRtl ? 'سجل دخولك الآن' : 'Sign In now') : (isRtl ? 'أنشئ حساباً جديداً' : 'Sign Up now')}
+            {forgotMode || recoveryMode
+              ? (isRtl ? 'العودة لتسجيل الدخول' : 'Back to sign in')
+              : isSignUp
+                ? (isRtl ? 'سجّل دخولك' : 'Sign in')
+                : (isRtl ? 'أنشئ حساباً' : 'Create an account')}
           </button>
         </div>
 
-        {/* Continue as Guest Button */}
+        {!forgotMode && !recoveryMode && (
         <div className="mt-4 w-full flex flex-col items-center gap-1">
           <div className="w-full h-[1px] bg-gray-100 my-1" />
           <button
             type="button"
             onClick={handleContinueAsGuest}
-            className="w-full py-3 border border-dashed border-gray-305 hover:border-indigo-400 bg-white hover:bg-indigo-50/10 text-indigo-605 hover:text-indigo-700 rounded-2xl text-xs sm:text-sm font-bold transition flex items-center justify-center gap-1.5 cursor-pointer shadow-xs active:scale-[0.98]"
+            className="w-full py-3 border border-dashed border-gray-300 hover:border-indigo-400 bg-white hover:bg-indigo-50/10 text-indigo-600 hover:text-indigo-700 rounded-2xl text-xs sm:text-sm font-bold transition flex items-center justify-center gap-1.5 cursor-pointer shadow-xs active:scale-[0.98]"
           >
-            <span>⚡ {isRtl ? 'الاستمرار كضيف لتجربة النظام الفورية' : 'Continue as Guest for Instant Trial'}</span>
+            <span>{isRtl ? 'تجربة سريعة بدون حساب' : 'Try without an account'}</span>
           </button>
         </div>
+        )}
 
-        {/* 25-Day Trial & Subscription Promotional Badge */}
-        <div className="mt-5 w-full p-3.5 rounded-2xl bg-slate-900 border border-slate-850 text-center shadow-xs">
-          <p className="text-xs sm:text-sm text-slate-100 font-medium leading-relaxed">
-            {isRtl 
-              ? 'مستودعي تمنحك ٢٥ يوماً للتجربة المجانية — اشتراك السنة الأولى بقيمة ١٠٠$ فقط.' 
-              : '25-day free trial — First year subscription is only $100.'}
-          </p>
-        </div>
+        <p className="mt-5 text-[11px] text-gray-400 font-medium leading-relaxed">
+          {isRtl
+            ? 'الحساب الجديد يحصل على 25 يوماً تجربة مجانية. تفاصيل الاشتراك من الإعدادات بعد الدخول.'
+            : 'New accounts include a 25-day free trial. Subscription details are in Settings after you sign in.'}
+        </p>
 
 
         {/* Minimalist Footnotes */}
@@ -425,7 +550,7 @@ export default function Auth({ language = 'ar', onLanguageToggle = () => {}, onL
                     <ShieldCheck size={18} />
                   </div>
                   <h3 className="text-base font-bold text-gray-900">
-                    {isRtl ? "سياسة الخصوصية لـ مستودعي" : "Privacy Policy for Mastawda'i"}
+                    {isRtl ? "سياسة الخصوصية لـ مستودعي" : "Privacy Policy for Mostawdaee"}
                   </h3>
                 </div>
                 <button
@@ -544,7 +669,7 @@ export default function Auth({ language = 'ar', onLanguageToggle = () => {}, onL
                     <FileText size={18} />
                   </div>
                   <h3 className="text-base font-bold text-gray-900">
-                    {isRtl ? "شروط الخدمة لـ مستودعي" : "Terms of Service for Mastawda'i"}
+                    {isRtl ? "شروط الخدمة لـ مستودعي" : "Terms of Service for Mostawdaee"}
                   </h3>
                 </div>
                 <button
@@ -571,7 +696,7 @@ export default function Auth({ language = 'ar', onLanguageToggle = () => {}, onL
                   <p className="ps-3.5 text-gray-600">
                     {isRtl 
                       ? "باستخدامك لتطبيق مستودعي، فإنك توافق على الالتزام بشروط الخدمة هذه وجميع القوانين واللوائح المعمول بها."
-                      : "By using the Mastawda'i application, you agree to comply with and be bound by these Terms of Service and all applicable laws and regulations."}
+                      : "By using the Mostawdaee application, you agree to comply with and be bound by these Terms of Service and all applicable laws and regulations."}
                   </p>
                 </div>
 
@@ -641,7 +766,7 @@ export default function Auth({ language = 'ar', onLanguageToggle = () => {}, onL
               {/* Header */}
               <div className="px-6 py-5 border-b border-gray-100 flex items-center justify-between">
                 <div className="flex items-center gap-2.5">
-                  <div className="p-2 bg-amber-50 text-amber-600 rounded-xl animate-pulse">
+                  <div className="p-2 bg-amber-50 text-amber-600 rounded-xl">
                     <AlertTriangle size={18} />
                   </div>
                   <h3 className="text-base font-bold text-gray-900">
@@ -665,7 +790,7 @@ export default function Auth({ language = 'ar', onLanguageToggle = () => {}, onL
                 {/* Section 1 */}
                 <div className="space-y-2">
                   <div className="flex items-center gap-2 text-gray-900 font-bold text-sm">
-                    <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-ping shrink-0" />
+                    <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" />
                     <h4>
                       {isRtl ? "أخطاء المستخدم وقلة المعرفة" : "User Errors and Lack of Knowledge"}
                     </h4>
@@ -673,14 +798,14 @@ export default function Auth({ language = 'ar', onLanguageToggle = () => {}, onL
                   <p className="ps-3.5 text-gray-600 text-justify text-xs sm:text-sm">
                     {isRtl 
                       ? 'إن تطبيق "مستودعي" هو أداة تقنية مصممة لتسهيل إدارة المستودعات والعمليات المحاسبية. يتحمل المستخدم المسؤولية الكاملة والمطلقة عن صحة ودقة البيانات والمعلومات التي يتم إدخالها، وعن أي أخطاء أو أضرار تنتج عن الاستخدام غير الصحيح للتطبيق أو ناجمة عن عدم المعرفة والدراية الكافية بكيفية تشغيل النظام وإدارته. لا تتحمل إدارة التطبيق أو المطور أي مسؤولية قانونية أو مالية تجاه أي خسائر مالية، أو تلف في البيانات، أو اختلافات محاسبية ناتجة عن هذه القرارات أو الإجراءات.'
-                      : '"Mastawda\'i" is a technical tool designed to assist with warehouse and accounting management. The user bears full responsibility for the accuracy of the entered data and for any errors resulting from the incorrect use of the application or a lack of knowledge/familiarity with how to operate the system. The application management/developer shall not be held liable for any financial losses, data corruption, or accounting discrepancies resulting from such actions.'}
+                      : '"Mostawdaee" is a technical tool designed to assist with warehouse and accounting management. The user bears full responsibility for the accuracy of the entered data and for any errors resulting from the incorrect use of the application or a lack of knowledge/familiarity with how to operate the system. The application management/developer shall not be held liable for any financial losses, data corruption, or accounting discrepancies resulting from such actions.'}
                   </p>
                 </div>
 
                 {/* Section 2 */}
                 <div className="space-y-2">
                   <div className="flex items-center gap-2 text-gray-900 font-bold text-sm">
-                    <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-ping shrink-0" />
+                    <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" />
                     <h4>
                       {isRtl ? "إساءة استخدام التطبيق" : "Misuse of the Application"}
                     </h4>
@@ -695,7 +820,7 @@ export default function Auth({ language = 'ar', onLanguageToggle = () => {}, onL
                 {/* Section 3 */}
                 <div className="space-y-2">
                   <div className="flex items-center gap-2 text-gray-900 font-bold text-sm">
-                    <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-ping shrink-0" />
+                    <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" />
                     <h4>
                       {isRtl ? "مقدم \"كما هو\"" : 'Provided "As Is"'}
                     </h4>

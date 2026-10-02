@@ -368,7 +368,7 @@ export default function SubscriptionExpired({
             <div className="p-6 bg-gradient-to-br from-indigo-900 via-slate-950 to-blue-900 rounded-3xl border border-indigo-500/20 shadow-xl relative overflow-hidden text-white font-mono aspect-[1.58/1] flex flex-col justify-between">
               <div className="flex justify-between items-start">
                 <div className="space-y-1">
-                  <span className="text-[9px] uppercase font-bold tracking-widest text-slate-400 leading-none">Mastawdaee Premium</span>
+                  <span className="text-[9px] uppercase font-bold tracking-widest text-slate-400 leading-none">Mostawdaee Premium</span>
                   <div className="flex items-center gap-1.5 mt-1">
                     <Sparkles size={11} className="text-amber-400 animate-pulse" />
                     <span className="text-[10px] uppercase font-black tracking-widest text-indigo-350 bg-indigo-500/20 px-1.5 py-0.5 rounded leading-none">Yearly Plan</span>

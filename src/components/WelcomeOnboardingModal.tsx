@@ -29,7 +29,7 @@ export default function WelcomeOnboardingModal({ isOpen, onClose, language }: Pr
   const [loading, setLoading] = useState(false);
 
   const t = {
-    modalTitle: isRtl ? 'أهلاً بك في مستودعي - Mastawda\'i' : 'Welcome to Mastawda\'i',
+    modalTitle: isRtl ? 'أهلاً بك في مستودعي' : 'Welcome to Mostawdaee',
     modalSubtitle: isRtl 
       ? 'دعنا نأخذك في جولة سريعة من 3 خطوات لبدء تهيئة وإدارة مخزونك المالي والمخزني المتكامل.' 
       : 'Let\'s take a brief 3-step tour to set up your comprehensive financial ledger and live inventory pipeline.',
@@ -71,7 +71,7 @@ export default function WelcomeOnboardingModal({ isOpen, onClose, language }: Pr
     } catch (err: any) {
       console.error("Failed to persist user onboarding status in Supabase:", err);
       // Fallback close if profile table write has minor restriction or policy issues
-      toast.success(isRtl ? 'أهلاً بك بك في مستودعي!' : 'Welcome to Mastawda\'i!');
+      toast.success(isRtl ? 'أهلاً بك في مستودعي!' : 'Welcome to Mostawdaee!');
       onClose();
     } finally {
       setLoading(false);

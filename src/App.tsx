@@ -249,6 +249,18 @@ export default function App() {
     }
   }, [settings?.defaultLanguage]);
 
+  // Must run on the login screen too (the same assignment used to sit after the auth early-return).
+  useEffect(() => {
+    const rtl = language === 'ar';
+    document.documentElement.dir = rtl ? 'rtl' : 'ltr';
+    document.documentElement.lang = language;
+    document.documentElement.classList.toggle('font-arabic', rtl);
+    document.documentElement.classList.toggle('font-sans', !rtl);
+    document.title = rtl
+      ? 'مستودعي — إدارة المنتجات والمحاسبة'
+      : 'Mostawdaee — Inventory and accounting';
+  }, [language]);
+
   // Sync Sidebar active class with state reactivity (aligns with .app-sidebar.active and user custom CSS styling)
   useEffect(() => {
     const sidebar = document.getElementById("appSidebar") || document.getElementById("sidebar");
@@ -469,7 +481,7 @@ const handleSignOut = async () => {
   if (!user && !isGuestModeActive) {
     return (
       <AuthContext.Provider value={authContextValue}>
-        <Login 
+        <Login
           language={language}
           onLanguageToggle={toggleLanguage}
           onLoginSuccess={() => setIsGuestModeActive(false)}
@@ -709,12 +721,7 @@ const handleSignOut = async () => {
   };
 
   const resolvedUserName = settings?.userName || user?.displayName || user?.email?.split('@')[0] || (isGuestModeActive || user?.isAnonymous ? (isRtl ? 'زائر تجريبي' : 'Visitor') : '');
-  const resolvedBusinessName = settings?.businessName || (isRtl ? 'مستودعي' : 'My Store');
-
-  // Apply visual RTL/LTR attributes dynamically
-  document.documentElement.dir = isRtl ? 'rtl' : 'ltr';
-  document.documentElement.classList.toggle('font-arabic', isRtl);
-  document.documentElement.classList.toggle('font-sans', !isRtl);
+  const resolvedBusinessName = settings?.businessName || (isRtl ? 'مستودعي' : 'Mostawdaee');
 
   // Unified desktop responsive layout: sidebar is a beautiful sliding overlay so no structural margin offsets are needed, maximizing viewport coverage
   const sidebarOffsetStyle = undefined;
