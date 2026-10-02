@@ -1,0 +1,1812 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Cairo:wght@400;500;600;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-arabic: "Cairo", sans-serif;
+  
+  --animate-gradient-slow: gradient-slow 8s linear infinite;
+  --animate-ping-slow: ping-slow 3s cubic-bezier(0, 0, 0.2, 1) infinite;
+
+  @keyframes gradient-slow {
+    0% { background-position: 0% 50%; }
+    50% { background-position: 100% 50%; }
+    100% { background-position: 0% 50%; }
+  }
+
+  @keyframes ping-slow {
+    75%, 100% {
+      transform: scale(2);
+      opacity: 0;
+    }
+  }
+
+  @keyframes success-pulse {
+    0% { transform: scale(1); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.4); }
+    50% { transform: scale(1.01); box-shadow: 0 0 0 15px rgba(16, 185, 129, 0); }
+    100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+  }
+}
+
+/* Base tailwind v4 dark mode configuration */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* تهيئة نظام الألوان للوضع الفاتح والداكن بما يتوافق مع إعدادات التصميم */
+body, html {
+  margin: 0;
+  padding: 0;
+  background-color: #ffffff; /* الخلفية البيضاء للتطبيق (scaffoldBackgroundColor: Colors.white) */
+  color: #1a1a1a; /* النص الأساسي غامق مريح (bodyLarge: #1a1a1a) */
+  font-size: 16px; /* حجم الخط الأساسي 16px */
+  font-family: 'Cairo', sans-serif;
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+/* تفعيل الوضع الداكن */
+:root.dark body, :root.dark html {
+  background-color: #05060a; /* أسود عميق جداً مريح للعين */
+  color: #ffffff;
+}
+
+/* فئات نصوص موحدة للتطبيق بالكامل تشبه Flutter TextTheme */
+.body-large {
+  color: #1a1a1a;
+  font-size: 16px;
+}
+:root.dark .body-large {
+  color: #ffffff;
+}
+
+.body-medium {
+  color: #555555;
+  font-size: 14px;
+}
+:root.dark .body-medium {
+  color: #cbd5e1;
+}
+
+/* 1. حقن البيئة ثلاثية الأبعاد في حاوية التطبيق الكلية */
+#root, .app-container {
+  perspective: 1200px; /* يعطي عمقاً ومسافة حقيقية للمتصفح */
+  min-height: 100vh;
+  width: 100%;
+  max-width: 100vw;
+  overflow-x: hidden;
+}
+
+[dir="rtl"] {
+  font-family: var(--font-arabic);
+}
+
+/* Premium micro-interactions */
+.premium-card {
+  @apply transition-all duration-500 hover:shadow-[0_20px_50px_-12px_rgba(79,70,229,0.1)] hover:-translate-y-1.5 active:scale-[0.99] rounded-[2rem];
+}
+
+.premium-button {
+  @apply transition-all duration-300 active:scale-95 disabled:opacity-50 disabled:active:scale-100 font-bold tracking-tight rounded-2xl;
+}
+
+.soft-shadow {
+  box-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.05);
+}
+
+.soft-glow {
+  box-shadow: 0 0 40px -10px rgba(79, 70, 229, 0.15);
+}
+
+.glass-panel {
+  @apply bg-white/80 backdrop-blur-md border border-white/20;
+}
+
+.animate-success-glow {
+  animation: success-pulse 0.8s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+/* Custom Scrollbar for modern look */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-gray-200 hover:bg-gray-300 rounded-full transition-colors;
+}
+
+/* Print Styles optimization for clean formal A4 invoice PDFs */
+@media print {
+  /* Hide UI elements */
+  header,
+  nav,
+  aside,
+  button,
+  footer:not(.invoice-print-footer),
+  .fixed,
+  .action-bar,
+  #floating-calculator,
+  .quick-search,
+  .bg-gradient-to-r,
+  .no-print {
+    display: none !important;
+  }
+
+  body {
+    background-color: #ffffff !important;
+    color: #000000 !important;
+    font-size: 12pt !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+
+  /* Invoice Container printable fit */
+  .invoice-print {
+    box-shadow: none !important;
+    border: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    background-color: #ffffff !important;
+    color: #000000 !important;
+    max-width: 100% !important;
+    width: 100% !important;
+    height: auto !important;
+    position: absolute !important;
+    left: 0 !important;
+    top: 0 !important;
+    border-radius: 0 !important;
+  }
+
+  /* Make sure printing in black/white or high contrast color is clean */
+  * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+}
+
+/* 1. Crystal-like glass icon base pod */
+.icon-base {
+  width: 44px;
+  height: 44px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 12px;
+  backdrop-filter: blur(15px);
+  -webkit-backdrop-filter: blur(15px);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 
+    inset 2px 2px 5px rgba(255, 255, 255, 0.15),
+    4px 4px 15px rgba(0, 0, 0, 0.35);
+  transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+  will-change: transform, opacity;
+
+  /* Idle transparent / dimmed scale-down state */
+  opacity: 0.35;
+  transform: scale(0.95);
+  filter: grayscale(0.5) blur(0.5px);
+}
+
+/* 2. 3D Glowing Neon Symbol */
+.glowing-symbol {
+  color: #00f2fe;
+  filter: 
+    drop-shadow(0 0 2px rgba(0, 242, 254, 1))
+    drop-shadow(0 0 8px rgba(0, 242, 254, 0.7))
+    drop-shadow(2px 2px 1.5px rgba(0, 0, 0, 0.75));
+  transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+
+/* 3. 3D Glowing Text beside icon */
+.glowing-text {
+  font-family: 'Cairo', sans-serif;
+  font-weight: 500;
+  color: #e2e8f0;
+  letter-spacing: 0.5px;
+  text-shadow: 
+    1px 1px 2px rgba(0, 0, 0, 0.8),
+    0 0 8px rgba(0, 242, 254, 0.25);
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Active & Hover styling for the items */
+/* When active, the icon should be fully lit up & stable */
+.sidebar-item-active .icon-base {
+  opacity: 1;
+  transform: scale(1.1) rotateZ(3deg);
+  filter: grayscale(0) drop-shadow(0 0 15px rgba(0, 242, 254, 0.8));
+  background: rgba(255, 255, 255, 0.1);
+  border-width: 1px;
+  border-color: rgba(255, 255, 255, 0.35);
+  box-shadow: 
+    0 10px 20px rgba(0, 0, 0, 0.4), 
+    inset 0 0 10px rgba(255, 255, 255, 0.2);
+}
+
+.sidebar-item-active .glowing-symbol {
+  color: #ffffff;
+  filter: 
+    drop-shadow(0 0 4px #ffffff)
+    drop-shadow(0 0 12px rgba(0, 242, 254, 1))
+    drop-shadow(0 0 24px rgba(0, 242, 254, 0.85))
+    drop-shadow(3px 3px 2px rgba(0, 0, 0, 0.9));
+}
+
+.sidebar-item-active .glowing-text {
+  color: #ffffff;
+  text-shadow: 
+    1px 1px 3px rgba(0, 0, 0, 0.9),
+    0 0 12px rgba(0, 242, 254, 0.45);
+}
+
+/* On hover/interactive/touch-active of items */
+.sidebar-item-glowing:hover .icon-base,
+.sidebar-item-glowing:active .icon-base,
+.sidebar-item-glowing.active-touch .icon-base {
+  opacity: 1;
+  transform: scale(1.15) rotateZ(5deg);
+  filter: grayscale(0) drop-shadow(0 0 15px rgba(0, 242, 254, 0.8));
+  
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.4);
+  box-shadow: 
+    0 10px 20px rgba(0, 0, 0, 0.4), 
+    inset 0 0 10px rgba(255, 255, 255, 0.2);
+}
+
+.sidebar-item-glowing:hover .glowing-symbol,
+.sidebar-item-glowing:active .glowing-symbol,
+.sidebar-item-glowing.active-touch .glowing-symbol {
+  color: #ffffff;
+  filter: 
+    drop-shadow(0 0 4px #ffffff)
+    drop-shadow(0 0 12px rgba(0, 242, 254, 1))
+    drop-shadow(0 0 24px rgba(0, 242, 254, 0.85))
+    drop-shadow(3px 3px 2px rgba(0, 0, 0, 0.9));
+}
+
+.sidebar-item-glowing:hover .glowing-text,
+.sidebar-item-glowing:active .glowing-text,
+.sidebar-item-glowing.active-touch .glowing-text {
+  color: #ffffff;
+  text-shadow: 
+    1px 1px 3px rgba(0, 0, 0, 0.9),
+    0 0 12px rgba(0, 242, 254, 0.45);
+}
+
+/* Command Center and Bento Card Layout */
+.command-center {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 20px;
+  padding: 20px;
+}
+
+/* 2. تحويل كافة بطاقات الـ Bento والأزرار إلى كتل بلورية خاملة وشفافة */
+.glass-card, .bento-card, .quick-action-btn, .kpi-card {
+  background: rgba(255, 255, 255, 0.01) !important; /* شفافية بلورية شبه كاملة لمنع تشتيت العين */
+  backdrop-filter: blur(15px);
+  -webkit-backdrop-filter: blur(15px);
+  border: 1px solid rgba(255, 255, 255, 0.04) !important;
+  border-radius: 20px;
+  opacity: 0.4; /* حالة خمول مريحة جداً للعين أثناء السكون */
+  transform-style: preserve-3d; /* إجبار العناصر الداخلية على التحرك في أبعاد 3D */
+  transform: translateZ(0) scale(0.99);
+  
+  /* أنيميشن انسيابي فائق النعومة يعتمد على كرت الشاشة (GPU) مباشرة */
+  transition: 
+    transform 0.5s cubic-bezier(0.25, 1, 0.5, 1), 
+    box-shadow 0.5s cubic-bezier(0.25, 1, 0.5, 1), 
+    border-color 0.4s ease, 
+    opacity 0.4s ease !important;
+}
+
+/* 3. تأثير الانفجار البصري والبروز ثلاثي الأبعاد الموحد عند التفاعل (Hover / Touch) */
+.glass-card:hover, .bento-card:hover, .quick-action-btn:hover, .kpi-card:hover,
+.glass-card:active, .bento-card:active, .quick-action-btn:active, .kpi-card:active {
+  opacity: 1; /* إضاءة وظهور كامل للتأكيد البصري */
+  background: rgba(255, 255, 255, 0.04) !important;
+  
+  /* اندفاع للأمام في المحور Z وميلان خفيف فخم للغاية */
+  transform: translateZ(30px) rotateX(2deg) rotateY(-2deg) scale(1.02);
+  
+  /* ظل نيون هادئ وعميق يعطي إحساساً بأن البطاقة تطفو في الهواء */
+  box-shadow: 
+    0 20px 45px rgba(0, 0, 0, 0.6),
+    0 0 25px rgba(255, 255, 255, 0.03);
+}
+
+.bento-card {
+  padding: 20px;
+}
+
+/* حاوية الإجراءات السريعة داخل الـ Bento Box */
+.quick-actions-container {
+  background: rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(15px);
+  border-radius: 20px;
+  padding: 24px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.section-title {
+  color: #e2e8f0;
+  margin-bottom: 20px;
+  font-family: 'Cairo', sans-serif;
+}
+
+/* شبكة الأزرار */
+.actions-grid {
+  display: flex;
+  gap: 15px;
+  flex-wrap: wrap; /* للتجاوب مع شاشات الجوال */
+}
+
+/* تصميم الزر الزجاجي */
+.glass-btn {
+  flex: 1;
+  min-width: 120px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 15px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 16px;
+  cursor: pointer;
+  /* تأثير خامل وشفاف في البداية كما اتفقنا */
+  opacity: 0.6;
+  transition: all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+
+/* التفاعل عند الماوس أو اللمس */
+.glass-btn:hover,
+.glass-btn:active {
+  opacity: 1;
+  transform: translateY(-5px) scale(1.05); /* بروز للأعلى */
+  box-shadow: 
+    0 10px 20px rgba(0, 0, 0, 0.4), 
+    inset 0 0 10px rgba(0, 242, 254, 0.2);
+  border-color: rgba(0, 242, 254, 0.5); /* إطار فسفوري خفيف */
+}
+
+/* الرمز والنص (نفس التأثيرات الهادئة التي اعتمدناها) */
+.glowing-symbol {
+  font-size: 2rem;
+  filter: drop-shadow(0 0 8px rgba(0, 242, 254, 0.6));
+}
+
+.glowing-text {
+  color: #e2e8f0;
+  font-weight: 600;
+  font-family: 'Cairo', sans-serif;
+  text-shadow: 1px 1px 2px rgba(0,0,0,0.8);
+}
+
+.glass-btn:hover .glowing-text {
+  color: #fff;
+  text-shadow: 0 0 8px rgba(0, 242, 254, 0.5);
+}
+
+/* رادار النواقص اللحظي - Live Low Stock Radar */
+.radar-container {
+  background: rgba(255, 255, 255, 0.02);
+  backdrop-filter: blur(15px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 20px;
+  padding: 24px;
+}
+
+.radar-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+/* النقطة اللّي بتنبض مثل الرادار */
+.radar-pulse-dot {
+  width: 10px;
+  height: 10px;
+  background-color: #ff4757;
+  border-radius: 50%;
+  box-shadow: 0 0 0 0 rgba(255, 71, 87, 0.7);
+  animation: pulse 1.6s infinite;
+}
+
+@keyframes pulse {
+  0% {
+    transform: scale(0.95);
+    box-shadow: 0 0 0 0 rgba(255, 71, 87, 0.7);
+  }
+  70% {
+    transform: scale(1);
+    box-shadow: 0 0 0 10px rgba(255, 71, 87, 0);
+  }
+  100% {
+    transform: scale(0.95);
+    box-shadow: 0 0 0 0 rgba(255, 71, 87, 0);
+  }
+}
+
+/* قائمة العناصر المخفضة */
+.radar-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* البطاقة المتوهجة تحذيرياً */
+.radar-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 14px 20px;
+  background: rgba(255, 71, 87, 0.03); /* خلفية حمراء خفيفة جداً */
+  border: 1px solid rgba(255, 71, 87, 0.2);
+  border-radius: 12px;
+  transition: all 0.3s ease;
+}
+
+/* تأثير التوهج التحذيري الهادئ والمريح للعين في نفس الوقت */
+.warning-glow {
+  box-shadow: 
+    0 4px 15px rgba(0, 0, 0, 0.2),
+    inset 0 0 8px rgba(255, 71, 87, 0.15);
+}
+
+/* عند تمرير الماوس يزيد التوهج والبروز */
+.radar-item:hover {
+  background: rgba(255, 71, 87, 0.08);
+  border-color: rgba(255, 71, 87, 0.6);
+  transform: translateX(-5px); /* إزاحة خفيفة لليمين/اليسار حسب لغة الواجهة */
+  box-shadow: 
+    0 4px 20px rgba(255, 71, 87, 0.3),
+    inset 0 0 12px rgba(255, 71, 87, 0.3);
+}
+
+/* نصوص العناصر داخل الرادار */
+.item-name {
+  display: block;
+  color: #f1f2f6;
+  font-weight: 600;
+  font-size: 1.05rem;
+}
+
+.item-sku {
+  font-size: 0.8rem;
+  color: #a4b0be;
+}
+
+.item-stock-status {
+  text-align: center;
+}
+
+.stock-count {
+  display: block;
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: #ff4757; /* رقم النواقص مشع بلون تحذيري */
+  text-shadow: 0 0 10px rgba(255, 71, 87, 0.5);
+}
+
+.stock-label {
+  font-size: 0.75rem;
+  color: #a4b0be;
+}
+
+/* التحليلات والتنبؤ الذكي - Predictive Analytics */
+.analytics-container {
+  background: rgba(255, 255, 255, 0.03);
+  backdrop-filter: blur(15px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 20px;
+  padding: 24px;
+  min-width: 0;
+  width: 100%;
+}
+
+.analytics-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+/* شارة الـ AI المتوهجة */
+.ai-badge {
+  background: linear-gradient(135deg, #7f00ff, #00f2fe);
+  color: white;
+  font-size: 0.75rem;
+  font-weight: bold;
+  padding: 4px 10px;
+  border-radius: 20px;
+  box-shadow: 0 0 10px rgba(0, 242, 254, 0.4);
+}
+
+/* نص التحليل والمحتوى العلمي */
+.prediction-insight-text {
+  color: #ced6e0;
+  font-size: 0.9rem;
+  font-family: 'Cairo', sans-serif;
+  line-height: 1.5;
+  margin-bottom: 20px;
+  padding-inline-start: 8px;
+  border-inline-start: 3px solid #7f00ff; /* خط مميز من الجانب */
+}
+
+/* حاوية الرسم البياني لضمان عدم الخروج من الـ Bento Box */
+.chart-wrapper {
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 14px;
+  padding: 15px 10px 5px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.03);
+}
+
+/* مؤشرات الأداء الرئيسي - KPI Cards */
+/* شبكة البطاقات العلوية */
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 16px;
+  margin-bottom: 24px;
+  width: 100%;
+}
+
+.kpi-loading {
+  font-family: 'Cairo', sans-serif;
+  color: #a4b0be;
+  text-align: center;
+  padding: 20px;
+  font-weight: bold;
+}
+
+/* التنسيق الزجاجي المشترك للبطاقات */
+.kpi-card {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 20px;
+}
+
+/* أيقونات البطاقات */
+.kpi-icon {
+  font-size: 2rem;
+  background: rgba(255, 255, 255, 0.05);
+  padding: 10px;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* محتوى البطاقة */
+.kpi-content {
+  display: flex;
+  flex-direction: column;
+  flex-grow: 1;
+}
+
+.kpi-title {
+  color: #a4b0be;
+  font-size: 0.85rem;
+  font-family: 'Cairo', sans-serif;
+  margin-bottom: 4px;
+}
+
+.kpi-value {
+  color: #ffffff;
+  font-size: 1.5rem;
+  font-weight: 700;
+  margin: 0;
+  font-family: 'Poppins', 'Cairo', sans-serif;
+}
+
+/* سر التوهج الملون لكل بطاقة حسب تخصصها */
+.blue-glow:hover { box-shadow: 0 8px 25px rgba(0, 148, 255, 0.25); border-color: rgba(0, 148, 255, 0.4); }
+.green-glow:hover { box-shadow: 0 8px 25px rgba(46, 213, 115, 0.25); border-color: rgba(46, 213, 115, 0.4); }
+.purple-glow:hover { box-shadow: 0 8px 25px rgba(112, 111, 211, 0.25); border-color: rgba(112, 111, 211, 0.4); }
+.orange-glow:hover { box-shadow: 0 8px 25px rgba(255, 127, 80, 0.25); border-color: rgba(255, 127, 80, 0.4); }
+
+/* شريط التقدم للبطاقة الإشغالية */
+.progress-bar-bg {
+  width: 100%;
+  height: 6px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  margin-top: 8px;
+  overflow: hidden;
+}
+
+.progress-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #ff7f50, #ff4757);
+  border-radius: 4px;
+  box-shadow: 0 0 8px rgba(255, 127, 80, 0.6);
+  transition: width 0.5s ease-in-out;
+}
+
+/* Light theme overrides for KPIs if the app uses light mode */
+:root:not(.dark) .kpi-card {
+  background: rgba(255, 255, 255, 0.7);
+  border-color: rgba(99, 102, 241, 0.15);
+}
+:root:not(.dark) .kpi-value {
+  color: #1e293b;
+}
+:root:not(.dark) .kpi-title {
+  color: #64748b;
+}
+:root:not(.dark) .kpi-icon {
+  background: rgba(0, 0, 0, 0.03);
+}
+:root:not(.dark) .progress-bar-bg {
+  background: rgba(0, 0, 0, 0.08);
+}
+
+/* سجل العمليات اللحظية - Activity Log styles */
+/* حاوية السجل الكلية */
+.log-container {
+  background: rgba(255, 255, 255, 0.02);
+  backdrop-filter: blur(15px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 20px;
+  padding: 24px;
+}
+
+.log-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+}
+
+/* شارة البث المباشر للجدول */
+.live-badge {
+  background: rgba(0, 242, 254, 0.1);
+  color: #00f2fe;
+  border: 1px solid rgba(0, 242, 254, 0.3);
+  font-size: 0.75rem;
+  padding: 3px 12px;
+  border-radius: 20px;
+  text-shadow: 0 0 5px rgba(0, 242, 254, 0.5);
+}
+
+.log-table-wrapper {
+  margin-top: 10px;
+}
+
+.no-activity {
+  color: #a4b0be;
+  font-size: 0.9rem;
+  text-align: center;
+  padding: 20px 0;
+}
+
+.log-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* تصميم السطر البلوري */
+.log-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 18px;
+  background: rgba(255, 255, 255, 0.01);
+  border: 1px solid rgba(255, 255, 255, 0.04);
+  border-radius: 12px;
+  transition: all 0.3s ease;
+}
+
+/* التوهج الجانبي للأخضر (الإدخال) */
+.in-glow {
+  border-right: 4px solid #2ed573; /* خط فوسفوري يمين السطر */
+  box-shadow: inset 5px 0 10px rgba(46, 213, 115, 0.05);
+}
+.in-glow:hover {
+  background: rgba(46, 213, 115, 0.04);
+  border-color: rgba(46, 213, 115, 0.3);
+  box-shadow: 0 4px 15px rgba(46, 213, 115, 0.1), inset 5px 0 15px rgba(46, 213, 115, 0.1);
+}
+
+/* التوهج الجانبي للأحمر (الصرف) */
+.out-glow {
+  border-right: 4px solid #ff4757; /* خط فوسفوري يمين السطر */
+  box-shadow: inset 5px 0 10px rgba(255, 71, 87, 0.05);
+}
+.out-glow:hover {
+  background: rgba(255, 71, 87, 0.04);
+  border-color: rgba(255, 71, 87, 0.3);
+  box-shadow: 0 4px 15px rgba(255, 71, 87, 0.1), inset 5px 0 15px rgba(255, 71, 87, 0.1);
+}
+
+/* نصوص وعناصر السطر */
+.log-main-info {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.action-badge {
+  font-family: 'Cairo', sans-serif;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #ffffff;
+}
+
+.activity-title {
+  color: #f1f2f6;
+  font-family: 'Cairo', sans-serif;
+  font-size: 0.95rem;
+}
+
+.log-meta-info {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+}
+
+.user-name {
+  color: #a4b0be;
+  font-size: 0.85rem;
+  font-family: 'Cairo', sans-serif;
+}
+
+.activity-time {
+  color: #747d8c;
+  font-size: 0.8rem;
+  font-family: 'Poppins', sans-serif;
+}
+
+/* Light theme support */
+:root:not(.dark) .log-container {
+  background: rgba(255, 255, 255, 0.7);
+  border-color: rgba(99, 102, 241, 0.15);
+}
+:root:not(.dark) .log-row {
+  background: rgba(0, 0, 0, 0.01);
+  border-color: rgba(0, 0, 0, 0.05);
+}
+:root:not(.dark) .log-row:hover {
+  background: rgba(0, 0, 0, 0.03);
+}
+:root:not(.dark) .activity-title {
+  color: #1e293b;
+}
+:root:not(.dark) .action-badge {
+  background: rgba(0, 0, 0, 0.05);
+  color: #475569;
+}
+:root:not(.dark) .user-name {
+  color: #475569;
+}
+:root:not(.dark) .activity-time {
+  color: #64748b;
+}
+
+/* تخطيط شبكة بينتو والتحكم الشامل - Bento Grid layout */
+.dashboard-wrapper {
+  flex: 1 1 0%;
+  padding: 32px;
+  min-height: 100%;
+  background: linear-gradient(135deg, #090a14 0%, #0d121f 50%, #15192c 100%);
+  color: #f1f2f6;
+  transition: background 0.3s ease, color 0.3s ease;
+}
+
+:root:not(.dark) .dashboard-wrapper {
+  background: #ffffff; /* الخلفية البيضاء للتطبيق */
+  color: #1a1a1a; /* النص الأساسي غامق مريح */
+}
+
+.bento-grid-layout {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 24px;
+}
+
+@media (min-width: 1280px) {
+  .bento-grid-layout {
+    grid-template-columns: 1.8fr 1.15fr; /* نسب الرص المثالي للعمودين الكبير والمتوسط */
+  }
+}
+
+.grid-col-large {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  min-width: 0;
+}
+
+.grid-col-medium {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  min-width: 0;
+}
+
+.spacing-top {
+  margin-top: 24px;
+}
+
+/* تصميم زر الباركود وقارئ البيع المباشر المعدل */
+.barcode-glass-btn {
+  flex: 1;
+  min-width: 120px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 20px;
+  background: rgba(255, 255, 255, 0.01); /* شفافية شبه كاملة في الحالة العادية */
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 18px;
+  cursor: pointer;
+  opacity: 0.35; /* خاملة حتى يتم التفاعل معها */
+  transform: scale(0.96);
+  position: relative;
+  overflow: hidden;
+  transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+
+/* تفعيل البروز ثلاثي الأبعاد والانفجار الفسفوري عند (تمرير الماوس / الضغط المطول على الهاتف) */
+.barcode-glass-btn:hover,
+.barcode-glass-btn:active,
+.barcode-glass-btn:focus {
+  opacity: 1; /* ظهور كامل */
+  transform: scale(1.08) translateY(-5px); /* بروز للأعلى وتكبير ذكي */
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(0, 210, 211, 0.6); /* حواف تضيء بالفسفوري */
+  
+  /* ظل خارجي ثلاثي الأبعاد متوهج بالنيون الأزرق */
+  box-shadow: 
+    0 15px 30px rgba(0, 0, 0, 0.5), 
+    0 0 20px rgba(0, 210, 211, 0.3),
+    inset 0 0 12px rgba(0, 210, 211, 0.2);
+}
+
+/* تصميم الرمز ثلاثي الأبعاد داخل الأيقونة */
+.barcode-3d-symbol {
+  font-size: 2.2rem;
+  position: relative;
+  filter: drop-shadow(0 0 4px rgba(0, 210, 211, 0.5));
+  transition: transform 0.3s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+}
+
+/* حركة بسيطة للرمز عند التفاعل لإعطاء إحساس بالعمق */
+.barcode-glass-btn:hover .barcode-3d-symbol {
+  transform: rotate(-5deg) scale(1.1);
+}
+
+/* تأثير خط الليزر الفسفوري الخاص بقارئ الباركود */
+.laser-line {
+  position: absolute;
+  left: -5px;
+  right: -5px;
+  height: 2px;
+  background-color: #ff4757; /* خط ليزر أحمر متوهج فوق الرمز */
+  box-shadow: 0 0 8px #ff4757, 0 0 15px #ff4757;
+  opacity: 0;
+  transition: opacity 0.3s ease;
+  z-index: 5;
+}
+
+.barcode-glass-btn:hover .laser-line {
+  opacity: 1; /* يظهر خط الليزر فقط عند التفاعل */
+  animation: scan 1s infinite alternate;
+}
+
+@keyframes scan {
+  from { top: 20%; }
+  to { top: 80%; }
+}
+
+/* النص المرفق: مريح جداً للعين وغير مشع لسهولة القراءة */
+.barcode-text {
+  color: #ced6e0; /* أبيض رمادي مريح */
+  font-weight: 500;
+  font-size: 0.9rem;
+  font-family: 'Cairo', sans-serif;
+  text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.8);
+  transition: color 0.3s ease;
+}
+
+/* النص يصبح أبيض صافي مشرق فقط عند التفاعل للتأكيد */
+.barcode-glass-btn:hover .barcode-text {
+  color: #ffffff;
+  text-shadow: 0 0 8px rgba(0, 210, 211, 0.4);
+}
+
+/* Light theme behavior */
+:root:not(.dark) .barcode-glass-btn {
+  background: rgba(99, 102, 241, 0.05);
+  border-color: rgba(99, 102, 241, 0.2);
+  opacity: 0.7;
+}
+
+:root:not(.dark) .barcode-glass-btn:hover {
+  background: rgba(99, 102, 241, 0.1);
+  border-color: rgba(99, 102, 241, 0.5);
+  box-shadow: 
+    0 10px 20px rgba(99, 102, 241, 0.1), 
+    inset 0 0 8px rgba(99, 102, 241, 0.1);
+}
+
+:root:not(.dark) .barcode-text {
+  color: #4f46e5;
+  text-shadow: none;
+}
+
+:root:not(.dark) .barcode-glass-btn:hover .barcode-text {
+  color: #4338ca;
+}
+
+:root:not(.dark) .laser-line {
+  background-color: #ff4757;
+  box-shadow: 0 0 5px #ff4757;
+}
+
+/* التراكب المنبثق للكاميرا وقارئ الباركود */
+.camera-popup-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  background: rgba(0, 0, 0, 0.75);
+  backdrop-filter: blur(10px);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 9999;
+  /* منع أي تمرير أو تحرك للشاشة بالخلفية */
+  overflow: hidden; 
+  touch-action: none; 
+}
+
+/* تصميم الزر الكريستالي ثلاثي الأبعاد المطور لمخزون الأصول */
+.assets-3d-wrapper {
+  perspective: 1000px; /* يعطي شعور بالعمق والمسافة للمتصفح */
+  flex: 1;
+  min-width: 140px;
+  display: flex;
+}
+
+.assets-glass-btn {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 24px;
+  width: 100%;
+  background: rgba(255, 255, 255, 0.01); /* شفافية بلورية شبه كاملة */
+  border: 1px solid rgba(255, 255, 255, 0.04);
+  border-radius: 20px;
+  cursor: pointer;
+  opacity: 0.4; /* مريح جداً للعين وغير مشتت في حالة السكون */
+  transform-style: preserve-3d; /* يسمح للعناصر الداخلية بالتحرك في أبعاد 3D */
+  transform: translateZ(0) scale(0.98);
+  /* أنيميشن انسيابي فائق النعومة وبدون أي تقطيع */
+  transition: all 0.5s cubic-bezier(0.25, 1, 0.5, 1);
+}
+
+/* التفاعل الفوري الخرق عند تمرير الماوس أو اللمس المطول في الجوال */
+.assets-glass-btn:hover,
+.assets-glass-btn:active,
+.assets-glass-btn:focus {
+  opacity: 1; /* ظهور كامل ومشرق */
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(142, 68, 173, 0.5); /* حواف تضيء بالبنفسجي الملكي */
+  
+  /* بروز ثلاثي الأبعاد للأمام وميلان ذكي عالي الفخامة */
+  transform: translateZ(30px) rotateX(4deg) rotateY(-4deg) scale(1.03);
+  
+  /* ظل نيون بنفسجي ملكي متوهج خلف البطاقة */
+  box-shadow: 
+    0 20px 40px rgba(0, 0, 0, 0.6),
+    0 0 25px rgba(142, 68, 173, 0.3),
+    inset 0 0 15px rgba(142, 68, 173, 0.15);
+}
+
+/* المشهد ثلاثي الأبعاد للأيقونات بالداخل */
+.assets-3d-scene {
+  position: relative;
+  width: 50px;
+  height: 50px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  transform-style: preserve-3d;
+}
+
+/* أيقونة المخزون الكبيرة (البلورة / الصندوق) */
+.assets-cube-icon {
+  font-size: 2.3rem;
+  z-index: 2;
+  filter: drop-shadow(0 0 8px rgba(142, 68, 173, 0.6));
+  transition: transform 0.5s cubic-bezier(0.25, 1, 0.5, 1);
+}
+
+/* أيقونة التروس (الأصول والميكانيكية) - موضوعة خلف الصندوق في بعد ثلاثي */
+.assets-gear-icon {
+  position: absolute;
+  font-size: 1.3rem;
+  bottom: -2px;
+  right: -2px;
+  z-index: 1;
+  opacity: 0.7;
+  /* دفع الترس للخلف في المحور Z لإبراز العمق ثلاثي الأبعاد */
+  transform: translateZ(-15px);
+  transition: transform 0.6s ease, opacity 0.3s ease;
+}
+
+/* حركة تداخل الأيقونات الانسيابية الفائقة عند التفاعل */
+.assets-glass-btn:hover .assets-cube-icon {
+  transform: translateZ(20px) rotate(8deg); /* الصندوق يندفع للأمام ويدور قليلاً */
+}
+
+.assets-glass-btn:hover .assets-gear-icon {
+  opacity: 1;
+  /* الترس يندفع للخلف أكثر ويدور بسرعة انسيابية مذهلة */
+  transform: translateZ(-30px) rotate(180deg) scale(1.2);
+}
+
+/* ترتيب النصوص وتنسيقها لتكون عملية جداً ومريحة للقراءة */
+.assets-btn-content {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  text-align: start;
+  transform: translateZ(10px); /* رفع النص قليلاً في الفراغ */
+}
+
+[dir="rtl"] .assets-btn-content {
+  text-align: right;
+}
+
+.assets-main-title {
+  color: #f1f2f6; /* أبيض صافي مشرق */
+  font-weight: 700;
+  font-size: 1.1rem;
+  font-family: 'Cairo', sans-serif;
+  margin-bottom: 3px;
+  text-shadow: 1px 1px 3px rgba(0,0,0,0.8);
+  transition: color 0.3s ease;
+}
+
+.assets-sub-title {
+  color: #a4b0be; /* لون رمادي مريح للعين لا يشتت النظر */
+  font-weight: 400;
+  font-size: 0.8rem;
+  font-family: 'Cairo', sans-serif;
+  transition: color 0.3s ease;
+}
+
+.assets-glass-btn:hover .assets-main-title {
+  color: #ffffff;
+  text-shadow: 0 0 10px rgba(142, 68, 173, 0.6); /* توهج النص عند التفاعل للتأكيد البصري */
+}
+
+/* دعم كامل للمظهر الفاتح (Light Theme) لضمان سهولة القراءة */
+:root:not(.dark) .assets-glass-btn {
+  background: rgba(142, 68, 173, 0.04);
+  border-color: rgba(142, 68, 173, 0.15);
+  opacity: 0.7;
+}
+
+:root:not(.dark) .assets-glass-btn:hover {
+  background: rgba(142, 68, 173, 0.09);
+  border-color: rgba(142, 68, 173, 0.45);
+  box-shadow: 
+    0 10px 20px rgba(142, 68, 173, 0.1), 
+    inset 0 0 8px rgba(142, 68, 173, 0.1);
+}
+
+:root:not(.dark) .assets-main-title {
+  color: #6d28d9;
+  text-shadow: none;
+}
+
+:root:not(.dark) .assets-sub-title {
+  color: #4b5563;
+  text-shadow: none;
+}
+
+:root:not(.dark) .assets-glass-btn:hover .assets-main-title {
+  color: #5b21b6;
+}
+
+:root:not(.dark) .assets-glass-btn:hover .assets-sub-title {
+  color: #1f2937;
+}
+
+/* الخلفية البلورية المعتمة للمنظومة بالكامل */
+.panel-blur-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  background: rgba(4, 5, 9, 0.8);
+  backdrop-filter: blur(20px);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 10000;
+  perspective: 1200px; /* تهيئة الفضاء ثلاثي الأبعاد للوحة */
+}
+
+/* حاوية اللوحة الكريستالية الكبيرة */
+.panel-3d-container {
+  width: 92%;
+  max-width: 1100px;
+  height: 85vh;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 24px;
+  padding: 30px;
+  display: flex;
+  flex-direction: column;
+  transform-style: preserve-3d;
+  /* تأثير الدفع للأمام والظهور الانسيابي الخارق */
+  transform: translateZ(50px) rotateX(1deg);
+  box-shadow: 0 30px 70px rgba(0, 0, 0, 0.8), inset 0 0 30px rgba(255, 255, 255, 0.02);
+  animation: panelEntry 0.5s cubic-bezier(0.25, 1, 0.5, 1) forwards;
+}
+
+@keyframes panelEntry {
+  from { opacity: 0; transform: translateZ(-100px) rotateX(-5deg); }
+  to { opacity: 1; transform: translateZ(50px) rotateX(0deg); }
+}
+
+/* تنسيق الهيدر وأزرار التبويب ثلاثية الأبعاد */
+.panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  padding-bottom: 20px;
+  margin-bottom: 20px;
+}
+
+.panel-title-area h2 {
+  font-family: 'Cairo', sans-serif;
+  font-size: 1.4rem;
+  margin: 0 0 4px 0;
+  color: #ffffff;
+}
+
+.panel-title-area p {
+  color: #747d8c;
+  font-size: 0.85rem;
+  margin: 0;
+}
+
+/* أزرار التبديل ثلاثية الأبعاد الكريستالية */
+.panel-tabs-3d {
+  display: flex;
+  background: rgba(0, 0, 0, 0.3);
+  padding: 5px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.03);
+  transform: translateZ(10px);
+}
+
+.panel-tabs-3d button {
+  background: transparent;
+  border: none;
+  color: #a4b0be;
+  padding: 10px 18px;
+  font-family: 'Cairo', sans-serif;
+  font-size: 0.9rem;
+  font-weight: 600;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: all 0.3s cubic-bezier(0.25, 1, 0.5, 1);
+}
+
+/* زر التبويب النشط المتوهج بلطف */
+.panel-tabs-3d button.tab-active {
+  background: rgba(255, 255, 255, 0.06);
+  color: #ffffff;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3), inset 0 0 8px rgba(255, 255, 255, 0.05);
+  text-shadow: 0 0 8px rgba(255, 255, 255, 0.5);
+}
+
+/* زر الإغلاق الذكي الفخم */
+.panel-close-btn {
+  background: rgba(255, 71, 87, 0.05);
+  border: 1px solid rgba(255, 71, 87, 0.2);
+  color: #ff4757;
+  padding: 8px 16px;
+  border-radius: 10px;
+  font-family: 'Cairo', sans-serif;
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+.panel-close-btn:hover {
+  background: #ff4757;
+  color: white;
+  box-shadow: 0 0 15px rgba(255, 71, 87, 0.4);
+}
+
+/* --- تصميم الجداول والمحتويات الداخلية الرصينة والمريحة للعين --- */
+.panel-content-body {
+  flex-grow: 1;
+  overflow-y: auto;
+  padding-right: 5px;
+}
+
+.sub-control-center h3 {
+  font-family: 'Cairo', sans-serif;
+  color: #ced6e0;
+  font-size: 1.1rem;
+  margin-top: 0;
+}
+
+/* هيكلية الجدول البلوري المرصوص */
+.custom-table {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 15px;
+}
+
+.table-th, .table-tr {
+  display: grid;
+  grid-template-columns: 2fr 1fr 1fr 1fr 0.5fr;
+  padding: 14px 20px;
+  border-radius: 10px;
+  align-items: center;
+  font-family: 'Cairo', sans-serif;
+}
+
+.table-th {
+  background: rgba(0, 0, 0, 0.4);
+  color: #a4b0be;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.table-tr {
+  background: rgba(255, 255, 255, 0.01);
+  border: 1px solid rgba(255, 255, 255, 0.03);
+  color: #f1f2f6;
+  font-size: 0.95rem;
+  transition: all 0.3s ease;
+}
+
+.table-tr:hover {
+  background: rgba(255, 255, 255, 0.03);
+  border-color: rgba(255, 255, 255, 0.1);
+  transform: translateX(-3px); /* إزاحة خفيفة بدلاً من الاهتزاز الكلي */
+}
+
+/* تلوين وتمييز عناصر البيانات الهامة */
+.item-highlight { font-weight: 700; color: #ffffff; }
+.qty-tag { background: rgba(0, 242, 254, 0.08); color: #00f2fe; padding: 4px 10px; border-radius: 6px; font-size: 0.85rem; }
+.total-val-tag { color: #2ed573; font-weight: 700; }
+.status-badge-green { background: rgba(46, 213, 115, 0.1); color: #2ed573; padding: 4px 10px; border-radius: 6px; font-size: 0.8rem; }
+
+/* شارات العدادات العلوية */
+.counter-badge { font-size: 0.8rem; background: rgba(0, 242, 254, 0.1); color: #00f2fe; padding: 4px 12px; border-radius: 20px; border: 1px solid rgba(0, 242, 254, 0.2); }
+.asset-purple { background: rgba(142, 68, 173, 0.1); color: #9b59b6; border-color: rgba(142, 68, 173, 0.2); }
+
+/* --- تصميم معالج المعاملات السريع (النموذج الذكي 3D) --- */
+.wizard-card-3d {
+  background: rgba(0, 0, 0, 0.2);
+  border: 1px solid rgba(255, 255, 255, 0.04);
+  padding: 25px;
+  border-radius: 18px;
+  transform: translateZ(15px);
+}
+
+.input-group-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 20px;
+  margin-bottom: 25px;
+}
+
+.form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.form-field label { color: #a4b0be; font-size: 0.85rem; font-family: 'Cairo', sans-serif; }
+
+.form-field input, .form-field select {
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 12px;
+  border-radius: 10px;
+  color: white;
+  font-family: 'Cairo', sans-serif;
+  font-size: 0.9rem;
+  outline: none;
+  transition: all 0.3s ease;
+}
+
+.form-field input:focus, .form-field select:focus {
+  border-color: #16a34a;
+  box-shadow: 0 0 10px rgba(22, 163, 74, 0.2);
+}
+
+/* زر الحاقن ثلاثي الأبعاد المتوهج الفخم */
+.submit-btn-3d {
+  width: 100%;
+  background: linear-gradient(135deg, #7f00ff, #00f2fe);
+  color: white;
+  border: none;
+  padding: 15px;
+  border-radius: 12px;
+  font-family: 'Cairo', sans-serif;
+  font-weight: 700;
+  font-size: 1rem;
+  cursor: pointer;
+  box-shadow: 0 8px 25px rgba(0, 242, 254, 0.3);
+  transform: translateZ(10px);
+  transition: all 0.3s ease;
+}
+
+.submit-btn-3d:hover {
+  transform: translateZ(20px) scale(1.01);
+  box-shadow: 0 12px 30px rgba(0, 242, 254, 0.5);
+}
+
+/* تأثير الدخول الانسيابي للتبويب الفردي */
+.fade-in {
+  animation: fadeInEffect 0.4s ease forwards;
+}
+@keyframes fadeInEffect {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* فئة تحويل أي عنصر إلى كائن بلوري ثلاثي الأبعاد وخامل */
+.dynamic-3d-object {
+  background: rgba(255, 255, 255, 0.01);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.04);
+  opacity: 0.4;
+  transform-style: preserve-3d;
+  transform: translateZ(0);
+  transition: all 0.5s cubic-bezier(0.25, 1, 0.5, 1);
+}
+
+/* فئة التنشيط التفاعلي الفوري */
+.dynamic-3d-object:hover, 
+.dynamic-3d-object:active {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.04);
+  transform: translateZ(25px) rotateX(2deg) scale(1.02);
+}
+
+/* لمنع ظهور لوحة المفاتيح نهائياً في الحقول اللوجستية */
+.no-keyboard-field {
+  inputmode: none !important;
+  pointer-events: none;
+}
+
+/* 4. معيار عزل لوحة المفاتيح والمدخلات النصية اللوجستية */
+input, select, textarea {
+  background: rgba(0, 0, 0, 0.5) !important;
+  border: 1px solid rgba(255, 255, 255, 0.06) !important;
+  border-radius: 12px;
+  color: #ffffff;
+  padding: 12px;
+  font-family: 'Cairo', sans-serif;
+  outline: none;
+  transition: all 0.3s ease;
+}
+
+input:focus, select:focus {
+  border-color: #00f2fe !important; /* توهج نيوني خفيف عند اختيار الحقل */
+  box-shadow: 0 0 12px rgba(0, 242, 254, 0.2);
+}
+
+/* لمنع الكيبورد تماماً من الظهور في شاشات الكاميرا والباركود */
+.no-keyboard-zone input, 
+.no-keyboard-zone div {
+  inputmode: none !important;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* تأثير التلاشي والدخول الانسيابي الفائق عند التنقل بين الشاشات */
+.page-fade-in {
+  animation: smoothEntry 0.6s cubic-bezier(0.25, 1, 0.5, 1) forwards;
+}
+
+@keyframes smoothEntry {
+  from { opacity: 0; transform: translateZ(-80px) translateY(10px); }
+  to { opacity: 1; transform: translateZ(0) translateY(0); }
+}
+
+/* فئة النص المتوهج بلطف لمظهر مريح ومصقول */
+.text-glow-soft {
+  /* لون نص مريح للعين بدلاً من الأبيض الساطع */
+  color: #e2e8f0; 
+    
+  /* توهج خفيف جداً يبرز النص دون إزعاج */
+  text-shadow: 0 0 4px rgba(255, 255, 255, 0.3), 
+               0 0 10px rgba(255, 255, 255, 0.1); 
+}
+
+/* العناوين الرئيسية (مثل: لوحة التحكم، إدارة المخزون، الفواتير) */
+.heading-soft {
+  color: #f1f5f9; /* لون ساطع قليلاً ولكنه ليس أبيض 100% */
+  text-shadow: 0 0 5px rgba(255, 255, 255, 0.3); /* توهج ناعم جداً */
+  font-weight: 600;
+}
+
+/* النصوص العادية (مثل: أسماء المواد، الأرقام، القوائم الجانبية) */
+.text-comfortable {
+  color: #cbd5e1; /* رمادي فاتح هادئ جداً ومريح للعين */
+  text-shadow: none; /* بدون أي توهج لتسهيل القراءة السريعة */
+  font-size: 14px;
+  letter-spacing: 0.3px; /* مسافة بسيطة بين الحروف تريح العين */
+}
+
+/* تأثير عند تمرير الماوس (Hover) على القوائم */
+.menu-item:hover {
+  color: #ffffff;
+  text-shadow: 0 0 8px rgba(255, 255, 255, 0.4);
+  transition: all 0.3s ease;
+}
+
+/* 1. تعريف المتغيرات الأساسية للنظام */
+:root {
+  /* منحنى الحركة الفائق النعومة (90Hz Feel) */
+  --smooth-90hz: 0.4s cubic-bezier(0.25, 1, 0.5, 1);
+  
+  /* ألوان النصوص المريحة للعين */
+  --text-muted: #cbd5e1; /* للنصوص العادية */
+  --text-bright: #f8fafc; /* عند تمرير الماوس */
+}
+
+/* 2. كلاس لتطبيق السلاسة على أي عنصر (أزرار، بطاقات، قوائم) */
+.smooth-item {
+  /* نطبق الانتقال فقط على الخصائص المدعومة من كرت الشاشة */
+  transition: transform var(--smooth-90hz), opacity var(--smooth-90hz);
+  
+  /* تنبيه المتصفح لتجهيز العنصر للحركة */
+  will-change: transform, opacity;
+}
+
+/* 3. مثال عند مرور الماوس على بطاقة مستودع أو صنف */
+.smooth-item:hover {
+  /* يرتفع للأعلى قليلاً ويكبر حجمه بنسبة 2% بسلاسة تامة */
+  transform: translateY(-4px) scale(1.02);
+}
+
+/* 2. الحاوية الرئيسية للقائمة الجانبية (التأثير الزجاجي) */
+.sidebar {
+  position: fixed;
+  top: 0;
+  right: 0; /* لأن النظام غالباً بالعربية */
+  width: 260px;
+  height: 100vh;
+  
+  /* التأثير الزجاجي (Glassmorphism) */
+  background: rgba(15, 23, 42, 0.6); 
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-left: 1px solid rgba(255, 255, 255, 0.05);
+  
+  /* تجهيز الكرت الشاشة لحركة القائمة بأكملها (في حال الإغلاق والفتح) */
+  will-change: transform;
+  /* الحركة سلسة عند الفتح والإغلاق */
+  transition: transform var(--smooth-90hz);
+}
+
+/* حالة إغلاق القائمة (تنزاح لخارج الشاشة بدون تغيير العرض Width) */
+.sidebar.closed {
+  transform: translateX(100%); 
+}
+
+/* 3. عناصر القائمة (الأزرار والروابط) */
+.sidebar-item {
+  display: flex;
+  align-items: center;
+  padding: 12px 20px;
+  margin: 8px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  
+  /* الألوان الهادئة الافتراضية بدون توهج */
+  color: var(--text-muted);
+  background: transparent;
+  
+  /* نطبق السلاسة على التحريك، لون النص، والخلفية فقط */
+  transition: transform var(--smooth-90hz), 
+              color var(--smooth-90hz), 
+              background-color var(--smooth-90hz),
+              text-shadow var(--smooth-90hz);
+              
+  will-change: transform, color, background-color;
+}
+
+/* 4. تفاعل الماوس الفائق النعومة (Hover) */
+.sidebar-item:hover {
+  /* تغيير اللون للأفتح مع خلفية زجاجية خفيفة جداً */
+  color: var(--text-bright);
+  background-color: rgba(255, 255, 255, 0.05);
+  
+  /* التوهج الناعم والمريح للعين الذي اتفقنا عليه */
+  text-shadow: 0 0 5px rgba(255, 255, 255, 0.2);
+  
+  /* السر هنا: إزاحة العنصر لليسار قليلاً بحركة فيزيائية ناعمة بدلاً من تغيير الـ Padding */
+  transform: translateX(-6px); 
+}
+
+/* تأثير عند الضغط على الزر (Click) للإحساس بالاستجابة */
+.sidebar-item:active {
+  transform: translateX(-2px) scale(0.98);
+}
+
+/* كود التوهج والألوان لشاشة الترحيب مأخوذ من تصميم الشريحة الخامسة */
+.splash-logo-container {
+  background: linear-gradient(135deg, #00E5FF, #6A1B9A); /* تدرج الشعار */
+  border-radius: 25%; /* شكل السكويركل المعتمد */
+  box-shadow: 0 0 35px rgba(0, 229, 255, 0.8); /* التوهج الخارجي الفسفوري الفخم */
+  padding: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.3s ease, box-shadow 0.3s ease;
+}
+
+.splash-logo-container:hover {
+  transform: scale(1.05) rotate(2deg);
+  box-shadow: 0 0 50px rgba(0, 229, 255, 0.95), 0 0 20px rgba(106, 27, 154, 0.6);
+}
+
+.splash-logo-icon {
+  filter: drop-shadow(0 0 10px rgba(255, 255, 255, 0.95)) drop-shadow(0 0 20px rgba(0, 229, 255, 0.4)); /* توهج الكود المعتمد المطور للياقة البصرية */
+}
+
+/* فئة مخصصة لاختبار التأثير الزجاجي - لا تؤثر على التموضع */
+.glass-card-test {
+    background: rgba(255, 255, 255, 0.08) !important; /* خلفية شبه شفافة */
+    backdrop-filter: blur(16px) !important; /* تأثير الزجاج الضبابي */
+    -webkit-backdrop-filter: blur(16px) !important; /* لدعم متصفحات سفاري */
+    border: 1px solid rgba(255, 255, 255, 0.15) !important; /* حدود رقيقة لتعزيز الواقعية */
+    border-radius: 16px !important; /* زوايا ناعمة */
+    box-shadow: 0 4px 30px rgba(0, 0, 0, 0.05) !important; /* ظل خفيف لإعطاء عمق 3D */
+    transition: transform 0.3s ease, box-shadow 0.3s ease, background 0.3s ease !important; /* انتقال سلس */
+}
+
+/* تأثير تفاعلي عند مرور مؤشر الماوس (Hover) */
+.glass-card-test:hover {
+    background: rgba(255, 255, 255, 0.12) !important;
+    transform: translateY(-4px) !important; /* بروز خفيف للأعلى */
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1) !important;
+}
+
+/* تنسيق فئة إجمالي الرواتب لدعم المطلب بالكامل وبصورة جمالية */
+.salary-card-layout {
+    padding: 1.25rem !important;
+    display: flex !important;
+    flex-direction: column !important;
+    justify-content: center !important;
+    min-height: 100px !important;
+}
+
+.salary-card-layout h3 {
+    font-size: 0.875rem !important;
+    font-weight: 800 !important;
+    color: #4b5563 !important; /* text-gray-600 */
+    text-transform: uppercase !important;
+    letter-spacing: 0.05em !important;
+    margin: 0 !important;
+}
+
+.dark .salary-card-layout h3 {
+    color: #d1d5db !important; /* text-gray-300 */
+}
+
+.salary-card-layout p {
+    font-size: 1.75rem !important;
+    font-weight: 900 !important;
+    color: #10b981 !important; /* emerald green-500 */
+    margin: 0.25rem 0 0 0 !important;
+    font-family: monospace, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas;
+}
+
+/* responsive actions alignment styling */
+.main-actions {
+    display: flex;
+    flex-direction: column; /* تحويل الأزرار لتصبح تحت بعضها بدل بجانب بعضها */
+    gap: 15px;
+}
+
+/* للشاشات الكبيرة أعدها كما كانت */
+@media (min-width: 768px) {
+    .main-actions {
+        flex-direction: row;
+    }
+}
+
+/* تخطيط مرن مخصص ومستقر للواجهة واللوحة لمنع التصاق العناصر بالحواف وامتصاص المساحة ومشاكل التمرير */
+.dashboard-container {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  padding: 16px; /* يضمن عدم التصاق العناصر بالحواف */
+  box-sizing: border-box;
+}
+
+.app-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid #e0e0e0;
+  padding-bottom: 10px;
+}
+
+.main-content {
+  flex: 1; /* يجعل هذا الجزء مرن ويمتص المساحة المتبقية بدون مشاكل */
+  overflow-y: auto; /* إذا زادت العناصر يتم التمرير هنا فقط وليس في الشاشة كلها */
+}
+
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+  margin-top: 20px;
+}
+
+/* 1. الجزء العلوي الثابت: شريط البيع المباشر والمؤشرات */
+.top-hub {
+  background: #ffffff;
+  padding: 16px;
+  border-radius: 12px;
+  box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+}
+.dark .top-hub {
+  background: #0f172a;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+}
+
+.header-title {
+  font-size: 18px;
+  font-weight: bold;
+  margin-bottom: 12px;
+  text-align: center;
+  color: #1a237e;
+}
+.dark .header-title {
+  color: #818cf8;
+}
+
+/* خانة البيع المباشر السريع في الأعلى تماماً */
+.direct-sale-box {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.sale-input {
+  flex: 1;
+  padding: 12px;
+  border: 1px solid #ccc;
+  border-radius: 8px;
+  font-size: 14px;
+}
+.dark .sale-input {
+  background-color: #1e293b;
+  border-color: rgba(255,255,255,0.1);
+  color: white;
+}
+
+.btn-sell {
+  padding: 0 20px;
+  background-color: #2e7d32;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-weight: bold;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+.btn-sell:hover {
+  background-color: #1b5e20;
+}
+
+/* شريط معلومات العملات المستقر */
+.info-bar {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: #666;
+  border-top: 1px solid #eee;
+  padding-top: 8px;
+}
+.dark .info-bar {
+  color: #94a3b8;
+  border-top-color: rgba(255,255,255,0.1);
+}
+
+/* 2. منطقة وسط الشاشة: التحكم بالديون */
+.debt-section {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.debt-card {
+  background: #fff;
+  padding: 16px;
+  border-radius: 12px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+  text-align: center;
+  cursor: pointer;
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+.debt-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+}
+.dark .debt-card {
+  background: #0f172a;
+  border: 1px solid rgba(255,255,255,0.1);
+  box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+}
+
+.debt-card h4 {
+  font-size: 13px;
+  color: #777;
+  margin-bottom: 6px;
+}
+.dark .debt-card h4 {
+  color: #94a3b8;
+}
+
+.debt-card .amount {
+  font-size: 18px;
+  font-weight: bold;
+}
+
+.debt-in { color: #2e7d32; }  /* ديون لنا */
+.dark .debt-in { color: #34d399; }
+.debt-out { color: #c62828; } /* ديون علينا */
+.dark .debt-out { color: #f87171; }
+
+/* 3. قائمة آخر العمليات */
+.recent-activity {
+  background: #fff;
+  padding: 16px;
+  border-radius: 12px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+  flex: 1;
+}
+.dark .recent-activity {
+  background: #0f172a;
+  border: 1px solid rgba(255,255,255,0.1);
+}
+
+
+
+
+
+
+
+

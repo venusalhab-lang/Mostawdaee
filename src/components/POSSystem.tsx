@@ -1,0 +1,2346 @@
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { Html5Qrcode } from 'html5-qrcode';
+import { 
+  Barcode, 
+  Plus, 
+  Minus, 
+  Trash2, 
+  Sparkles, 
+  ShoppingCart, 
+  Truck, 
+  Percent, 
+  CheckCircle2, 
+  Coins,
+  Search,
+  AlertCircle,
+  Keyboard,
+  Info,
+  Printer,
+  CreditCard,
+  Smartphone,
+  PauseCircle
+} from 'lucide-react';
+import { useFirebase } from './FirebaseProvider';
+import { readUserCache, writeUserCache, migrateLegacyUserCache } from '../lib/userStorage';
+import { usePreferredCurrency } from './CurrencyContext';
+import { Language, Product, Invoice, InvoiceItem } from '../types';
+import { translations } from '../translations';
+import { motion, AnimatePresence } from 'motion/react';
+import { toast } from 'sonner';
+import CashPaymentModal from './CashPaymentModal';
+import {
+  CURRENCY_SYMBOLS,
+  PosCurrency,
+  isPosCurrency,
+  buildUsdUnitRates,
+  convertMoney,
+  roundMoney,
+  formatMoney,
+  currencyDecimals,
+  fetchLiveUsdRates,
+  readCachedLiveRates,
+} from '../lib/exchangeRates';
+import { consumeInvoiceNumber, peekInvoiceNumber } from '../lib/invoiceNumber';
+import { getExternalSalesApi } from '../lib/externalSalesApi';
+import { computeStockStatus } from '../lib/stock';
+
+interface POSSystemProps {
+  language: Language;
+}
+
+const POS_SYMBOLS = CURRENCY_SYMBOLS;
+
+/** Quick cash buttons sized to each currency's real denominations. */
+const QUICK_CASH: Record<string, number[]> = {
+  USD: [10, 20, 50, 100],
+  ILS: [20, 50, 100, 200],
+  SAR: [10, 50, 100, 500],
+  JOD: [5, 10, 20, 50],
+  LYD: [5, 10, 20, 50],
+  IQD: [1000, 5000, 10000, 25000],
+};
+
+function escapeHtml(v: unknown): string {
+  return String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] as string));
+}
+
+export default function POSSystem({ language }: POSSystemProps) {
+  const t = translations[language];
+  const isRtl = language === 'ar';
+  
+  const { products, saveInvoice, settings, saveProduct, warehouses, user } = useFirebase();
+  const { preferredCurrency } = usePreferredCurrency();
+  const storeCurrency = isPosCurrency(settings?.currency) ? settings.currency : 'JOD';
+  const preferredPosCurrency: PosCurrency = isPosCurrency(preferredCurrency) ? preferredCurrency : storeCurrency;
+  const [posCurrency, setPosCurrency] = useState<PosCurrency>(preferredPosCurrency);
+  const activeCurrency = posCurrency;
+  const [liveRates, setLiveRates] = useState<Record<string, number> | null>(() => readCachedLiveRates());
+  const usdUnitRates = useMemo(() => buildUsdUnitRates(settings, liveRates), [settings, liveRates]);
+  const [invoiceTick, setInvoiceTick] = useState(0);
+  // Original catalog price per product, so switching currency never compounds rounding errors.
+  const itemBaseRef = useRef<Record<string, { amount: number; currency: string }>>({});
+  const externalApi = getExternalSalesApi();
+  const sessionUid = user?.uid || 'guest';
+  
+  // Quick Product Registration state variables
+  const [showQuickRegModal, setShowQuickRegModal] = useState(false);
+  const [quickRegForm, setQuickRegForm] = useState({
+    sku: '',
+    name: '',
+    category: '',
+    brand: '',
+    quantity: 10,
+    unitCost: 0,
+    sellingPrice: 0,
+    warehouseId: '',
+    lowStockThreshold: 5
+  });
+
+  // States
+  const [posMode, setPosMode] = useState<'sale' | 'purchase'>('sale');
+  const invoicePrefix = posMode === 'sale' ? 'POS' : 'SUP';
+  const previewInvoiceNo = useMemo(() => peekInvoiceNumber(invoicePrefix, sessionUid), [invoicePrefix, sessionUid, invoiceTick]);
+  const [barcodeInput, setBarcodeInput] = useState('');
+  const [scannedItems, setScannedItems] = useState<InvoiceItem[]>([]);
+  
+  // Advanced POS states
+  const [lastScannedProductId, setLastScannedProductId] = useState<string | null>(null);
+  const [paymentMethod, setPaymentMethod] = useState<'cash' | 'card' | 'wallet'>('cash');
+  const [receivedAmount, setReceivedAmount] = useState<string>('');
+  const [heldBills, setHeldBills] = useState<any[]>([]);
+
+  const discountInputRef = useRef<HTMLInputElement>(null);
+
+  const skipHeldPersist = useRef(true);
+
+  useEffect(() => {
+    skipHeldPersist.current = true;
+    migrateLegacyUserCache(sessionUid);
+    setHeldBills(readUserCache(sessionUid, 'held_bills', []));
+  }, [sessionUid]);
+
+  useEffect(() => {
+    if (skipHeldPersist.current) {
+      skipHeldPersist.current = false;
+      return;
+    }
+    writeUserCache(sessionUid, 'held_bills', heldBills);
+  }, [heldBills, sessionUid]);
+
+  // Handle suspend current bill
+  const handleSuspendBill = () => {
+    if (scannedItems.length === 0) {
+      toast.error(isRtl ? 'لا يمكن تعليق فاتورة فارغة!' : 'Cannot suspend an empty bill!');
+      playBeep('error');
+      return;
+    }
+    const billNum = `HLD-${Math.floor(1000 + Math.random() * 9000)}`;
+    const formattedTime = new Date().toLocaleTimeString(isRtl ? 'ar-EG' : 'en-US', { hour: '2-digit', minute: '2-digit' });
+    const itemsCount = scannedItems.reduce((acc, item) => acc + (Number(item.quantity) || 0), 0);
+    
+    const newHeldBill = {
+      id: `held-${Date.now()}`,
+      invoiceNumber: billNum,
+      items: [...scannedItems],
+      discount: discount,
+      date: Date.now(),
+      time: formattedTime,
+      itemCount: itemsCount,
+      totalAmount: grandTotal,
+      currency: activeCurrency
+    };
+    setHeldBills([...heldBills, newHeldBill]);
+    setScannedItems([]);
+    setDiscount(0);
+    setReceivedAmount('');
+    playBeep('success_checkout');
+    toast.success(
+      isRtl 
+        ? `تم تعليق الفاتورة بنجاح وتحويلها لانتظار الصندوق بالرمز #${billNum}` 
+        : `Bill suspended successfully as #${billNum}`
+    );
+  };
+
+  // Restore suspended bill
+  const handleRestoreBill = (bill: any) => {
+    if (scannedItems.length > 0) {
+      if (!window.confirm(isRtl ? 'هناك منتجات في السلة حالياً. هل ترغب في سحب الفاتورة المعلقة واستبدال السلة الحالية بها؟' : 'You have active items. Restore held bill and replace current cart?')) {
+        return;
+      }
+    }
+    itemBaseRef.current = {};
+    setScannedItems(bill.items);
+    setDiscount(bill.discount ?? 0);
+    if (isPosCurrency(bill.currency)) {
+      setPosCurrency(bill.currency);
+    }
+    setHeldBills(heldBills.filter(b => b.id !== bill.id));
+    playBeep('success');
+    toast.success(isRtl ? 'تم استرجاع الفاتورة المعلقة بنجاح للواجهة' : 'Suspended bill restored successfully');
+  };
+
+  // Discard a held bill
+  const handleDiscardHeldBill = (billId: string) => {
+    if (window.confirm(isRtl ? 'هل أنت متأكد من رغبتك في حذف وإلغاء هذه الفاتورة المعلقة تماماً؟' : 'Are you sure you want to permanently discard this held bill?')) {
+      setHeldBills(heldBills.filter(b => b.id !== billId));
+      playBeep('error');
+      toast.success(isRtl ? 'تم إلغاء الفاتورة المعلقة وإزالتها من الذاكرة بنجاح' : 'Held bill discarded successfully');
+    }
+  };
+
+  const handleCurrencyChange = (targetCurrency: string, showToast = true) => {
+    if (!isPosCurrency(targetCurrency) || targetCurrency === posCurrency) return;
+    if (scannedItems.length > 0) {
+      setScannedItems((prev) =>
+        prev.map((item) => {
+          const base = itemBaseRef.current[item.productId];
+          const newPrice = base
+            ? convertMoney(base.amount, base.currency, targetCurrency, usdUnitRates)
+            : convertMoney(item.unitPrice, posCurrency, targetCurrency, usdUnitRates);
+          const qty = Number(item.quantity) || 0;
+          return { ...item, unitPrice: newPrice, total: roundMoney(newPrice * qty, targetCurrency) };
+        })
+      );
+      setDiscount((d) => convertMoney(d, posCurrency, targetCurrency, usdUnitRates));
+      setReceivedAmount('');
+    }
+    setPosCurrency(targetCurrency);
+    if (showToast) {
+      toast.success(
+        isRtl
+          ? `عملة الصندوق: ${targetCurrency} — الأسعار محوّلة دون خلط رموز العملات`
+          : `Checkout currency: ${targetCurrency} — prices converted without mixing symbols`
+      );
+    }
+  };
+  const [discount, setDiscount] = useState<number>(0);
+  const [enableTax, setEnableTax] = useState<boolean>(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [showSuccessModal, setShowSuccessModal] = useState(false);
+  const [lastInvoiceNumber, setLastInvoiceNumber] = useState('');
+  const [lastCompletedInvoice, setLastCompletedInvoice] = useState<Invoice | null>(null);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [showProductLookup, setShowProductLookup] = useState(false);
+  const [isCameraScanning, setIsCameraScanning] = useState(false);
+  const [cameraError, setCameraError] = useState<string | null>(null);
+  const [manualScanInput, setManualScanInput] = useState<string>('');
+  const [selectedCategory, setSelectedCategory] = useState<string>('all');
+  const [showCashPaymentModal, setShowCashPaymentModal] = useState(false);
+
+  // Fallback demo menu items for cafe and shopping malls if inventory is blank
+  const fallbackProducts: Product[] = [
+    { id: 'fb-1', name: isRtl ? 'قهوة إسبريسو مزدوجة' : 'Double Espresso', sku: 'ESP-1', category: isRtl ? 'مشروبات ساخنة' : 'Hot Drinks', brand: 'Premium', quantity: 99, unitCost: 4.00, sellingPrice: 12.00, status: 'In Stock', dateAdded: Date.now() },
+    { id: 'fb-2', name: isRtl ? 'كابتشينو إيطالي وسط' : 'Cappuccino Medium', sku: 'CAP-2', category: isRtl ? 'مشروبات ساخنة' : 'Hot Drinks', brand: 'Premium', quantity: 99, unitCost: 5.00, sellingPrice: 14.00, status: 'In Stock', dateAdded: Date.now() },
+    { id: 'fb-3', name: isRtl ? 'كرواسون زبدة فرنسي' : 'French Butter Croissant', sku: 'CRO-3', category: isRtl ? 'مخبوزات' : 'Bakeries', brand: 'Bakery', quantity: 50, unitCost: 3.00, sellingPrice: 8.50, status: 'In Stock', dateAdded: Date.now() },
+    { id: 'fb-4', name: isRtl ? 'حليب المراعي 1 لتر' : 'Almarai Milk 1L', sku: 'MIL-4', category: isRtl ? 'ألبان وأجبان' : 'Dairy', brand: 'Almarai', quantity: 120, unitCost: 4.50, sellingPrice: 6.50, status: 'In Stock', dateAdded: Date.now() },
+    { id: 'fb-5', name: isRtl ? 'عصير برتقال طبيعي طازج' : 'Fresh Orange Juice', sku: 'JU-5', category: isRtl ? 'عصائر طبيعية' : 'Juices', brand: 'Fresh', quantity: 80, unitCost: 3.50, sellingPrice: 10.00, status: 'In Stock', dateAdded: Date.now() },
+    { id: 'fb-6', name: isRtl ? 'شاي إنجليزي أحمر فاخر' : 'English Rich Tea', sku: 'TEA-6', category: isRtl ? 'مشروبات ساخنة' : 'Hot Drinks', brand: 'Twinings', quantity: 200, unitCost: 1.50, sellingPrice: 5.00, status: 'In Stock', dateAdded: Date.now() },
+    { id: 'fb-7', name: isRtl ? 'مياه معدنية مبردة' : 'Mineral Spring Water', sku: 'WAT-7', category: isRtl ? 'عصائر طبيعية' : 'Cold Beverages', brand: 'Arwa', quantity: 300, unitCost: 0.80, sellingPrice: 2.50, status: 'In Stock', dateAdded: Date.now() },
+    { id: 'fb-8', name: isRtl ? 'دونات كاكاو بلجيكي' : 'Belgian Chocolate Donut', sku: 'DON-8', category: isRtl ? 'مخبوزات' : 'Bakeries', brand: 'Bakery', quantity: 45, unitCost: 2.00, sellingPrice: 6.00, status: 'In Stock', dateAdded: Date.now() },
+  ];
+
+  // Merge dynamic items from real Firestore with demo products for an immersive cafe/mall menu
+  const displayedProducts = products.length > 0 ? products : fallbackProducts;
+
+  // Retrieve unique categories
+  const categoriesList = ['all', ...Array.from(new Set(displayedProducts.map(p => p.category).filter(Boolean)))];
+
+  const refreshRates = async (force = false) => {
+    const r = await fetchLiveUsdRates(force);
+    if (r) setLiveRates(r);
+  };
+
+  useEffect(() => {
+    refreshRates();
+    const interval = setInterval(() => refreshRates(), 5 * 60 * 1000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Background offline sales synchronization hook
+  useEffect(() => {
+    let syncInProgress = false;
+
+    if (!externalApi) return;
+
+    const triggerSync = async () => {
+      if (syncInProgress) return;
+      
+      const offlineKeys = localStorage.getItem('offline_sales');
+      if (!offlineKeys) return;
+
+      let offlineSales: any[] = [];
+      try {
+        offlineSales = JSON.parse(offlineKeys);
+      } catch (e) {
+        console.error('Error parsing offline sales:', e);
+        return;
+      }
+
+      if (offlineSales.length === 0) return;
+
+      syncInProgress = true;
+      console.log(`Starting background sync for ${offlineSales.length} offline invoice(s)...`);
+      
+      const successful_ids: number[] = [];
+      
+      for (const sale of offlineSales) {
+        try {
+          const response = await fetch(`${externalApi}/sales/store`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ...sale, is_synced: true })
+          });
+
+          if (response.ok) {
+            successful_ids.push(sale.id);
+          }
+        } catch (err) {
+          console.warn(`Sync failed for invoice ${sale.id}:`, err);
+          // Break cycle early if internet connection is completely down
+          break;
+        }
+      }
+
+      if (successful_ids.length > 0) {
+        const currentOfflineKeys = localStorage.getItem('offline_sales');
+        if (currentOfflineKeys) {
+          try {
+            const currentSales = JSON.parse(currentOfflineKeys);
+            const remainingSales = currentSales.filter((s: any) => !successful_ids.includes(s.id));
+            if (remainingSales.length === 0) {
+              localStorage.removeItem('offline_sales');
+            } else {
+              localStorage.setItem('offline_sales', JSON.stringify(remainingSales));
+            }
+            toast.success(
+              isRtl 
+                ? `🔄 تم مزامنة ${successful_ids.length} فواتير مخزنة محلياً مع السيرفر بنجاح!` 
+                : `🔄 Synchronized ${successful_ids.length} offline invoice(s) back to server successfully!`
+            );
+          } catch (storageErr) {
+            console.error('Failed to update storage after sync:', storageErr);
+          }
+        }
+      }
+      
+      syncInProgress = false;
+    };
+
+    window.addEventListener('online', triggerSync);
+    const interval = setInterval(triggerSync, 30000);
+    triggerSync();
+
+    return () => {
+      window.removeEventListener('online', triggerSync);
+      clearInterval(interval);
+    };
+  }, [isRtl, externalApi]);
+
+  // Fetch live exchange rate every time a new invoice starts (whenever scannedItems goes from having items to being empty)
+  const prevScannedCount = useRef(0);
+  useEffect(() => {
+    if (scannedItems.length === 0 && prevScannedCount.current > 0) {
+      refreshRates();
+    }
+    prevScannedCount.current = scannedItems.length;
+  }, [scannedItems.length]);
+
+  // Shared handler for matching barcode SKU or product ID and registering it
+  const handleScannedProductCode = (decodedText: string) => {
+    const cleanText = decodedText.replace(/[\x00-\x1F\x7F-\x9F]/g, "").trim();
+    setBarcodeInput(cleanText);
+    
+    const matchedProduct = products.find(
+      p => p.sku?.toLowerCase() === cleanText.toLowerCase() || p.id === cleanText
+    );
+
+    if (matchedProduct) {
+      addItemToPOS(matchedProduct);
+      toast.success(
+        isRtl 
+          ? `تم مسح وإضافة المنتج: ${matchedProduct.name}`
+          : `Scanned and added item: ${matchedProduct.name}`
+      );
+    } else {
+      // Fallback search by name containing scanned code
+      const matchByName = products.filter(
+        p => p.name.toLowerCase().includes(cleanText.toLowerCase())
+      );
+      if (matchByName.length === 1) {
+        addItemToPOS(matchByName[0]);
+        toast.success(
+          isRtl 
+            ? `تم مسح وإضافة المنتج: ${matchByName[0].name}`
+            : `Scanned and added item: ${matchByName[0].name}`
+        );
+      } else {
+        playBeep('error');
+        setQuickRegForm({
+          sku: cleanText,
+          name: '',
+          category: '',
+          brand: '',
+          quantity: 10,
+          unitCost: 0,
+          sellingPrice: 0,
+          warehouseId: warehouses && warehouses.length > 0 ? warehouses[0].id : '',
+          lowStockThreshold: 5
+        });
+        setBarcodeInput('');
+        setShowQuickRegModal(true);
+        toast.info(
+          isRtl 
+            ? `الباركود "${cleanText}" غير مسجل. يرجى تسجيله للإضافة المستمرة لجرد المستودعات وسلة البيع.` 
+            : `Barcode "${cleanText}" is not registered. Please register it now to add to warehouse stock.`
+        );
+      }
+    }
+  };
+
+  // Setup live camera scanner effect with high-performance Html5Qrcode
+  useEffect(() => {
+    let qrcodeScanner: Html5Qrcode | null = null;
+    let isScanningActive = false;
+    let timerId: any = null;
+
+    if (isCameraScanning) {
+      setCameraError(null);
+      setManualScanInput('');
+
+      // Wait 150ms for the modal to mount and render the id="reader" div in the DOM
+      timerId = setTimeout(() => {
+        const readerElement = document.getElementById("reader");
+        if (readerElement) {
+          try {
+            qrcodeScanner = new Html5Qrcode("reader");
+
+            const onScanSuccess = async (decodedText: string) => {
+              // Close scanner first to avoid double triggers
+              setIsCameraScanning(false);
+              if (qrcodeScanner && isScanningActive) {
+                try {
+                  await qrcodeScanner.stop();
+                } catch (err) {
+                  console.warn("Could not stop camera cleanly:", err);
+                }
+              }
+              handleScannedProductCode(decodedText);
+            };
+
+            const onScanFailure = (error: any) => {
+              // Noise log, empty in production of POS to keep log clean
+            };
+
+            qrcodeScanner.start(
+              { facingMode: "environment" },
+              {
+                fps: 20,
+                qrbox: { width: 280, height: 160 }
+              },
+              onScanSuccess,
+              onScanFailure
+            ).then(() => {
+              isScanningActive = true;
+              // Block soft keyboard from appearing on any auto-focused sub-controls
+              setTimeout(() => {
+                const inputs = document.querySelectorAll('#reader input, #reader button, #reader select');
+                inputs.forEach(input => {
+                  input.setAttribute('inputmode', 'none');
+                  input.setAttribute('readonly', 'true');
+                  (input as HTMLElement).blur();
+                });
+              }, 350);
+            }).catch(err => {
+              console.warn("[BarcodeScanner] Safe exception caught: Camera hardware missing or permissions denied by browser sandbox. Error detail:", err);
+              setCameraError(
+                isRtl 
+                  ? "تعذر تشغيل الكاميرا بسبب أذونات المتصفح أو لعدم توفر عتاد كاميرا بيئية في هذا الجهاز."
+                  : "Camera startup bypassed: device streams are blocked, missing, or restricted."
+              );
+            });
+          } catch (initErr) {
+            console.error("Failed to parent Html5Qrcode:", initErr);
+          }
+        } else {
+          setCameraError(
+            isRtl
+              ? "تعذر تحديد موضع الكاميرا في واجهة المستودع."
+              : "Could not locate scanner frame element in view."
+          );
+        }
+      }, 150);
+    }
+
+    return () => {
+      if (timerId) clearTimeout(timerId);
+      if (qrcodeScanner) {
+        if (qrcodeScanner.isScanning) {
+          qrcodeScanner.stop().catch(err => console.warn("Clean stop failed during unmount:", err));
+        }
+      }
+    };
+  }, [isCameraScanning, products, posMode, isRtl]);
+
+  // References
+  const scannerInputRef = useRef<HTMLInputElement>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+
+  // Focus scanner on mount and periodically or via click event to ensure absolute focus-lock
+  useEffect(() => {
+    focusScanner();
+    
+    const handleDocumentClick = (e: MouseEvent) => {
+      // If the user clicked inside a selection modal or button with action, don't hijack focus
+      const target = e.target as HTMLElement;
+      if (
+        target.tagName === 'INPUT' || 
+        target.tagName === 'TEXTAREA' || 
+        target.closest('button') || 
+        target.closest('a') ||
+        target.closest('.fixed') // Modals
+      ) {
+        return;
+      }
+      focusScanner();
+    };
+
+    document.addEventListener('click', handleDocumentClick);
+
+    const interval = setInterval(() => {
+      // Keep focused if no other input is active
+      if (document.activeElement?.tagName !== 'INPUT' && document.activeElement?.tagName !== 'TEXTAREA') {
+        focusScanner();
+      }
+    }, 3000);
+
+    return () => {
+      document.removeEventListener('click', handleDocumentClick);
+      clearInterval(interval);
+    };
+  }, []);
+
+  const focusScanner = () => {
+    if (scannerInputRef.current) {
+      scannerInputRef.current.focus();
+    }
+  };
+
+  // Beep sound simulator using Web Audio API for a premium real-life hardware register feel
+  const playBeep = (type: 'success' | 'error' | 'success_checkout') => {
+    try {
+      if (!audioContextRef.current) {
+        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+      }
+      const ctx = audioContextRef.current;
+      if (ctx.state === 'suspended') {
+        ctx.resume();
+      }
+
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+
+      if (type === 'success') {
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(1200, ctx.currentTime);
+        gain.gain.setValueAtTime(0.1, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.12);
+        osc.start();
+        osc.stop(ctx.currentTime + 0.12);
+      } else if (type === 'error') {
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(150, ctx.currentTime);
+        gain.gain.setValueAtTime(0.15, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.3);
+        osc.start();
+        osc.stop(ctx.currentTime + 0.3);
+      } else if (type === 'success_checkout') {
+        // High-low cheerful cash register chord sound
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(800, ctx.currentTime);
+        gain.gain.setValueAtTime(0.12, ctx.currentTime);
+        osc.start();
+        osc.frequency.setValueAtTime(1500, ctx.currentTime + 0.1);
+        gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.25);
+        osc.stop(ctx.currentTime + 0.25);
+      }
+    } catch (e) {
+      console.warn('Audio beeps not supported or blocked by user safety permission policies', e);
+    }
+  };
+
+  // Setup Keyboard shortcut listeners (e.g. F9, F10, Esc)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (showCashPaymentModal) {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          setShowCashPaymentModal(false);
+          setTimeout(() => focusScanner(), 150);
+        }
+        return;
+      }
+
+      if (e.key === 'F2') {
+        e.preventDefault();
+        handleSuspendBill();
+      } else if (e.key === 'F4') {
+        e.preventDefault();
+        if (scannedItems.length > 0) {
+          if (confirm(isRtl ? 'هل أنت متأكد من إلغاء الفاتورة الحالية بالكامل وتفريغ السلة؟' : 'Are you sure you want to cancel the current invoice and clear the cart?')) {
+            setScannedItems([]);
+            setDiscount(0);
+            setReceivedAmount('');
+            playBeep('error');
+            toast.success(isRtl ? 'تم إلغاء الفاتورة بالكامل وتفريغ السلة بنجاح' : 'Invoice canceled and cart cleared successfully');
+          }
+        }
+      } else if (e.key === 'F3') {
+        e.preventDefault();
+        if (discountInputRef.current) {
+          discountInputRef.current.focus();
+          discountInputRef.current.select();
+          toast.info(isRtl ? 'تم تركيز حقل الخصم المباشر' : 'Discount input field focused');
+        }
+      } else if (e.key === 'F10') {
+        e.preventDefault();
+        if (scannedItems.length > 0) {
+          setShowCashPaymentModal(true);
+        } else {
+          toast.error(isRtl ? 'ليست هناك أي مواد ممسوحة في المعاملة!' : 'Cart is empty!');
+        }
+      } else if (e.key === 'F9') {
+        e.preventDefault();
+        focusScanner();
+        toast.info(isRtl ? 'تم تركيز ماسح الباركود' : 'Barcode scanner focused');
+      } else if (e.key === 'F7') {
+        e.preventDefault();
+        setQuickRegForm({
+          sku: '',
+          name: '',
+          category: '',
+          brand: '',
+          quantity: 10,
+          unitCost: 0,
+          sellingPrice: 0,
+          warehouseId: warehouses && warehouses.length > 0 ? warehouses[0].id : '',
+          lowStockThreshold: 5
+        });
+        setShowQuickRegModal(true);
+      } else if (e.key === 'Escape') {
+        if (scannedItems.length > 0) {
+          if (confirm(isRtl ? 'هل تريد بالتأكيد إفراغ المعاملة الحالية؟' : 'Are you sure you want to clear current items?')) {
+            setScannedItems([]);
+            setDiscount(0);
+            setReceivedAmount('');
+            playBeep('error');
+            toast.success(isRtl ? 'تم إفراغ السلة بنجاح' : 'Cart cleared successfuly');
+          }
+        }
+      } else {
+        // High-volume Spacebar and Enter payment confirmation shortcuts
+        if (scannedItems.length > 0) {
+          const activeTag = document.activeElement?.tagName;
+          const isInputActive = activeTag === 'INPUT' || activeTag === 'TEXTAREA';
+
+          if (e.key === 'Enter') {
+            const isFromScanner = document.activeElement === scannerInputRef.current;
+            // Trigger payment instantly on Enter if focused on barcode scanner AND it's empty, or not in any input/textarea
+            if ((isFromScanner && !barcodeInput.trim()) || !isInputActive) {
+              e.preventDefault();
+              handleSubmitProcess();
+            }
+          } else if (e.key === ' ' || e.code === 'Space') {
+            // Trigger payment instantly on Spacebar if no input text fields are active
+            if (!isInputActive) {
+              e.preventDefault();
+              setShowCashPaymentModal(true);
+            }
+          }
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [scannedItems, posMode, discount, warehouses, showCashPaymentModal]);
+
+  // Handle Scanning Lookup (Now supporting asynchronous external API fallbacks safely)
+  const handleBarcodeSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    // Sanitize carriage returns, line feeds & other hidden emulation control chars
+    const query = barcodeInput.replace(/[\x00-\x1F\x7F-\x9F]/g, "").trim();
+    if (!query) return;
+
+    // 1. Search locally synchronized inventory (instant match)
+    const matchedProduct = products.find(
+      p => p.sku?.toLowerCase() === query.toLowerCase() || p.id === query
+    );
+
+    if (matchedProduct) {
+      addItemToPOS(matchedProduct);
+      setBarcodeInput('');
+      return;
+    }
+
+    // Try searching by name containing the query as local fallback
+    const matchByName = products.filter(
+      p => p.name.toLowerCase().includes(query.toLowerCase())
+    );
+    if (matchByName.length === 1) {
+      addItemToPOS(matchByName[0]);
+      setBarcodeInput('');
+      return;
+    } else if (matchByName.length > 1) {
+      // Open search lookup helper
+      setSearchTerm(query);
+      setShowProductLookup(true);
+      playBeep('success');
+      return;
+    }
+
+    // 2. If not found locally, attempt a secure network API lookup (as requested)
+    let apiProductFound = false;
+    if (externalApi) try {
+      // Show light feedback that we're validating online database
+      toast.info(isRtl ? 'المنتج غير متوفر محلياً، جاري الفحص في السحاب...' : 'Checking online barcode database...', { duration: 1500 });
+      
+      // Perform genuine network fetch request to the custom endpoint
+      const response = await fetch(`${externalApi}/products/barcode/${encodeURIComponent(query)}`);
+      
+      if (response.ok) {
+        const externalProduct = await response.json();
+        if (externalProduct && (externalProduct.name || externalProduct.title)) {
+          // Map external product format to app-compatible Product format
+          const mappedProduct: any = {
+            id: externalProduct.id ? `ext-${externalProduct.id}` : `ext-${Date.now()}`,
+            name: externalProduct.name || externalProduct.title,
+            sku: externalProduct.barcode || externalProduct.sku || query,
+            unitCost: Number(externalProduct.costPrice || externalProduct.price || 0),
+            sellingPrice: Number(externalProduct.sellingPrice || externalProduct.price || 0),
+            quantity: Number(externalProduct.stock || externalProduct.quantity || 10),
+            category: externalProduct.category || '',
+            brand: externalProduct.brand || ''
+          };
+          
+          addItemToPOS(mappedProduct);
+          setBarcodeInput('');
+          apiProductFound = true;
+          playBeep('success');
+          toast.success(isRtl ? 'تم العثور على المنتج وإضافته بنجاح للائحة عبر الـ API!' : 'Product found and added from API database!');
+          return;
+        }
+      }
+    } catch (apiError) {
+      console.warn("External API lookup bypassed or failed:", apiError);
+    }
+
+    // 3. Fallback to Fast Registration Modal if completely unfound or API fails
+    if (!apiProductFound) {
+      playBeep('error');
+      setQuickRegForm({
+        sku: query,
+        name: '',
+        category: '',
+        brand: '',
+        quantity: 10,
+        unitCost: 0,
+        sellingPrice: 0,
+        warehouseId: warehouses && warehouses.length > 0 ? warehouses[0].id : '',
+        lowStockThreshold: 5
+      });
+      setBarcodeInput('');
+      setShowQuickRegModal(true);
+      toast.info(
+        isRtl
+          ? `الرمز "${query}" غير مسجل. يرجى تسجيله فورياً للإضافة التلقائية لسلة الكاشير الكلية.`
+          : `SKU "${query}" is not registered. Please register it now to add to stock.`
+      );
+    }
+  };
+
+  const addItemToPOS = (product: Product) => {
+    // Check if item already exists in the scanned list
+    const existingIndex = scannedItems.findIndex(item => item.productId === product.id);
+    const targetPrice = Number(posMode === 'sale' ? product.sellingPrice : product.unitCost) || 0;
+
+    // Convert base price using the product's custom currency (or default store currency) to the POS activeCurrency
+    const baseCurrency = product.currency || settings?.currency || 'JOD';
+    const finalPrice = Number(convertMoney(targetPrice, baseCurrency, activeCurrency, usdUnitRates)) || 0;
+
+    // In Sales mode, protect and warn if stock level is insufficient
+    if (posMode === 'sale') {
+      const scannedQtySoFar = existingIndex !== -1 ? Number(scannedItems[existingIndex].quantity) || 0 : 0;
+      const productQty = Number(product.quantity) || 0;
+      if (productQty <= scannedQtySoFar) {
+         playBeep('error');
+         toast.warning(
+           isRtl 
+             ? `الكمية غير كافية بالمخزن! المتبقي فقط: ${productQty} وحدة.` 
+             : `Insufficient inventory! Only ${productQty} left in stock.`
+         );
+         return;
+      }
+    }
+
+    if (existingIndex !== -1) {
+      const existing = scannedItems[existingIndex];
+      const newQty = (Number(existing.quantity) || 0) + 1;
+      const uPrice = Number(existing.unitPrice) || 0;
+      const updated = [...scannedItems];
+      updated[existingIndex] = { ...existing, quantity: newQty, total: roundMoney(newQty * uPrice, activeCurrency) };
+      setScannedItems(updated);
+    } else {
+      // Add standard new item with dynamic converted price
+      itemBaseRef.current[product.id] = { amount: targetPrice, currency: baseCurrency };
+      const newItem: InvoiceItem = {
+        productId: product.id,
+        description: product.name,
+        quantity: 1,
+        unitPrice: finalPrice,
+        total: finalPrice
+      };
+      setScannedItems([...scannedItems, newItem]);
+    }
+    
+    // Set the last scanned product state to trigger UI visual flash confirmation
+    setLastScannedProductId(product.id);
+    const audioContext = audioContextRef.current || new (window.AudioContext || (window as any).webkitAudioContext)();
+    if (audioContext.state === 'suspended') {
+      audioContext.resume().catch(() => {});
+    }
+    const timeoutId = setTimeout(() => {
+      setLastScannedProductId(null);
+    }, 1500);
+
+    playBeep('success');
+  };
+
+  const updateItemQty = (productId: string, delta: number) => {
+    const idx = scannedItems.findIndex(item => item.productId === productId);
+    if (idx === -1) return;
+
+    const originalProduct = products.find(p => p.id === productId);
+    const updated = [...scannedItems];
+    const currentQty = Number(updated[idx].quantity) || 0;
+    const newQty = currentQty + delta;
+
+    if (newQty <= 0) {
+      removeItem(productId);
+      return;
+    }
+
+    // Safety Stock Check in Sales Mode
+    if (posMode === 'sale' && originalProduct && delta > 0) {
+      const origQty = Number(originalProduct.quantity) || 0;
+      if (origQty < newQty) {
+        playBeep('error');
+        toast.warning(
+          isRtl 
+            ? `الكمية غير كافية بالمخزن! المتبقي فقط: ${origQty} وحدة.` 
+            : `Insufficient inventory! Only ${origQty} left in stock.`
+        );
+        return;
+      }
+    }
+
+    const uPrice = Number(updated[idx].unitPrice) || 0;
+    updated[idx] = { ...updated[idx], quantity: newQty, total: roundMoney(newQty * uPrice, activeCurrency) };
+    setScannedItems(updated);
+    playBeep('success');
+  };
+
+  const setItemQty = (productId: string, val: number) => {
+    if (isNaN(val)) return;
+    if (val <= 0) {
+      removeItem(productId);
+      return;
+    }
+
+    const idx = scannedItems.findIndex(item => item.productId === productId);
+    if (idx === -1) return;
+
+    const originalProduct = products.find(p => p.id === productId);
+    const updated = [...scannedItems];
+
+    // Safety Stock Check in Sales Mode
+    if (posMode === 'sale' && originalProduct) {
+      const origQty = Number(originalProduct.quantity) || 0;
+      if (origQty < val) {
+        playBeep('error');
+        toast.warning(
+          isRtl 
+            ? `الكمية غير كافية بالمخزن! المتبقي فقط: ${origQty} وحدة.` 
+            : `Insufficient inventory! Only ${origQty} left in stock.`
+        );
+        return;
+      }
+    }
+
+    const uPrice = Number(updated[idx].unitPrice) || 0;
+    updated[idx].quantity = val;
+    updated[idx].total = roundMoney(val * uPrice, activeCurrency);
+    setScannedItems(updated);
+  };
+
+  const removeItem = (productId: string) => {
+    setScannedItems(scannedItems.filter(item => item.productId !== productId));
+    playBeep('error');
+    toast.success(isRtl ? 'تم حذف الصنف من القائمة' : 'Item removed from bill');
+  };
+
+  // Calculations
+  const totalPieces = scannedItems.reduce((acc, item) => acc + (Number(item.quantity) || 0), 0);
+  const subtotal = scannedItems.reduce((acc, item) => acc + (Number(item.total) || 0), 0);
+  const vatRate = Number(settings?.defaultVatRate) || 16;
+  const taxAmount = enableTax ? roundMoney((subtotal * vatRate) / 100, activeCurrency) : 0;
+  const preDiscountGrandTotal = roundMoney(subtotal + taxAmount, activeCurrency);
+  const appliedDiscount = Math.min(Math.max(Number(discount) || 0, 0), preDiscountGrandTotal);
+  const grandTotal = roundMoney(preDiscountGrandTotal - appliedDiscount, activeCurrency);
+
+  // Print Thermal 80mm Receipt using hidden iframe rendering
+  const printThermalReceipt = (invoiceObj: Invoice) => {
+    const iframe = document.createElement('iframe');
+    iframe.style.position = 'absolute';
+    iframe.style.width = '0px';
+    iframe.style.height = '0px';
+    iframe.style.border = 'none';
+    document.body.appendChild(iframe);
+
+    const doc = iframe.contentWindow?.document;
+    if (!doc) return;
+
+    let itemsHtml = '';
+    invoiceObj.items.forEach(item => {
+      itemsHtml += `
+        <tr>
+          <td class="item-name">${escapeHtml(item.description)}</td>
+          <td class="item-qty">${item.quantity}</td>
+          <td class="item-price">${formatCurrencyValue(item.total, invoiceObj.currency)}</td>
+        </tr>
+      `;
+    });
+
+    const currentDate = new Date(invoiceObj.date).toLocaleString(isRtl ? 'ar-JO' : 'en-US');
+    const currencyStr = invoiceObj.currency || activeCurrency;
+    const symbolMap: Record<string, string> = {
+      JOD: 'د.أ',
+      ILS: '₪',
+      USD: '$',
+      IQD: 'د.ع',
+      SAR: 'ر.س',
+      LYD: 'د.ل'
+    };
+    const symbol = symbolMap[currencyStr] || currencyStr;
+
+    const receiptHTML = `
+      <html>
+      <head>
+          <style>
+              @page { margin: 0; size: 80mm auto; }
+              body { 
+                  font-family: 'Inter', system-ui, -apple-system, sans-serif; 
+                  font-size: 11px; 
+                  color: #000; 
+                  margin: 0; 
+                  padding: 8px; 
+                  width: 72mm;
+                  direction: ${isRtl ? 'rtl' : 'ltr'}; 
+              }
+              .header-title { text-align: center; font-size: 15px; font-weight: 900; margin: 5px 0 2px 0; letter-spacing: -0.5px; }
+              .header-sub { text-align: center; font-size: 8px; color: #555; margin-bottom: 8px; font-weight: bold; text-transform: uppercase; }
+              .info { text-align: center; font-size: 9px; line-height: 1.4; margin-bottom: 10px; }
+              .divider { border-bottom: 1px dashed #000; margin: 8px 0; }
+              table { width: 100%; border-collapse: collapse; }
+              th { border-bottom: 1px solid #000; padding-bottom: 4px; text-align: ${isRtl ? 'right' : 'left'}; font-size: 9px; font-weight: 900; }
+              td { padding: 4px 0; border-bottom: 1px dotted #ccc; font-size: 10px; }
+              .item-name { text-align: ${isRtl ? 'right' : 'left'}; }
+              .item-qty { text-align: center; font-weight: bold; }
+              .item-price { text-align: ${isRtl ? 'left' : 'right'}; font-family: monospace; }
+              .calc-row { display: flex; justify-content: space-between; font-size: 10px; padding: 2px 0; }
+              .total-section { margin-top: 8px; font-weight: 900; font-size: 12px; display: flex; justify-content: space-between; border-top: 1px dashed #000; padding-top: 4px; }
+              .footer { text-align: center; margin-top: 15px; font-size: 8px; line-height: 1.4; font-weight: bold; }
+          </style>
+      </head>
+      <body>
+          <div class="header-title">${escapeHtml(settings?.businessName || (isRtl ? 'مستودعي الذكي' : 'Mostawdaee'))}</div>
+          <div class="header-sub">Enterprise Management POS System</div>
+          <div class="info">
+              <b>${isRtl ? 'رقم الفاتورة' : 'Invoice No'}: #${escapeHtml(invoiceObj.invoiceNumber)}</b><br>
+              ${isRtl ? 'التاريخ والوقت' : 'Date/Time'}: ${currentDate}<br>
+              ${isRtl ? 'نوع العملية' : 'Process Type'}: ${invoiceObj.type === 'sale' ? (isRtl ? 'مبيعات نقاط البيع فوري' : 'POS Sales Direct') : (isRtl ? 'توريد بضائع مستودع' : 'Stock Supply Direct')}
+          </div>
+          
+          <div class="divider"></div>
+          
+          <table>
+              <thead>
+                  <tr>
+                      <th class="item-name">${isRtl ? 'المادة السلعية' : 'Item Description'}</th>
+                      <th style="width: 15%; text-align: center;">${isRtl ? 'الكمية' : 'Qty'}</th>
+                      <th style="width: 30%; text-align: ${isRtl ? 'left' : 'right'};">${isRtl ? 'المجموع' : 'Total'}</th>
+                  </tr>
+              </thead>
+              <tbody>
+                  ${itemsHtml}
+              </tbody>
+          </table>
+          
+          <div class="divider"></div>
+
+          <div class="calc-row">
+              <span>${isRtl ? 'المجموع الفرعي:' : 'Subtotal:'}</span>
+              <span>${formatCurrencyValue(invoiceObj.subtotal, invoiceObj.currency)}</span>
+          </div>
+          <div class="calc-row">
+              <span>${isRtl ? 'ضريبة القيمة المضافة:' : 'VAT Tax:'}</span>
+              <span>${formatCurrencyValue(invoiceObj.taxAmount, invoiceObj.currency)}</span>
+          </div>
+          ${invoiceObj.discount ? `
+          <div class="calc-row" style="color: #d32f2f;">
+              <span>${isRtl ? 'الخصم:' : 'Discount:'}</span>
+              <span>-${formatCurrencyValue(invoiceObj.discount, invoiceObj.currency)}</span>
+          </div>
+          ` : ''}
+          
+          <div class="total-section">
+              <span>${isRtl ? 'المجموع النهائي الكلي:' : 'GRAND TOTAL:'}</span>
+              <span>${formatCurrencyValue(invoiceObj.totalAmount, invoiceObj.currency)}</span>
+          </div>
+
+          ${invoiceObj.cashReceived !== undefined ? `
+          <div class="calc-row" style="margin-top: 4px; font-weight: bold;">
+              <span>${isRtl ? 'المبلغ المستلم:' : 'Cash Received:'}</span>
+              <span>${formatCurrencyValue(invoiceObj.cashReceived, invoiceObj.currency)}</span>
+          </div>
+          ` : ''}
+          ${invoiceObj.changeDue !== undefined ? `
+          <div class="calc-row" style="font-weight: bold;">
+              <span>${isRtl ? 'المبلغ المتبقي (المرتجع):' : 'Change Due:'}</span>
+              <span>${formatCurrencyValue(invoiceObj.changeDue, invoiceObj.currency)}</span>
+          </div>
+          ` : ''}
+          
+          <div class="footer">
+              ${isRtl ? 'شكراً لتعاملكم وشراكتكم معنا' : 'Thank you for your business and partnership'}<br>
+              ${isRtl ? 'نظام مستودعي لإدارة الفواتير والمخزون' : 'Mostawdaee Automated Ledger Platform'}
+          </div>
+      </body>
+      </html>
+    `;
+
+    doc.open();
+    doc.write(receiptHTML);
+    doc.close();
+
+    iframe.contentWindow?.focus();
+    setTimeout(() => {
+      iframe.contentWindow?.print();
+      setTimeout(() => {
+        document.body.removeChild(iframe);
+      }, 1000);
+    }, 250);
+  };
+
+  // Submit standard invoice
+  const handleSubmitProcess = async (cashOverride?: number) => {
+    if (scannedItems.length === 0) {
+      playBeep('error');
+      toast.error(isRtl ? 'ليست هناك أي مواد ممسوحة في المعاملة!' : 'Cart is empty!');
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const typedCash = typeof cashOverride === 'number' ? cashOverride : parseFloat(receivedAmount);
+      const isCashSale = posMode === 'sale' && paymentMethod === 'cash';
+      const parsedCash = isCashSale ? (Number.isFinite(typedCash) && typedCash > 0 ? typedCash : grandTotal) : grandTotal;
+      if (isCashSale && parsedCash < grandTotal - 1e-6) {
+        setIsSubmitting(false);
+        playBeep('error');
+        toast.error(isRtl ? 'المبلغ المستلم أقل من إجمالي الفاتورة!' : 'Received amount is less than the invoice total!');
+        return;
+      }
+      const generatedNo = peekInvoiceNumber(invoicePrefix, sessionUid);
+      const changeDue = roundMoney(Math.max(0, parsedCash - grandTotal), activeCurrency);
+      
+      const officialInvoice: Invoice = {
+        id: `pos-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        invoiceNumber: generatedNo,
+        customerName: posMode === 'sale' ? (isRtl ? 'مبيعات نقاط البيع مباشرة' : 'Direct POS Customer') : undefined,
+        supplierName: posMode === 'purchase' ? (isRtl ? 'مشتريات توريد مباشرة' : 'Direct Supplier') : undefined,
+        items: [...scannedItems],
+        subtotal,
+        taxAmount,
+        totalAmount: grandTotal,
+        type: posMode,
+        date: Date.now(),
+        currency: activeCurrency as any,
+        discount: appliedDiscount,
+        cashReceived: parsedCash,
+        changeDue: changeDue,
+        paymentMethod
+      };
+
+      // Persist first: any failure here aborts checkout (cart is kept) instead of showing a false success.
+      if (user) {
+        await saveInvoice(officialInvoice);
+        consumeInvoiceNumber(invoicePrefix, sessionUid);
+      } else {
+        toast.warning(
+          isRtl
+            ? 'وضع المعاينة (ضيف): تمت العملية للتجربة فقط ولم تُحفظ الفاتورة ولم يتغيّر المخزون. سجّل الدخول للحفظ الفعلي.'
+            : 'Guest preview: this sale was NOT saved and stock was not changed. Sign in to record real sales.',
+          { duration: 6000 }
+        );
+      }
+
+      // Optional mirror to a third-party API (only when VITE_EXTERNAL_SALES_API is configured).
+      if (externalApi) {
+        const invoiceData = {
+          id: Date.now(),
+          items: scannedItems.map((item) => ({
+            product_id: item.productId,
+            quantity: item.quantity,
+            price: item.unitPrice,
+          })),
+          total_amount: grandTotal,
+          cash_received: parsedCash,
+          change_due: changeDue,
+          created_at: new Date().toISOString(),
+          is_synced: false,
+        };
+        try {
+          const response = await fetch(`${externalApi}/sales/store`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ...invoiceData, is_synced: true }),
+          });
+          if (!response.ok) throw new Error(`external api ${response.status}`);
+        } catch (apiErr) {
+          console.warn('External API post failed; queued for background sync:', apiErr);
+          try {
+            const queued = JSON.parse(localStorage.getItem('offline_sales') || '[]');
+            queued.push(invoiceData);
+            localStorage.setItem('offline_sales', JSON.stringify(queued));
+          } catch (storageErr) {
+            console.error('Failed to queue external sale:', storageErr);
+          }
+        }
+      }
+
+      // Auto-trigger printing of thermal receipt for instant fast-paced checkout flow
+      printThermalReceipt(officialInvoice);
+
+      // Clear State
+      setLastInvoiceNumber(generatedNo);
+      setInvoiceTick((t) => t + 1);
+      setLastCompletedInvoice(officialInvoice);
+      setScannedItems([]);
+      setDiscount(0);
+      setEnableTax(false);
+      setReceivedAmount('');
+      setIsSubmitting(false);
+      setShowCashPaymentModal(false);
+      setShowSuccessModal(true);
+      playBeep('success_checkout');
+    } catch (error: any) {
+      console.error(error);
+      setIsSubmitting(false);
+      playBeep('error');
+      if (!String(error?.message || '').startsWith('Insufficient stock')) {
+        toast.error(isRtl ? 'تعذّر حفظ الفاتورة؛ لم تُسجَّل العملية وبقيت السلة كما هي.' : 'Could not save the invoice; nothing was recorded and the cart was kept.');
+      }
+    }
+  };
+
+  // Format currency with standard support
+  const formatCurrencyValue = (val: number, customCurrency?: string) =>
+    formatMoney(val, customCurrency || activeCurrency);
+
+  const filteredLookupProducts = products.filter(p => 
+    p.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
+    p.sku?.toLowerCase().includes(searchTerm.toLowerCase())
+  );
+
+  return (
+    <div className="flex-1 p-2 sm:p-4 lg:p-6 flex flex-col min-h-[85vh] text-slate-800 dark:text-slate-100" dir={isRtl ? 'rtl' : 'ltr'}>
+      {/* Title & Mode Switcher header */}
+      <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 pb-5 border-b border-slate-200/60 dark:border-slate-805/60">
+        <div>
+          <div className="flex items-center gap-2">
+            <span className="p-2 bg-emerald-600 text-white rounded-xl">
+              <Barcode size={22} />
+            </span>
+            <h1 className="text-2xl font-black text-slate-905 dark:text-white tracking-tight">
+              {isRtl ? 'نظام المبيعات والتوريد المباشر بالباركود' : 'Direct Sales & Supply POS'}
+            </h1>
+          </div>
+          <p className="text-slate-500 dark:text-slate-400 text-xs font-semibold mt-1">
+            {isRtl ? 'امسح الباركود، أو انقر على المنتجات للبيع السريع، أو ابحث يدوياً' : 'Scan items, tap menu cards, or search manually for fast checkouts'}
+          </p>
+        </div>
+
+        {/* Premium Mode Segment Switcher */}
+        <div className="flex items-center bg-slate-100 dark:bg-slate-900/60 p-1 rounded-2xl border border-slate-200/60 dark:border-slate-800/60 w-fit self-start shrink-0 select-none">
+          <button 
+            type="button"
+            onClick={() => {
+              setPosMode('sale');
+              setScannedItems([]);
+              playBeep('success');
+            }}
+            className={`px-5 py-2.5 rounded-xl text-xs font-black tracking-tight transition-all duration-300 flex items-center gap-2 cursor-pointer ${
+              posMode === 'sale' 
+                ? 'bg-gradient-to-r from-cyan-500 to-blue-600 text-white shadow-md' 
+                : 'text-slate-400 hover:text-slate-700 dark:hover:text-slate-200'
+            }`}
+          >
+            <ShoppingCart size={15} />
+            <span>{isRtl ? 'وضع البيع المباشر' : 'Direct POS Sales'}</span>
+          </button>
+          
+          <button 
+            type="button"
+            onClick={() => {
+              setPosMode('purchase');
+              setScannedItems([]);
+              playBeep('success');
+            }}
+            className={`px-5 py-2.5 rounded-xl text-xs font-black tracking-tight transition-all duration-300 flex items-center gap-2 cursor-pointer ${
+              posMode === 'purchase' 
+                ? 'bg-gradient-to-r from-emerald-500 to-teal-600 text-white shadow-md' 
+                : 'text-slate-400 hover:text-slate-700 dark:hover:text-slate-200'
+            }`}
+          >
+            <Truck size={15} />
+            <span>{isRtl ? 'وضع توريد البضائع' : 'Stock Supply Mode'}</span>
+          </button>
+        </div>
+      </div>
+
+      {/* Main Grid Workspace */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-6 flex-1 items-stretch">
+        
+        {/* Left Side: Product Grid, touch points, categories, barcode scan bar */}
+        <div className="lg:col-span-2 flex flex-col gap-4 min-w-0 box-border">
+          
+          {/* 1. Barcode scanning bar input */}
+          <div className="flex flex-col sm:flex-row gap-3 items-stretch w-full">
+            <form onSubmit={handleBarcodeSubmit} className="relative flex-1">
+              <input 
+                ref={scannerInputRef}
+                type="text" 
+                value={barcodeInput}
+                onChange={(e) => setBarcodeInput(e.target.value)}
+                onBlur={() => {
+                  setTimeout(() => {
+                    const activeTag = document.activeElement?.tagName;
+                    if (activeTag !== 'INPUT' && activeTag !== 'TEXTAREA') {
+                      scannerInputRef.current?.focus();
+                    }
+                  }, 80);
+                }}
+                placeholder={isRtl ? "مرر باركود الصنف هنا أو اكتب رمز الـ SKU الخاص بالمادة..." : "Pass item barcode here or enter SKU codename manually..."} 
+                className="w-full bg-white dark:bg-white/[0.03] border-2 border-emerald-500/50 focus:border-emerald-500 rounded-xl px-5 py-4 text-emerald-600 dark:text-emerald-400 font-mono text-base font-bold shadow-sm outline-none transition-colors"
+                autoFocus
+              />
+              <div className={`absolute ${isRtl ? 'left-4' : 'right-4'} top-1/2 -translate-y-1/2 text-emerald-500 font-bold hidden sm:flex items-center gap-2 text-xs`}>
+                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                <span>[ 📟 {isRtl ? 'مستعد للمسح' : 'Ready to Scan'} ]</span>
+              </div>
+            </form>
+            <button
+              type="button"
+              onClick={() => setIsCameraScanning(true)}
+              className="px-6 py-4 sm:py-0 bg-gradient-to-r from-cyan-600 via-blue-600 to-indigo-600 hover:from-cyan-500 hover:via-blue-500 hover:to-indigo-500 text-white rounded-xl font-bold flex items-center justify-center gap-2.5 transition shadow-lg shadow-cyan-500/15 active:scale-95 cursor-pointer text-xs md:text-sm shrink-0 border border-cyan-400/20"
+              title={isRtl ? "مسح الباركود باستخدام الكاميرا" : "Scan barcode using Camera"}
+            >
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-200 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-cyan-155"></span>
+              </span>
+              <span className="text-base sm:text-lg">📸</span>
+              <span>{isRtl ? 'مسح باركود الكاميرا' : 'Camera Scan Barcode'}</span>
+            </button>
+          </div>
+
+          {/* 2. Quick camera & manual inventory helper lookup buttons */}
+          <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-50 dark:bg-white/[0.02] p-3 rounded-xl border border-slate-200/50 dark:border-white/5">
+            <button 
+              type="button"
+              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                isCameraScanning ? 'bg-cyan-500 text-white' : 'bg-white dark:bg-white/5 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-white/10'
+              }`}
+              onClick={() => setIsCameraScanning(true)}
+            >
+              📊 {isRtl ? "تفعيل مسح الكاميرا" : "Scan via Device Camera"}
+            </button>
+
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={() => {
+                  setSearchTerm('');
+                  setShowProductLookup(true);
+                }}
+                className="text-xs font-bold text-slate-600 dark:text-slate-350 flex items-center gap-1.5 hover:text-indigo-600 transition"
+              >
+                🔍 {isRtl ? 'البحث بالاسم' : 'Lookup Item'}
+              </button>
+
+              <span className="h-4 w-[1px] bg-slate-200 dark:bg-white/10" />
+
+              <button
+                type="button"
+                onClick={() => {
+                  setQuickRegForm({
+                    sku: '',
+                    name: '',
+                    category: '',
+                    brand: '',
+                    quantity: 10,
+                    unitCost: 0,
+                    sellingPrice: 0,
+                    warehouseId: warehouses && warehouses.length > 0 ? warehouses[0].id : '',
+                    lowStockThreshold: 5
+                  });
+                  setShowQuickRegModal(true);
+                }}
+                className="text-xs font-bold text-emerald-600 dark:text-emerald-400 flex items-center gap-1.5 hover:text-emerald-500 transition cursor-pointer"
+              >
+                ✨ {isRtl ? 'تسجيل منتج سريع (F7)' : 'Quick Register (F7)'}
+              </button>
+            </div>
+          </div>
+
+          {/* 3. Horizontal scrolling category filter strip (Cafe style) */}
+          <div className="flex items-center gap-2 overflow-x-auto pb-1 scrollbar-hide w-full box-border">
+            {categoriesList.map((cat) => {
+              const count = cat === 'all' 
+                ? displayedProducts.length 
+                : displayedProducts.filter(p => p.category === cat).length;
+              
+              const label = cat === 'all' 
+                ? (isRtl ? 'الكل' : 'All Items')
+                : cat;
+              
+              const isSelected = selectedCategory === cat;
+              return (
+                <button 
+                  key={cat} 
+                  type="button"
+                  onClick={() => setSelectedCategory(cat)}
+                  className={`whitespace-nowrap px-4 py-2 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                    isSelected 
+                      ? 'bg-slate-900 text-white dark:bg-white dark:text-slate-900 shadow-md' 
+                      : 'bg-white dark:bg-white/5 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-white/10 hover:bg-slate-100 dark:hover:bg-white/10'
+                  }`}
+                >
+                  {label} <span className="text-[10px] opacity-60 font-mono">({count})</span>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* 4. Touch grid displaying products based on active category */}
+          <div className="flex-1 overflow-y-auto max-h-[550px] w-full box-border pr-1">
+            <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-4 w-full box-border">
+              {displayedProducts
+                .filter(p => selectedCategory === 'all' || p.category === selectedCategory)
+                .map((product) => {
+                  const getEmojiIcon = (category: string = '', name: string = '') => {
+                    const text = (category + ' ' + name).toLowerCase();
+                    if (text.includes('coffee') || text.includes('قهوة') || text.includes('اسبريسو') || text.includes('كابتشينو') || text.includes('espresso') || text.includes('cappuccino')) return '☕';
+                    if (text.includes('tea') || text.includes('شاي')) return '🍵';
+                    if (text.includes('croissant') || text.includes('كرواسون') || text.includes('donut') || text.includes('دونات') || text.includes('مخبوزات') || text.includes('خبز')) return '🥐';
+                    if (text.includes('milk') || text.includes('حليب') || text.includes('cheese') || text.includes('جبن') || text.includes('ألبان')) return '🥛';
+                    if (text.includes('orange') || text.includes('عصير') || text.includes('juice') || text.includes('ليمون')) return '🍹';
+                    if (text.includes('water') || text.includes('ماء') || text.includes('مياه') || text.includes('cola') || text.includes('كولا')) return '💧';
+                    if (text.includes('asset') || text.includes('أصل') || text.includes('جهاز') || text.includes('equipment')) return '⚙️';
+                    return '📦';
+                  };
+
+                  const emoji = getEmojiIcon(product.category, product.name);
+                  const rawPrice = posMode === 'sale' ? product.sellingPrice : product.unitCost;
+                  const baseCurrency = product.currency || settings?.currency || 'JOD';
+                  const activePrice = Number(convertMoney(rawPrice, baseCurrency, activeCurrency, usdUnitRates)) || 0;
+
+                  return (
+                    <button 
+                      key={product.id} 
+                      type="button"
+                      onClick={() => addItemToPOS(product)}
+                      className="group relative flex flex-col items-center justify-center p-4 rounded-xl border border-slate-200 bg-white dark:border-white/10 dark:bg-white/[0.02] hover:border-emerald-500/50 hover:bg-emerald-50 dark:hover:bg-emerald-500/10 transition-all duration-200 active:scale-95 min-h-[120px] box-border cursor-pointer shadow-sm text-center"
+                    >
+                      <span className="text-3xl mb-1.5 group-hover:scale-110 transition-transform">
+                        {emoji}
+                      </span>
+                      <span className="text-xs font-bold text-slate-700 dark:text-slate-200 line-clamp-2 w-full text-center">
+                        {product.name}
+                      </span>
+                      <span className="text-[10px] text-slate-400 font-mono mt-0.5">
+                        {isRtl ? 'بالمخزن:' : 'Qty:'} {product.quantity}
+                      </span>
+                      <span className="text-emerald-600 dark:text-emerald-400 font-mono font-bold mt-1 text-xs">
+                        {formatCurrencyValue(activePrice)}
+                      </span>
+                    </button>
+                  );
+                })}
+            </div>
+          </div>
+
+          {/* Keyboard Shortcuts indicators inside active terminal */}
+          <div className="mt-4 pt-3 border-t border-slate-200/50 dark:border-slate-800/80 flex flex-wrap items-center gap-2.5 text-[10px] text-slate-400 font-extrabold select-none font-arabic">
+            <span className="bg-slate-100 dark:bg-slate-900 border border-slate-200/40 px-2 py-0.5 rounded text-slate-700 dark:text-slate-450">
+              <kbd className="font-mono bg-white dark:bg-slate-950 px-1 border border-slate-300 dark:border-white/10 rounded">F9</kbd> {isRtl ? 'تركيز الماسح الكاشف' : 'Focus Scanner'}
+            </span>
+            <span className="bg-slate-100 dark:bg-slate-900 border border-slate-200/40 px-2 py-0.5 rounded text-slate-700 dark:text-slate-450">
+              <kbd className="font-mono bg-white dark:bg-slate-950 px-1 border border-slate-300 dark:border-white/10 rounded">F2</kbd> {isRtl ? 'تعليق الفاتورة' : 'Hold/Suspend'}
+            </span>
+            <span className="bg-slate-100 dark:bg-slate-900 border border-slate-200/40 px-2 py-0.5 rounded text-slate-700 dark:text-slate-450 text-rose-600 dark:text-rose-400">
+              <kbd className="font-mono bg-white dark:bg-slate-950 px-1 border border-rose-300 dark:border-rose-900/40 rounded text-rose-600">F4</kbd> {isRtl ? 'إلغاء الفاتورة بالكامل' : 'Cancel/Clear Invoice'}
+            </span>
+            <span className="bg-slate-100 dark:bg-slate-900 border border-slate-200/40 px-2 py-0.5 rounded text-slate-700 dark:text-slate-450">
+              <kbd className="font-mono bg-white dark:bg-slate-950 px-1 border border-slate-300 dark:border-white/10 rounded">F3</kbd> {isRtl ? 'تركيز الخصم' : 'Focus Discount'}
+            </span>
+            <span className="bg-slate-100 dark:bg-slate-900 border border-slate-200/40 px-2 py-0.5 rounded text-slate-700 dark:text-slate-450">
+              <kbd className="font-mono bg-white dark:bg-slate-950 px-1 border border-slate-300 dark:border-white/10 rounded">F10</kbd> {isRtl ? 'دفع فوري' : 'Submit Check'}
+            </span>
+          </div>
+
+        </div>
+
+        {/* Right Side: Invoice settlement, shopping cart & pay tools (Cart & Checkout) */}
+        <div className="w-full lg:w-96 xl:w-[410px] flex flex-col rounded-2xl border border-slate-200 bg-white shadow-lg dark:border-white/10 dark:bg-[#0f172a] box-border overflow-hidden shrink-0">
+          
+          {/* Header */}
+          <div className="p-4 border-b border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-white/[0.02] flex justify-between items-center box-border">
+            <div className="flex items-center gap-2">
+              <ShoppingCart size={16} className="text-emerald-500" />
+              <h2 className="font-bold text-slate-900 dark:text-white text-sm">
+                {isRtl ? 'الفاتورة الحالية' : 'Current Checkout Invoice'}
+              </h2>
+            </div>
+            <span className="text-xs font-mono bg-slate-205 dark:bg-white/10 text-slate-700 dark:text-slate-300 px-2 py-1 rounded">
+              #{previewInvoiceNo}
+            </span>
+          </div>
+
+          {/* Invoice Currency Switcher */}
+          <div className="px-4 py-2 bg-slate-100 dark:bg-white/[0.01] border-b border-slate-200/50 dark:border-white/5 flex items-center justify-between text-xs gap-2">
+            <span className="text-slate-500 dark:text-slate-400 font-bold flex items-center gap-1.5 shrink-0">
+              🪙 {isRtl ? 'عملة البيع الفوري:' : 'Checkout Currency:'}
+            </span>
+            <div className="flex items-center flex-wrap gap-1 bg-white dark:bg-slate-900 border border-slate-200 dark:border-white/10 rounded-lg p-0.5 shadow-sm">
+              {['JOD', 'ILS', 'USD', 'IQD', 'SAR', 'LYD'].map((cur) => (
+                <button
+                  key={cur}
+                  type="button"
+                  onClick={() => handleCurrencyChange(cur)}
+                  className={`px-2 py-1 rounded text-[10px] font-mono font-bold transition-all cursor-pointer ${
+                    activeCurrency === cur
+                      ? 'bg-emerald-500 text-white shadow-sm'
+                      : 'text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-white/5'
+                  }`}
+                >
+                  {cur}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Suspended Bills Management Banner */}
+          {heldBills.length > 0 && (
+            <div className="px-4 py-3 bg-slate-50 dark:bg-slate-900/40 border-b border-slate-200 dark:border-slate-800/80 flex flex-col gap-2 transition-all">
+              <div className="flex justify-between items-center text-xs text-slate-700 dark:text-slate-300 font-black">
+                <span className="flex items-center gap-1.5 font-arabic">
+                  <span className="relative flex h-2 w-2">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-2 w-2 bg-amber-500"></span>
+                  </span>
+                  ⏳ {isRtl ? 'الفواتير المعلقة بانتظار الصندوق (' : 'Suspended Bills ('}
+                  <span className="text-amber-600 dark:text-amber-400">{heldBills.length}</span>)
+                </span>
+                <span className="text-[10px] text-slate-400 font-medium font-arabic">
+                  {isRtl ? 'اضغط للاسترجاع السريع' : 'Click to restore'}
+                </span>
+              </div>
+              
+              <div className="grid grid-cols-1 gap-2 max-h-[160px] overflow-y-auto pr-1">
+                {heldBills.map(bill => {
+                  const itemsCount = bill.itemCount ?? bill.items?.reduce((acc: number, item: any) => acc + (Number(item.quantity) || 0), 0) ?? 0;
+                  const billTotal = bill.totalAmount ?? bill.items?.reduce((acc: number, item: any) => acc + (Number(item.total) || 0), 0) ?? 0;
+                  const displayTime = bill.time ?? new Date(bill.date || Date.now()).toLocaleTimeString(isRtl ? 'ar-EG' : 'en-US', { hour: '2-digit', minute: '2-digit' });
+                  const billCurrency = bill.currency || activeCurrency;
+                  
+                  return (
+                    <div 
+                      key={bill.id} 
+                      className="group flex flex-col gap-1.5 bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800/65 rounded-xl p-2.5 shadow-xs hover:border-amber-500/50 dark:hover:border-amber-500/30 transition-all font-arabic relative overflow-hidden"
+                    >
+                      {/* Left amber strip indication */}
+                      <span className="absolute top-0 bottom-0 left-0 w-1 bg-amber-500 opacity-70 group-hover:opacity-100 transition-opacity" />
+                      
+                      <div className="flex items-center justify-between gap-2 pl-1.5">
+                        <span className="text-xs font-mono font-black text-slate-800 dark:text-slate-200">
+                          #{bill.invoiceNumber}
+                        </span>
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[10px] text-slate-400 font-mono flex items-center gap-0.5">
+                            ⏱️ {displayTime}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => handleDiscardHeldBill(bill.id)}
+                            className="text-slate-400 hover:text-rose-500 transition-colors font-medium p-1 text-[11px] hover:bg-slate-100 dark:hover:bg-white/5 rounded-md cursor-pointer"
+                            title={isRtl ? "إلغاء وإتلاف الفاتورة" : "Delete held bill"}
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="flex justify-between items-center text-[11px] leading-none pl-1.5">
+                        <div className="text-slate-500 dark:text-slate-400 font-medium">
+                          {isRtl ? `عدد المواد: ${itemsCount} جهات` : `Items: ${itemsCount}`}
+                        </div>
+                        <div className="text-slate-900 dark:text-amber-400 font-extrabold font-mono text-xs">
+                          {formatMoney(Number(billTotal) || 0, billCurrency)}
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => handleRestoreBill(bill)}
+                        className="mt-1 w-full flex items-center justify-center gap-1 py-1.5 bg-amber-500/10 hover:bg-amber-600 hover:text-white text-amber-700 dark:text-amber-300 rounded-lg text-[11px] font-bold transition-all border border-amber-500/20 active:scale-[0.98] cursor-pointer"
+                      >
+                        🔄 {isRtl ? 'استرجاع الفاتورة بالكامل' : 'Restore Entire Invoice'}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Scrollable invoice active slots */}
+          <div className="flex-1 overflow-y-auto p-3 box-border space-y-2 max-h-[350px]">
+            {scannedItems.length === 0 ? (
+              <div className="text-center py-20 flex flex-col items-center justify-center space-y-2">
+                <span className="text-3xl">🛒</span>
+                <span className="text-xs text-slate-400 font-bold">
+                  {isRtl ? 'سلة المشتريات فارغة حالياً' : 'Your cart is currently empty'}
+                </span>
+                <p className="text-[10px] text-slate-400 max-w-xs px-4">
+                  {isRtl ? 'امسح الباركود الخاص بالقطعة أو اضغط على أحد المنتجات السريعة باليمين لبدء الفاتورة.' : 'Scan code or click easy-selection products to start.'}
+                </p>
+              </div>
+            ) : (
+              scannedItems.map((item) => {
+                const origin = products.find(p => p.id === item.productId);
+                return (
+                  <div 
+                    key={item.productId} 
+                    className={`flex flex-col p-3 rounded-xl border transition-all duration-300 w-full box-border ${
+                      item.productId === lastScannedProductId
+                        ? 'bg-emerald-500/10 border-emerald-500 ring-2 ring-emerald-500/30 shadow-md shadow-emerald-500/20'
+                        : 'border-slate-100 bg-slate-50 dark:border-white/5 dark:bg-white/[0.02] hover:border-slate-300 dark:hover:border-white/10'
+                    }`}
+                  >
+                    <div className="flex justify-between items-start w-full gap-2">
+                      <span className="font-semibold text-xs text-slate-800 dark:text-slate-200 line-clamp-2">
+                        {item.description}
+                      </span>
+                      <span className="font-mono font-bold text-emerald-600 dark:text-emerald-400 shrink-0 text-xs">
+                        {formatCurrencyValue(item.total)}
+                      </span>
+                    </div>
+
+                    {/* Quantity state controls */}
+                    <div className="flex justify-between items-center mt-3.5 w-full">
+                      <span className="text-[10px] text-slate-405 font-mono">
+                        {formatCurrencyValue(item.unitPrice)} / {isRtl ? 'للوحدة' : 'unit'}
+                      </span>
+                      <div className="flex items-center gap-2 bg-white dark:bg-black/20 rounded-lg p-1 border border-slate-200 dark:border-white/5">
+                        <button 
+                          type="button"
+                          onClick={() => updateItemQty(item.productId, -1)}
+                          className="w-6 h-6 rounded bg-slate-100 dark:bg-white/10 flex items-center justify-center text-slate-705 dark:text-white hover:bg-rose-500 hover:text-white transition-colors text-xs font-bold cursor-pointer"
+                        >
+                          -
+                        </button>
+                        <input
+                          type="number"
+                          min="0"
+                          value={item.quantity}
+                          onChange={(e) => {
+                            const val = parseInt(e.target.value, 10);
+                            setItemQty(item.productId, isNaN(val) ? 0 : val);
+                          }}
+                          className="w-10 bg-transparent text-center font-bold text-xs text-slate-900 dark:text-white border-0 p-0 focus:outline-none focus:ring-1 focus:ring-emerald-500 rounded font-mono select-all [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                          style={{ MozAppearance: 'textfield' }}
+                        />
+                        <button 
+                          type="button"
+                          onClick={() => updateItemQty(item.productId, 1)}
+                          className="w-6 h-6 rounded bg-slate-100 dark:bg-white/10 flex items-center justify-center text-slate-705 dark:text-white hover:bg-emerald-500 hover:text-white transition-colors text-xs font-bold cursor-pointer"
+                        >
+                          +
+                        </button>
+                        
+                        <button
+                          type="button"
+                          onClick={() => removeItem(item.productId)}
+                          className="text-slate-300 hover:text-rose-600 transition p-1 ml-1"
+                          title={isRtl ? "حذف" : "Remove"}
+                        >
+                          <Trash2 size={12} />
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+
+          {/* Math calculation blocks */}
+          <div className="p-4 border-t border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-white/[0.02] box-border space-y-3.5">
+            
+            <div className="space-y-2 text-xs">
+              <div className="flex justify-between text-slate-500 dark:text-slate-400">
+                <span>{isRtl ? 'المجموع الأساسي الفرعي:' : 'Subtotal:'}</span>
+                <span className="font-mono font-semibold">{formatCurrencyValue(subtotal)}</span>
+              </div>
+              <div className="flex justify-between items-center text-slate-500 dark:text-slate-400">
+                <label className="flex items-center gap-1.5 cursor-pointer select-none py-0.5">
+                  <input 
+                    type="checkbox" 
+                    id="enable-vat-tax-checkbox"
+                    checked={enableTax} 
+                    onChange={(e) => {
+                      setEnableTax(e.target.checked);
+                      playBeep('success');
+                    }}
+                    className="w-3.5 h-3.5 rounded border-slate-300 dark:border-white/10 text-indigo-600 focus:ring-indigo-500 cursor-pointer accent-indigo-600"
+                  />
+                  <span className="text-xs font-black font-arabic text-slate-700 dark:text-slate-300">
+                    {isRtl ? `تفعيل الضريبة (${vatRate}%) [اختياري]:` : `VAT Tax (${vatRate}%) [Optional]:`}
+                  </span>
+                </label>
+                <span className="font-mono font-semibold">{formatCurrencyValue(taxAmount)}</span>
+              </div>
+              
+              {/* Settlements Quick Discount Option */}
+              <div className="flex items-center justify-between pt-1">
+                <span className="text-slate-500 dark:text-slate-400 flex items-center gap-1">
+                  🏷️ {isRtl ? `خصم وتنزيل مباشر (${POS_SYMBOLS[activeCurrency] || activeCurrency}) [F3]:` : `Direct Discount (${POS_SYMBOLS[activeCurrency] || activeCurrency}) [F3]:`}
+                </span>
+                <input 
+                  type="number" 
+                  min="0"
+                  ref={discountInputRef}
+                  placeholder="0.00"
+                  value={discount || ''}
+                  onChange={(e) => {
+                    const val = parseFloat(e.target.value);
+                    setDiscount(isNaN(val) ? 0 : val);
+                  }}
+                  className="w-20 bg-white dark:bg-slate-900 border border-slate-200 dark:border-white/10 rounded-lg px-2 py-0.5 text-center font-mono text-xs text-slate-800 dark:text-white focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                />
+              </div>
+
+              {/* Grand Total Block */}
+              <div className="flex justify-between items-center pt-2.5 border-t border-slate-200 dark:border-white/5 mt-2">
+                <span className="text-sm font-black text-slate-900 dark:text-white">
+                  {isRtl ? 'الإجمالي المطلوب:' : 'Grand Due:'}
+                </span>
+                <div className="text-left select-text">
+                  <div className="text-xl font-black font-mono text-emerald-600 dark:text-emerald-400">
+                    {formatCurrencyValue(grandTotal)}
+                  </div>
+                  <div className="flex items-center gap-1.5 justify-end mt-0.5">
+                    <span className="text-[10px] font-mono text-slate-500 dark:text-slate-400 select-all">
+                      {(() => {
+                        const alt = activeCurrency === 'USD' ? 'JOD' : 'USD';
+                        const altAmt = convertMoney(grandTotal, activeCurrency, alt, usdUnitRates);
+                        return `≈ ${formatCurrencyValue(altAmt, alt)}`;
+                      })()}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Direct Sales Advanced Checkout Panel */}
+            {posMode === 'sale' && scannedItems.length > 0 && (
+              <div className="bg-slate-100/50 dark:bg-black/30 p-2.5 rounded-xl border border-slate-200/50 dark:border-white/5 space-y-2 transition-all">
+                <span className="text-[10px] font-black text-slate-500 dark:text-slate-400 block">
+                  💳 {isRtl ? 'بوابة الدفع الفوري والمستلم:' : 'Instant Payment Gateway:'}
+                </span>
+                
+                {/* Gateway Selector Tabs */}
+                <div className="grid grid-cols-3 gap-1 px-0.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPaymentMethod('cash');
+                      setReceivedAmount('');
+                      playBeep('success');
+                    }}
+                    className={`py-1.5 text-[10px] font-black rounded-lg border flex flex-col items-center gap-1 transition-all active:scale-95 cursor-pointer ${
+                      paymentMethod === 'cash'
+                        ? 'bg-emerald-600 text-white border-emerald-500 shadow-sm'
+                        : 'bg-white dark:bg-white/[0.02] border-slate-200 dark:border-white/5 text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-white/5'
+                    }`}
+                  >
+                    <Coins size={12} />
+                    <span>{isRtl ? 'نقدي' : 'Cash'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPaymentMethod('card');
+                      setReceivedAmount(grandTotal.toFixed(currencyDecimals(activeCurrency)));
+                      playBeep('success');
+                    }}
+                    className={`py-1.5 text-[10px] font-black rounded-lg border flex flex-col items-center gap-1 transition-all active:scale-95 cursor-pointer ${
+                      paymentMethod === 'card'
+                        ? 'bg-blue-600 text-white border-blue-500 shadow-sm'
+                        : 'bg-white dark:bg-white/[0.02] border-slate-200 dark:border-white/5 text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-white/5'
+                    }`}
+                  >
+                    <CreditCard size={12} />
+                    <span>{isRtl ? 'بطاقة بنكية' : 'Card'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPaymentMethod('wallet');
+                      setReceivedAmount(grandTotal.toFixed(currencyDecimals(activeCurrency)));
+                      playBeep('success');
+                    }}
+                    className={`py-1.5 text-[10px] font-black rounded-lg border flex flex-col items-center gap-1 transition-all active:scale-95 cursor-pointer ${
+                      paymentMethod === 'wallet'
+                        ? 'bg-purple-600 text-white border-purple-500 shadow-sm'
+                        : 'bg-white dark:bg-white/[0.02] border-slate-200 dark:border-white/5 text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-white/5'
+                    }`}
+                  >
+                    <Smartphone size={12} />
+                    <span>{isRtl ? 'محفظة جوال' : 'Wallet'}</span>
+                  </button>
+                </div>
+
+                {/* Cash Calculator Box */}
+                {paymentMethod === 'cash' && (
+                  <div className="pt-2 border-t border-slate-200/50 dark:border-white/5 space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <label className="text-[10px] font-bold text-slate-500 dark:text-slate-400 shrink-0">
+                        {isRtl ? 'المبلغ المستلم:' : 'Amount Received:'}
+                      </label>
+                      <input
+                        type="number"
+                        step="any"
+                        placeholder="0.00"
+                        value={receivedAmount}
+                        onChange={(e) => setReceivedAmount(e.target.value)}
+                        className="w-24 bg-white dark:bg-slate-900 border border-slate-200 dark:border-white/10 rounded-lg px-2 py-0.5 text-center font-mono text-xs font-bold text-slate-800 dark:text-white focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                      />
+                    </div>
+
+                    {/* Auto Return Change Indicator */}
+                    <div className={`p-1.5 rounded-lg border text-center transition-colors text-xs font-medium ${
+                      parseFloat(receivedAmount) >= grandTotal - 1e-6
+                        ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-700 dark:text-emerald-400'
+                        : receivedAmount !== ''
+                          ? 'bg-rose-500/10 border-rose-500/20 text-rose-700 dark:text-rose-400'
+                          : 'bg-slate-100 dark:bg-slate-800/40 border-transparent text-slate-500 dark:text-slate-400'
+                    }`}>
+                      <div className="text-[9px] font-bold">
+                        {receivedAmount === ''
+                          ? (isRtl ? 'المبلغ المتبقي للعميل:' : 'Change to Return:')
+                          : parseFloat(receivedAmount) >= grandTotal - 1e-6
+                            ? (isRtl ? 'الباقي للعميل (المبلغ المتبقي):' : 'Exact Change to Return:')
+                            : (isRtl ? 'المستلم غير كافٍ لتمرير المعاملة!' : 'Insufficient amount received!')
+                        }
+                      </div>
+                      <div className="font-mono font-black text-sm mt-0.5">
+                        {receivedAmount !== '' && parseFloat(receivedAmount) >= grandTotal - 1e-6
+                          ? formatCurrencyValue(parseFloat(receivedAmount) - grandTotal)
+                          : formatCurrencyValue(0)
+                        }
+                      </div>
+                    </div>
+
+                    {/* Quick money keyboard tags */}
+                    <div className="grid grid-cols-4 gap-1 pt-0.5">
+                      {(QUICK_CASH[activeCurrency] || QUICK_CASH.USD).map((num) => (
+                        <button
+                          key={num}
+                          type="button"
+                          onClick={() => {
+                            const cur = parseFloat(receivedAmount) || 0;
+                            setReceivedAmount((cur + num).toString());
+                            playBeep('success');
+                          }}
+                          className="py-1 text-[9px] font-mono font-bold rounded bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-white/10 hover:bg-emerald-50 dark:hover:bg-emerald-500/10 cursor-pointer text-center"
+                        >
+                          +{num}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Submit checkout triggers */}
+            <div className="grid grid-cols-2 gap-3 w-full box-border pt-1">
+              <button 
+                type="button"
+                onClick={() => {
+                  if (posMode === 'sale') {
+                    handleSuspendBill();
+                  } else {
+                    handleSubmitProcess();
+                  }
+                }}
+                disabled={isSubmitting || scannedItems.length === 0}
+                className="py-3 rounded-xl bg-slate-200 dark:bg-white/10 text-slate-850 dark:text-white font-bold hover:bg-slate-300 dark:hover:bg-white/20 transition-all flex items-center justify-center gap-1.5 text-xs cursor-pointer disabled:opacity-50"
+              >
+                {posMode === 'sale' ? (
+                  <>
+                    <PauseCircle size={14} className="text-amber-500 animate-pulse" />
+                    <span>{isRtl ? 'تعليق الفاتورة (F2)' : 'Suspend Bill (F2)'}</span>
+                  </>
+                ) : (
+                  <span>📥 {isRtl ? 'تأكيد التوريد والترحيل' : 'Submit Inventory'}</span>
+                )}
+              </button>
+              
+              <button 
+                type="button"
+                onClick={() => {
+                  if (posMode === 'sale' && paymentMethod === 'cash') {
+                    // Check if sufficient cash was entered
+                    const rec = parseFloat(receivedAmount) || 0;
+                    if (rec >= grandTotal - 1e-6) {
+                      handleSubmitProcess();
+                    } else {
+                      // Open the full cash popup helper
+                      setShowCashPaymentModal(true);
+                    }
+                  } else {
+                    handleSubmitProcess();
+                  }
+                }}
+                disabled={
+                  isSubmitting || 
+                  scannedItems.length === 0 || 
+                  (posMode === 'sale' && paymentMethod === 'cash' && receivedAmount !== '' && parseFloat(receivedAmount) < grandTotal - 1e-6)
+                }
+                className="py-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-black transition-all flex items-center justify-center gap-1.5 text-xs shadow-lg shadow-emerald-500/20 cursor-pointer disabled:opacity-50"
+              >
+                <span>💵 {isRtl ? 'إتمام وطباعة [Enter]' : 'Pay & Print [Enter]'}</span>
+              </button>
+            </div>
+
+          </div>
+
+        </div>
+
+      </div>
+
+      {/* Dynamic Product Lookup Modal Dialog */}
+      <AnimatePresence>
+        {showProductLookup && (
+          <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-[150] flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-white dark:bg-slate-950 rounded-[2rem] border border-slate-200 dark:border-slate-800 p-6 max-w-lg w-full shadow-2xl space-y-4"
+            >
+              <div className="flex justify-between items-center pb-2 border-b border-slate-100 dark:border-slate-800">
+                <h3 className="font-black text-slate-905 dark:text-white text-base">
+                  {isRtl ? 'البحث التفصيلي عن صنف في المستودع' : 'Filter & Add Warehouse Item'}
+                </h3>
+                <button 
+                  type="button" 
+                  onClick={() => setShowProductLookup(false)}
+                  className="p-1 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600"
+                >
+                  ✕
+                </button>
+              </div>
+
+              <div className="relative">
+                <div className="absolute inset-y-0 right-3 flex items-center pointer-events-none text-slate-400">
+                  <Search size={16} />
+                </div>
+                <input 
+                  type="text"
+                  placeholder={isRtl ? "اكتب اسم المادة أو الـ SKU المفقود..." : "Type text search SKU description..."}
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl pr-10 pl-4 py-2.5 text-xs text-slate-900 dark:text-white"
+                  autoFocus
+                />
+              </div>
+
+              {/* Results */}
+              <div className="max-h-60 overflow-y-auto space-y-1 pr-1">
+                {filteredLookupProducts.length === 0 ? (
+                  <p className="text-center py-6 text-xs text-slate-400 font-extrabold">{isRtl ? 'لم نعثر على أي أصناف مطابقة!' : 'No matching items found!'}</p>
+                ) : (
+                  filteredLookupProducts.map(p => (
+                    <button
+                      key={p.id}
+                      onClick={() => {
+                        addItemToPOS(p);
+                        setShowProductLookup(false);
+                      }}
+                      className="w-full p-3 bg-slate-50 hover:bg-indigo-50 dark:bg-slate-900 dark:hover:bg-slate-950/60 rounded-xl flex items-center justify-between border border-transparent hover:border-slate-200 text-right cursor-pointer"
+                    >
+                      <div className="space-y-0.5">
+                        <p className="font-extrabold text-xs text-slate-900 dark:text-white">{p.name}</p>
+                        <p className="text-[10px] text-slate-450 dark:text-slate-550 font-mono">SKU: {p.sku || p.id} • {isRtl ? 'المتوفر:' : 'Qty:'} {p.quantity}</p>
+                      </div>
+                      <span className="text-xs font-black text-indigo-600 dark:text-indigo-400 font-mono">
+                        {formatCurrencyValue(Number(convertMoney(posMode === 'sale' ? p.sellingPrice : p.unitCost, p.currency || settings?.currency || 'JOD', activeCurrency, usdUnitRates)) || 0)}
+                      </span>
+                    </button>
+                  ))
+                )}
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Success Receipt Check Dialog */}
+      <AnimatePresence>
+        {showSuccessModal && (
+          <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-[150] flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="bg-white dark:bg-slate-950 rounded-[2.5rem] border border-slate-200 dark:border-slate-800 p-8 max-w-md w-full shadow-2xl text-center space-y-6"
+            >
+              <div className="flex flex-col items-center space-y-3">
+                <div className="w-16 h-16 rounded-full bg-emerald-100 dark:bg-emerald-950/40 text-emerald-500 dark:text-emerald-400 flex items-center justify-center text-3xl shadow-inner animate-bounce">
+                  <CheckCircle2 size={36} />
+                </div>
+                <h3 className="font-extrabold text-slate-900 dark:text-white text-xl">
+                  {isRtl ? 'تم إعتماد التقييد بنجاح!' : 'Transaction posted successfully!'}
+                </h3>
+                <p className="text-xs text-slate-450 dark:text-slate-400 font-semibold leading-relaxed">
+                  {isRtl 
+                    ? `تم تسجيل الفاتورة الرقمية رقم (${lastInvoiceNumber}) بسلام وتعديل أرصدة الكميات في المستودع وقاصة الأموال بنجاح.`
+                    : `Invoice ${lastInvoiceNumber} recorded. Quantities in storage and secure vault registers have been updated.`}
+                </p>
+              </div>
+
+              <div className="pt-4 border-t border-slate-200 dark:border-slate-800 flex flex-col sm:flex-row gap-3">
+                {lastCompletedInvoice && (
+                  <button
+                    type="button"
+                    onClick={() => printThermalReceipt(lastCompletedInvoice)}
+                    className="flex-1 py-3 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-100 font-extrabold rounded-xl text-xs transition active:scale-95 cursor-pointer flex items-center justify-center gap-2"
+                  >
+                    <Printer size={15} />
+                    <span>{isRtl ? 'طباعة فاتورة حرارية 80مم' : 'Print Thermal 80mm'}</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowSuccessModal(false);
+                    focusScanner();
+                  }}
+                  className="flex-1 py-3 bg-indigo-650 hover:bg-indigo-700 text-white font-black rounded-xl text-xs transition active:scale-95 cursor-pointer"
+                >
+                  {isRtl ? 'المتابعة ومسح صنف ومادة جديدة' : 'Scan Next Item'}
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Live Camera Scanner Overlay Dialog */}
+      <AnimatePresence>
+        {isCameraScanning && (
+          <div className="camera-popup-overlay fixed inset-0 bg-slate-950/80 backdrop-blur-md z-[200] flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="bg-slate-900 border border-cyan-500/30 rounded-[2.5rem] p-6 max-w-sm w-full shadow-2xl text-center space-y-5 relative"
+            >
+              <button 
+                type="button" 
+                onClick={() => setIsCameraScanning(false)}
+                className="absolute top-4 right-4 text-slate-400 hover:text-white bg-white/10 hover:bg-white/20 p-2 rounded-full w-8 h-8 flex items-center justify-center transition-all cursor-pointer z-50 text-xs"
+              >
+                ✕
+              </button>
+
+              <div className="space-y-1">
+                <div className="w-12 h-12 bg-cyan-500/15 text-cyan-400 rounded-full flex items-center justify-center mx-auto text-xl border border-cyan-500/20">
+                  📸
+                </div>
+                <h3 className="font-extrabold text-white text-base">
+                  {isRtl ? 'مسح باركود المنتج بالكاميرا' : 'Scan Product Barcode / QR'}
+                </h3>
+                <p className="text-[11px] text-slate-400 font-medium leading-relaxed max-w-xs mx-auto">
+                  {isRtl 
+                    ? 'وجه كاميرا الهاتف أو جهازك نحو ملصق الباركود الخاص بالقطعة للتعرف السريع والآلي' 
+                    : 'Point your camera directly at the barcode or price tag of the item for instant tracking.'}
+                </p>
+              </div>
+
+              {cameraError ? (
+                <div className="p-5 rounded-2xl bg-slate-900 border border-amber-500/30 text-center space-y-3 max-w-sm mx-auto">
+                  <div className="text-amber-500 text-3xl font-bold">⚠️</div>
+                  <p className="text-xs font-black text-amber-400">
+                    {isRtl 
+                      ? 'الوصول للكاميرا معطل أو غير مدعوم' 
+                      : 'Camera access is disabled or unsupported'}
+                  </p>
+                  <p className="text-[10px] text-slate-400 leading-normal font-semibold">
+                    {isRtl
+                      ? 'إذا كنت تتصفح داخل بيئة اختبار محكومة، يرجى تفعيل أذونات الكاميرا، أو تشغيل التطبيق في نافذة مستقلة. يمكنك إدخال الباركود يدوياً أدناه لمحاكاة عملية المسح اللحظي بنجاح!'
+                      : 'If you are viewing within a sandboxed frame, please check browser permissions or open in a new tab. You can type any barcode/SKU below to simulate a real hardware scan trigger!'}
+                  </p>
+                  
+                  {/* Simulated scanner helper panel */}
+                  <div className="pt-3 border-t border-slate-800 space-y-2">
+                    <label className="block text-[10px] font-black text-slate-300 text-right">
+                      {isRtl ? 'محاكاة قارئ الباركود (أدخل SKU أو الرمز):' : 'Barcode Simulator (Enter SKU/Barcode Code):'}
+                    </label>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={manualScanInput}
+                        onChange={(e) => setManualScanInput(e.target.value)}
+                        placeholder="e.g. ESP-1, 12345, or any code"
+                        className="flex-1 px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs font-mono text-emerald-400 outline-none focus:border-emerald-500"
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            if (manualScanInput.trim()) {
+                              handleScannedProductCode(manualScanInput.trim());
+                            }
+                          }
+                        }}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (manualScanInput.trim()) {
+                            handleScannedProductCode(manualScanInput.trim());
+                          }
+                        }}
+                        className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-black rounded-xl text-[10px] tracking-wide whitespace-nowrap cursor-pointer transition active:scale-95"
+                      >
+                        {isRtl ? 'محاكاة المسح' : 'Simulate Scan'}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                /* The element container designed for html5-qrcode renderer */
+                <div 
+                  id="reader" 
+                  className="overflow-hidden rounded-2xl border border-white/10 bg-slate-950 shadow-inner max-w-sm mx-auto w-full text-white animate-pulse"
+                />
+              )}
+
+              <div className="pt-1">
+                <button
+                  type="button"
+                  onClick={() => setIsCameraScanning(false)}
+                  className="px-6 py-2.5 bg-white/5 hover:bg-white/15 border border-white/10 hover:border-white/20 text-slate-300 hover:text-white rounded-xl text-xs transition active:scale-95 font-bold cursor-pointer w-full"
+                >
+                  {isRtl ? 'إلغاء المعاينة والمطابقة' : 'Cancel Scan / Back'}
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Cash Payment Modal Helper */}
+      <CashPaymentModal
+        isOpen={showCashPaymentModal}
+        onClose={() => setShowCashPaymentModal(false)}
+        totalAmount={grandTotal}
+        currency={POS_SYMBOLS[activeCurrency] || activeCurrency}
+        decimals={currencyDecimals(activeCurrency)}
+        quickAmounts={QUICK_CASH[activeCurrency] || QUICK_CASH.USD}
+        onConfirm={(received) => handleSubmitProcess(received)}
+      />
+
+      {/* Quick Product Registration Portal popup dialog */}
+      <AnimatePresence>
+        {showQuickRegModal && (
+          <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[250] flex items-center justify-center p-4 overflow-y-auto">
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0, y: 15 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.95, opacity: 0, y: 15 }}
+              className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl w-full max-w-lg p-6 shadow-2xl space-y-4 my-8 text-slate-800 dark:text-slate-100"
+            >
+              <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
+                <div className="flex items-center gap-2 text-emerald-600 dark:text-emerald-400">
+                  <span className="p-1.5 bg-emerald-500/10 rounded-lg text-lg">✨</span>
+                  <h3 className="text-lg font-extrabold tracking-tight">
+                    {isRtl ? 'تسجيل سريع لمنتج غير مدرج' : 'Quick Register New Product'}
+                  </h3>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowQuickRegModal(false);
+                    setTimeout(() => focusScanner(), 150);
+                  }}
+                  className="p-1.5 text-slate-400 hover:text-slate-600 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition"
+                >
+                  ✕
+                </button>
+              </div>
+
+              <form onSubmit={async (e) => {
+                e.preventDefault();
+                if (!quickRegForm.name.trim()) {
+                  toast.error(isRtl ? 'حقل الاسم مطلوب للتسجيل!' : 'Product name is required!');
+                  return;
+                }
+                if (Number(quickRegForm.sellingPrice) <= 0) {
+                  toast.error(isRtl ? 'حقل سعر البيع مطلوب ويجب أن يكون أكبر من صفر!' : 'Selling price is required and must be greater than zero!');
+                  return;
+                }
+                if (Number(quickRegForm.quantity) < 0 || Number(quickRegForm.unitCost) < 0 || Number(quickRegForm.sellingPrice) < 0) {
+                  toast.error(isRtl ? 'لا يمكن إدخال قيم سالبة!' : 'Negative values are not allowed!');
+                  return;
+                }
+
+                try {
+                  const generatedId = Math.random().toString(36).substr(2, 9);
+                  const finalSku = quickRegForm.sku.trim() || generatedId;
+                  const effectiveThreshold = Number(quickRegForm.lowStockThreshold) || 5;
+                  const initialQty = Number(quickRegForm.quantity) || 0;
+
+                  const status = computeStockStatus(initialQty, effectiveThreshold, settings?.lowStockThreshold);
+
+                  const newProduct: Product = {
+                    id: generatedId,
+                    name: quickRegForm.name.trim(),
+                    sku: finalSku,
+                    category: quickRegForm.category.trim() || (isRtl ? 'عام' : 'General'),
+                    brand: quickRegForm.brand.trim() || '-',
+                    quantity: initialQty,
+                    unitCost: Number(quickRegForm.unitCost) || 0,
+                    sellingPrice: Number(quickRegForm.sellingPrice) || 0,
+                    status: status,
+                    lowStockThreshold: effectiveThreshold,
+                    dateAdded: Date.now(),
+                    warehouseId: quickRegForm.warehouseId || '',
+                    currency: activeCurrency
+                  };
+
+                  await saveProduct(newProduct);
+                  addItemToPOS(newProduct);
+                  playBeep('success');
+                  toast.success(
+                    isRtl 
+                      ? `تم تسجيل الصنف الجديد "${newProduct.name}" وحفظه بالمستودع وإضافته للفاتورة الحالية!` 
+                      : `Saved "${newProduct.name}" to inventory and automatically added to current invoice!`
+                  );
+                  setShowQuickRegModal(false);
+                  setTimeout(() => {
+                    focusScanner();
+                  }, 200);
+                } catch (err) {
+                  console.error(err);
+                  toast.error(isRtl ? 'حدث خطأ غير متوقع أثناء حفظ المنتج.' : 'An error occurred while saving the product details.');
+                }
+              }} className="space-y-4">
+                <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+                  {isRtl
+                    ? 'هذا الصنف المعرف بالرمز أدناه غير مسجل في مستودعات "مستودعي". يمكنك تعبئة البيانات الأساسية وإضافته فوراً للسلة ولجدول المخازن العام بضغطة زر.'
+                    : 'This product does not exist in Mostawdaee. Record its primary details below to register it and add it instantly to both stock inventory and your current active sale.'}
+                </p>
+
+                {/* SKU / Barcode */}
+                <div>
+                  <label className="block text-xs font-black text-slate-600 dark:text-slate-350 mb-1.5">
+                    {isRtl ? 'رمز الباركود / SKU' : 'Barcode / SKU'}
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={quickRegForm.sku}
+                    onChange={(e) => setQuickRegForm({ ...quickRegForm, sku: e.target.value })}
+                    placeholder={isRtl ? 'أدخل الباركود الخاص بالمادة' : 'Enter product barcode SKU...'}
+                    className="w-full px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 font-mono text-sm font-semibold text-emerald-600 dark:text-emerald-400 outline-none focus:border-emerald-500"
+                  />
+                </div>
+
+                {/* Name */}
+                <div>
+                  <label className="block text-xs font-black text-slate-600 dark:text-slate-350 mb-1.5">
+                    {isRtl ? 'اسم المنتج الصنف *' : 'Product Name *'}
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    autoFocus
+                    value={quickRegForm.name}
+                    onChange={(e) => setQuickRegForm({ ...quickRegForm, name: e.target.value })}
+                    placeholder={isRtl ? 'اسم المادة مثلا: عصير ربيع 1 لتر' : 'e.g. Fresh Mango Juice 1L'}
+                    className="w-full px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-sm font-semibold outline-none focus:border-indigo-500"
+                  />
+                </div>
+
+                {/* Grid for prices */}
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-xs font-black text-slate-600 dark:text-slate-350 mb-1.5">
+                      {isRtl ? `سعر التكلفة (${activeCurrency})` : `Cost Price (${activeCurrency})`}
+                    </label>
+                    <input
+                      type="number"
+                      step="any"
+                      min="0"
+                      value={quickRegForm.unitCost || ''}
+                      onChange={(e) => setQuickRegForm({ ...quickRegForm, unitCost: Number(e.target.value) })}
+                      placeholder="0.00"
+                      className="w-full px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-sm font-semibold outline-none focus:border-indigo-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-black text-slate-600 dark:text-slate-350 mb-1.5">
+                      {isRtl ? `سعر البيع المعروض * (${activeCurrency})` : `Selling Price * (${activeCurrency})`}
+                    </label>
+                    <input
+                      type="number"
+                      step="any"
+                      min="0.01"
+                      required
+                      value={quickRegForm.sellingPrice || ''}
+                      onChange={(e) => setQuickRegForm({ ...quickRegForm, sellingPrice: Number(e.target.value) })}
+                      placeholder="10.50"
+                      className="w-full px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-sm font-semibold text-indigo-600 dark:text-indigo-400 outline-none focus:border-indigo-500"
+                    />
+                  </div>
+                </div>
+
+                {/* Grid for Initial Stock & Threshold */}
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-xs font-black text-slate-600 dark:text-slate-350 mb-1.5">
+                      {isRtl ? 'كمية المخزون الإبتدائي' : 'Initial Stock Qty'}
+                    </label>
+                    <input
+                      type="number"
+                      step="1"
+                      min="0"
+                      required
+                      value={quickRegForm.quantity}
+                      onChange={(e) => setQuickRegForm({ ...quickRegForm, quantity: Number(e.target.value) })}
+                      placeholder="10"
+                      className="w-full px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-sm font-semibold outline-none focus:border-indigo-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-black text-slate-600 dark:text-slate-350 mb-1.5">
+                      {isRtl ? 'حد منبه قرب نفاذ الصنف' : 'Low Stock Warning Threshold'}
+                    </label>
+                    <input
+                      type="number"
+                      step="1"
+                      min="1"
+                      required
+                      value={quickRegForm.lowStockThreshold}
+                      onChange={(e) => setQuickRegForm({ ...quickRegForm, lowStockThreshold: Number(e.target.value) })}
+                      placeholder="5"
+                      className="w-full px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-sm font-semibold outline-none focus:border-indigo-500"
+                    />
+                  </div>
+                </div>
+
+                {/* Optional Category and Brand */}
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-xs font-black text-slate-600 dark:text-slate-350 mb-1.5">
+                      {isRtl ? 'التصنيف / الفئة' : 'Category / Class'}
+                    </label>
+                    <input
+                      type="text"
+                      list="quick-categories-list"
+                      value={quickRegForm.category}
+                      onChange={(e) => setQuickRegForm({ ...quickRegForm, category: e.target.value })}
+                      placeholder={isRtl ? 'اكتب أو اختر تصنيفاً' : 'e.g. Dairy, Soft Drinks...'}
+                      className="w-full px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-sm font-semibold outline-none focus:border-indigo-500"
+                    />
+                    <datalist id="quick-categories-list">
+                      {categoriesList.filter(c => c !== 'all').map(c => (
+                        <option key={c} value={c} />
+                      ))}
+                    </datalist>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-black text-slate-600 dark:text-slate-350 mb-1.5">
+                      {isRtl ? 'المستودع الرئيسي الافتراضي' : 'Default Warehouse'}
+                    </label>
+                    <select
+                      value={quickRegForm.warehouseId}
+                      onChange={(e) => setQuickRegForm({ ...quickRegForm, warehouseId: e.target.value })}
+                      className="w-full px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-sm font-semibold outline-none focus:border-indigo-500"
+                    >
+                      <option value="">{isRtl ? 'المستودع العام الأساسي' : 'Primary Central Warehouse'}</option>
+                      {warehouses && warehouses.map(w => (
+                        <option key={w.id} value={w.id}>{w.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                {/* Modal actions */}
+                <div className="flex gap-4 pt-4 border-t border-slate-100 dark:border-slate-800">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowQuickRegModal(false);
+                      setTimeout(() => focusScanner(), 150);
+                    }}
+                    className="flex-1 py-3 bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-100 font-bold rounded-xl text-xs transition active:scale-95 cursor-pointer text-center"
+                  >
+                    {isRtl ? 'إلغاء التراجع' : 'Cancel / Close'}
+                  </button>
+
+                  <button
+                    type="submit"
+                    className="flex-1 py-3 bg-gradient-to-r from-emerald-500 to-teal-600 text-white font-black rounded-xl text-xs transition active:scale-95 cursor-pointer shadow-md text-center"
+                  >
+                    {isRtl ? 'حفظ الصنف وإضافته فوراً للبيع' : 'Save & Add to Bill'}
+                  </button>
+                </div>
+              </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}

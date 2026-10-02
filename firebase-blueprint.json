@@ -1,0 +1,234 @@
+{
+  "entities": {
+    "Product": {
+      "title": "Product",
+      "description": "Stock item entity",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "sku": { "type": "string" },
+        "category": { "type": "string" },
+        "brand": { "type": "string" },
+        "quantity": { "type": "number" },
+        "unitCost": { "type": "number" },
+        "sellingPrice": { "type": "number" },
+        "status": { "type": "string", "enum": ["In Stock", "Low Stock", "Out of Stock"] },
+        "serialNumber": { "type": "string" },
+        "lowStockThreshold": { "type": "number" },
+        "dateAdded": { "type": "number" },
+        "expiryDate": { "type": "number" },
+        "warehouseId": { "type": "string" }
+      },
+      "required": ["id", "name", "sku", "quantity", "unitCost", "sellingPrice", "status", "dateAdded"]
+    },
+    "Invoice": {
+      "title": "Invoice",
+      "description": "Sale or purchase record",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "invoiceNumber": { "type": "string" },
+        "customerName": { "type": "string" },
+        "supplierName": { "type": "string" },
+        "date": { "type": "number" },
+        "items": { "type": "array" },
+        "subtotal": { "type": "number" },
+        "taxAmount": { "type": "number" },
+        "totalAmount": { "type": "number" },
+        "type": { "type": "string", "enum": ["sale", "purchase"] }
+      },
+      "required": ["id", "invoiceNumber", "date", "items", "subtotal", "taxAmount", "totalAmount", "type"]
+    },
+    "VaultTransaction": {
+      "title": "VaultTransaction",
+      "description": "Cash flow record",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "type": { "type": "string", "enum": ["income", "expense"] },
+        "category": { "type": "string", "enum": ["sale", "purchase", "salary", "manual", "other"] },
+        "amount": { "type": "number" },
+        "description": { "type": "string" },
+        "timestamp": { "type": "number" },
+        "balanceAfter": { "type": "number" }
+      },
+      "required": ["id", "type", "category", "amount", "timestamp", "balanceAfter"]
+    },
+    "Employee": {
+      "title": "Employee",
+      "description": "Staff member entity",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "role": { "type": "string" },
+        "contact": { "type": "string" },
+        "salary": { "type": "number" },
+        "status": { "type": "string", "enum": ["active", "on-leave", "terminated"] },
+        "hiredDate": { "type": "number" }
+      },
+      "required": ["id", "name", "role", "salary", "status", "hiredDate"]
+    },
+    "Customer": {
+      "title": "Customer",
+      "description": "Debt-tracking business customer entity",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "customerId": { "type": "string" },
+        "name": { "type": "string" },
+        "phone": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "totalDebt": { "type": "number" },
+        "currency": { "type": "string", "enum": ["JOD", "USD", "ILS"] }
+      },
+      "required": ["id", "customerId", "name", "phone", "createdAt", "totalDebt", "currency"]
+    },
+    "UserSettings": {
+      "title": "UserSettings",
+      "description": "App and business preferences",
+      "type": "object",
+      "properties": {
+        "userName": { "type": "string" },
+        "businessName": { "type": "string" },
+        "defaultVatRate": { "type": "number" },
+        "defaultCustomsDuty": { "type": "number" },
+        "defaultLanguage": { "type": "string", "enum": ["en", "ar"] },
+        "enableAnimations": { "type": "boolean" },
+        "aiVerbosity": { "type": "string", "enum": ["concise", "detailed"] },
+        "theme": { "type": "string", "enum": ["light", "soft", "modern"] },
+        "darkMode": { "type": "boolean" },
+        "primaryColor": { "type": "string" },
+        "fontSize": { "type": "number" },
+        "mandatorySerial": { "type": "boolean" },
+        "lowStockThreshold": { "type": "number" },
+        "soundEffects": { "type": "boolean" },
+        "toastNotifications": { "type": "boolean" }
+      }
+    },
+    "QuickTransaction": {
+      "title": "QuickTransaction",
+      "description": "Quick action tracking record for shipments and audits",
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "enum": ["IN", "OUT", "AUDIT"] },
+        "title": { "type": "string" },
+        "status": { "type": "string" },
+        "userId": { "type": "string" },
+        "createdAt": { "type": "object" }
+      },
+      "required": ["type", "title", "status", "userId", "createdAt"]
+    },
+    "CustomerTransaction": {
+      "title": "CustomerTransaction",
+      "description": "Customer ledger tracking credit invoices and settling payments",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "transactionId": { "type": "string" },
+        "customerId": { "type": "string" },
+        "type": { "type": "string", "enum": ["invoice", "payment"] },
+        "invoiceId": { "type": "string" },
+        "amount": { "type": "number" },
+        "currency": { "type": "string", "enum": ["JOD", "USD", "ILS"] },
+        "exchangeRate": { "type": "number" },
+        "date": { "type": "string" },
+        "notes": { "type": "string" },
+        "remainingBalanceAfter": { "type": "number" }
+      },
+      "required": ["id", "transactionId", "customerId", "type", "amount", "currency", "exchangeRate", "date", "notes", "remainingBalanceAfter"]
+    },
+    "PayrollRecord": {
+      "title": "PayrollRecord",
+      "description": "Employee salary payment and slip tracking metadata",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "employeeId": { "type": "string" },
+        "employeeName": { "type": "string" },
+        "monthYear": { "type": "string" },
+        "allowances": { "type": "number" },
+        "deductions": { "type": "number" },
+        "netSalary": { "type": "number" },
+        "paymentDate": { "type": "number" },
+        "paymentStatus": { "type": "string", "enum": ["pending", "paid"] }
+      },
+      "required": ["id", "employeeId", "employeeName", "monthYear", "allowances", "deductions", "netSalary", "paymentDate", "paymentStatus"]
+    },
+    "Warehouse": {
+      "title": "Warehouse",
+      "description": "Inventory storage physical location (supports hierarchies)",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "location": { "type": "string" },
+        "parentId": { "type": "string" },
+        "createdAt": { "type": "number" }
+      },
+      "required": ["id", "name", "createdAt"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "User Activity Log for administrative tracing",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "action": { "type": "string" },
+        "details": { "type": "string" },
+        "timestamp": { "type": "number" },
+        "category": { "type": "string", "enum": ["product", "invoice", "settings", "employee", "customer", "warehouse", "vault", "payroll", "auth"] },
+        "userName": { "type": "string" },
+        "email": { "type": "string" }
+      },
+      "required": ["id", "action", "details", "timestamp", "category", "userName", "email"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}/settings/profile": {
+      "schema": "UserSettings",
+      "description": "User specific settings and business profile"
+    },
+    "/users/{userId}/inventory/{productId}": {
+      "schema": "Product",
+      "description": "Product collection for the user"
+    },
+    "/users/{userId}/invoices/{invoiceId}": {
+      "schema": "Invoice",
+      "description": "Invoices collection for the user"
+    },
+    "/users/{userId}/vault_records/{recordId}": {
+      "schema": "VaultTransaction",
+      "description": "Vault transaction history"
+    },
+    "/users/{userId}/employees/{employeeId}": {
+      "schema": "Employee",
+      "description": "Employee records"
+    },
+    "/users/{userId}/payroll/{payrollId}": {
+      "schema": "PayrollRecord",
+      "description": "Employee payroll records"
+    },
+    "/users/{userId}/customers/{customerId}": {
+      "schema": "Customer",
+      "description": "Debt tracking customers collection"
+    },
+    "/users/{userId}/customer_transactions/{transactionId}": {
+      "schema": "CustomerTransaction",
+      "description": "Transaction ledger records for individual customers"
+    },
+    "/users/{userId}/audit_logs/{logId}": {
+      "schema": "AuditLog",
+      "description": "Audit logs collection for a given user"
+    },
+    "/users/{userId}/warehouses/{warehouseId}": {
+      "schema": "Warehouse",
+      "description": "Warehouses with hierarchical support"
+    },
+    "/transactions/{transactionId}": {
+      "schema": "QuickTransaction",
+      "description": "Root collection for system's rapid business actions"
+    }
+  }
+}

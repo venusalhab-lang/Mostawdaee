@@ -1,0 +1,34 @@
+<svg width="2732" height="2732" viewBox="0 0 2732 2732" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Deep elegant obsidian dark space background -->
+  <rect width="2732" height="2732" fill="#0B0F19" />
+  
+  <!-- Subtle ambient glow in the center behind the logo -->
+  <circle cx="1366" cy="1366" r="800" fill="url(#glowGradient)" opacity="0.15" />
+
+  <defs>
+    <radialGradient id="glowGradient" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#4F46E5" />
+      <stop offset="100%" stop-color="#0B0F19" stop-opacity="0" />
+    </radialGradient>
+    <linearGradient id="g-splash" x1="1116" y1="1616" x2="1616" y2="1116" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#00E5FF" />
+      <stop offset="42%" stop-color="#2b66f5" />
+      <stop offset="78%" stop-color="#4f46e5" />
+      <stop offset="100%" stop-color="#6A1B9A" />
+    </linearGradient>
+  </defs>
+
+  <g transform="translate(1116, 1116)">
+    <!-- Base container -->
+    <path d="M 250,25 C 400,25 475,100 475,250 C 475,400 400,475 250,475 C 100,475 25,400 25,250 C 25,100 100,25 250,25 Z" fill="url(#g-splash)" />
+    <!-- Crystalline box graphic -->
+    <g stroke="#FFFFFF" stroke-width="25" stroke-linecap="round" stroke-linejoin="round" fill="none">
+      <path d="M 160,220 L 160,292 M 250,262 L 250,335 M 340,220 L 340,292" />
+      <path d="M 160,292 L 250,335 L 340,292" />
+      <path d="M 160,220 L 250,262 L 340,220" />
+      <path d="M 160,220 L 250,178 L 340,220" />
+      <path d="M 205,200 L 295,245" stroke-width="20" />
+      <path d="M 222,207 L 312,252" stroke-width="20" />
+    </g>
+  </g>
+</svg>

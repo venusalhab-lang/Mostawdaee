@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:gravity="center"
+    android:padding="24dp"
+    android:background="#0f172a"> <!-- Pure Dark Slate Matching Web App Themes -->
+
+    <ImageView
+        android:id="@+id/app_logo_display"
+        android:layout_width="96dp"
+        android:layout_height="96dp"
+        android:layout_marginBottom="24dp"
+        android:src="@mipmap/ic_launcher" />
+
+    <TextView
+        android:id="@+id/assistant_title"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="مساعد مستودعي الذكي"
+        android:textColor="#ffffff"
+        android:textSize="22sp"
+        android:textStyle="bold"
+        android:layout_marginBottom="8dp" />
+
+    <TextView
+        android:id="@+id/assistant_is_rtl_sub"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Smart AI Assistant"
+        android:textColor="#00e5ff"
+        android:textSize="14sp"
+        android:textStyle="bold"
+        android:layout_marginBottom="16dp" />
+
+    <TextView
+        android:id="@+id/assistant_desc"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="المساعد الشخصي الذكي لإدارة التجارة، الحسابات، الخزنة، وتحليلات المخازن وتوقع المبيعات."
+        android:textColor="#94a3b8"
+        android:textSize="14sp"
+        android:gravity="center"
+        android:layout_marginBottom="32dp" />
+
+    <Button
+        android:id="@+id/back_button"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:textColor="#ffffff"
+        android:backgroundTint="#4f46e5"
+        android:paddingLeft="24dp"
+        android:paddingRight="24dp"
+        android:text="رجوع إلى النظام" />
+</LinearLayout>
