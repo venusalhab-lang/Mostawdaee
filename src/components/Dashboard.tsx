@@ -44,6 +44,7 @@ import { SalesChart } from './ui/SalesChart';
 import { RecentTransactions } from './ui/RecentTransactions';
 import { NetIncome7DayTrend } from './ui/NetIncome7DayTrend';
 import { sounds } from '../lib/sounds';
+import { apiUrl } from '../lib/apiBase';
 
 interface Props {
   language: Language;
@@ -239,20 +240,10 @@ export default function Dashboard({ language, products, settings, vault, vaultTr
     return localStorage.getItem('simulate_salary_payday') === 'true';
   });
 
-  // Real-time calendar date and clock state
-  const [time, setTime] = useState(new Date());
   
   // Real-time exchange rate state
   const [exchangeRate, setExchangeRate] = useState<number | null>(3.70);
   const [isFetchingRate, setIsFetchingRate] = useState(true);
-
-  // Update clock every second
-  useEffect(() => {
-    const timer = setInterval(() => {
-      setTime(new Date());
-    }, 1000);
-    return () => clearInterval(timer);
-  }, []);
 
   const fetchRates = async () => {
     const currentCurrency = settings?.currency || 'JOD';
@@ -304,7 +295,7 @@ export default function Dashboard({ language, products, settings, vault, vaultTr
 
     try {
       setIsFetchingRate(true);
-      const response = await fetchWithRetry(`/api/exchange-rate/${baseCode}?t=${Date.now()}`, {
+      const response = await fetchWithRetry(apiUrl(`/api/exchange-rate/${baseCode}?t=${Date.now()}`), {
         headers: {
           'Cache-Control': 'no-cache, no-store, must-revalidate',
           'Pragma': 'no-cache',
@@ -699,8 +690,6 @@ export default function Dashboard({ language, products, settings, vault, vaultTr
     formatMoney(Number(val) || 0, customCurrency || settings?.currency || activeCurrency, isRtl ? 'ar' : 'en-US');
 
   const locale = isRtl ? 'ar-EG' : 'en-US';
-  const formattedTime = time.toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-  const formattedDate = time.toLocaleDateString(locale, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
 
   return (
     <div className="dashboard-container dashboard-wrapper select-none notranslate min-h-screen flex-1 min-w-0 max-w-7xl mx-auto p-4 sm:p-6 lg:p-8 space-y-6 transition-colors duration-300 overflow-x-hidden" dir={isRtl ? 'rtl' : 'ltr'}>

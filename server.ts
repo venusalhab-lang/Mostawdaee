@@ -152,6 +152,7 @@ async function getRequestUser(req: { headers: { authorization?: string } }) {
 async function startServer() {
   const app = express();
   const PORT = process.env.PORT || 3000;
+  if (isProduction) app.set("trust proxy", 1); // real client IP behind a reverse proxy
 
   // Add robust but clean request logging (API and primary navigation only)
   app.use((req, res, next) => {
@@ -166,7 +167,46 @@ async function startServer() {
     next();
   });
 
-  app.use(express.json());
+  // CORS: the Capacitor app runs on https://localhost (Android) / capacitor://localhost (iOS)
+  // and calls this API cross-origin. Extra origins can be added via ALLOWED_ORIGINS (comma separated).
+  const allowedOrigins = new Set([
+    "https://localhost",
+    "http://localhost",
+    "capacitor://localhost",
+    "ionic://localhost",
+    ...String(process.env.ALLOWED_ORIGINS || "").split(",").map((o) => o.trim()).filter(Boolean),
+  ]);
+  app.use("/api", (req, res, next) => {
+    const origin = req.headers.origin;
+    if (origin && (allowedOrigins.has(origin) || /^http:\/\/localhost:\d+$/.test(origin))) {
+      res.setHeader("Access-Control-Allow-Origin", origin);
+      res.setHeader("Vary", "Origin");
+      res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type, Cache-Control, Pragma, Expires");
+      res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+      res.setHeader("Access-Control-Max-Age", "86400");
+    }
+    if (req.method === "OPTIONS") return res.sendStatus(204);
+    next();
+  });
+
+  app.use(express.json({ limit: "2mb" }));
+
+  // Tiny in-memory rate limiter (per user id or IP) to protect paid endpoints
+  const rateBuckets = new Map<string, { count: number; resetAt: number }>();
+  const rateLimit = (key: string, max: number, windowMs: number) => {
+    const now = Date.now();
+    const bucket = rateBuckets.get(key);
+    if (!bucket || bucket.resetAt <= now) {
+      rateBuckets.set(key, { count: 1, resetAt: now + windowMs });
+      return true;
+    }
+    bucket.count += 1;
+    return bucket.count <= max;
+  };
+  setInterval(() => {
+    const now = Date.now();
+    for (const [k, v] of rateBuckets) if (v.resetAt <= now) rateBuckets.delete(k);
+  }, 60_000).unref();
 
   // Health Check
   app.get("/api/health", (req, res) => {
@@ -175,6 +215,9 @@ async function startServer() {
 
   app.post("/api/firebase-session", async (req, res) => {
     try {
+      if (!rateLimit(`session:${req.ip}`, 30, 60_000)) {
+        return res.status(429).json({ message: "Too many requests" });
+      }
       const user = await getRequestUser(req);
       if (!user) {
         return res.status(401).json({ message: "Invalid or missing Supabase session" });
@@ -199,6 +242,9 @@ async function startServer() {
 
   app.post("/api/subscription/activate", async (req, res) => {
     try {
+      if (!rateLimit(`activate:${req.ip}`, 10, 60_000)) {
+        return res.status(429).json({ message: "Too many requests" });
+      }
       const user = await getRequestUser(req);
       if (!user) {
         return res.status(401).json({ message: "Invalid or missing Supabase session" });
@@ -354,6 +400,19 @@ async function startServer() {
   });
 
   app.post("/api/chat", async (req, res, next) => {
+    // The real Gemini key is paid: only signed-in users may use it, with a rate limit.
+    // (The offline fallback below costs nothing, so guests can still use it.)
+    if (getAI()) {
+      const authUser = await getRequestUser(req);
+      if (!authUser) {
+        return res.status(401).json({ message: "Sign in to use the AI assistant" });
+      }
+      if (!rateLimit(`chat:${authUser.id}`, 30, 60_000)) {
+        return res.status(429).json({ message: "Too many requests, please slow down" });
+      }
+    } else if (!rateLimit(`chat:${req.ip}`, 60, 60_000)) {
+      return res.status(429).json({ message: "Too many requests, please slow down" });
+    }
     const { message, history, context, verbosity, currency } = req.body;
     const currencyLabel = currency === 'JOD' ? 'الدينار الأردني (JOD)' : currency === 'USD' ? 'الدولار الأمريكي ($)' : 'الشيكل الإسرائيلي (₪)';
     const verbosityInstruction = verbosity === 'concise' 

@@ -1,56 +1,8 @@
 import { createClient } from '@supabase/supabase-js';
+import { getSupabaseCredentials, onSupabaseCredentialsChanged } from './lib/supabaseConfig';
 
 const actualSupabaseGetter = () => {
-  let url = '';
-  let key = '';
-  const isBrowser = typeof window !== 'undefined' && typeof window.localStorage !== 'undefined';
-
-  // 1. Try to load from Vite environment variables (highest priority)
-  try {
-    if (typeof import.meta !== 'undefined' && import.meta.env) {
-      if (import.meta.env.VITE_SUPABASE_URL && import.meta.env.VITE_SUPABASE_URL.trim() && !import.meta.env.VITE_SUPABASE_URL.includes('...')) {
-        const envUrl = import.meta.env.VITE_SUPABASE_URL.trim();
-        if (envUrl.startsWith('http')) {
-          url = envUrl;
-        }
-      }
-      if (import.meta.env.VITE_SUPABASE_ANON_KEY && import.meta.env.VITE_SUPABASE_ANON_KEY.trim() && !import.meta.env.VITE_SUPABASE_ANON_KEY.includes('...')) {
-        key = import.meta.env.VITE_SUPABASE_ANON_KEY.trim();
-      }
-    }
-  } catch (e) {
-    console.warn("[supabaseClient] Failed reading from import.meta.env:", e);
-  }
-
-  // 2. Try to load from localStorage (to support user-specific overrides/debugging)
-  if (isBrowser) {
-    try {
-      const storedUrl = window.localStorage.getItem('VITE_SUPABASE_URL');
-      const storedKey = window.localStorage.getItem('VITE_SUPABASE_ANON_KEY');
-      if (storedUrl && storedUrl.trim() && !storedUrl.includes('...')) {
-        const trimmedUrl = storedUrl.trim();
-        if (trimmedUrl.startsWith('http')) {
-          url = trimmedUrl;
-        }
-      }
-      if (storedKey && storedKey.trim() && !storedKey.includes('...')) {
-        key = storedKey.trim();
-      }
-    } catch (e) {
-      console.warn("[supabaseClient] Failed reading from localStorage:", e);
-    }
-  }
-
-  // 3. Fallback to default hardcoded keys if still empty/invalid
-  if (!url || !url.startsWith('http')) {
-    url = 'https://kwvrtsnvadjknioqbbxs.supabase.co';
-  }
-  if (!key) {
-    key = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imt3dnJ0c252YWRqa25pb3FiYnhzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk1NTk5NTQsImV4cCI6MjA5NTEzNTk1NH0.6YfS8ujoO2yjMQoaFNgptRa70qyUglqhignezpm2d4M';
-  }
-
-  console.log("[supabaseClient] Initializing client. URL:", url, "Key Length:", key ? key.length : 0);
-
+  const { url, key } = getSupabaseCredentials();
   return createClient(url, key, {
     auth: {
       persistSession: true,
@@ -68,13 +20,12 @@ const getClientInstance = () => {
   return _cachedClient;
 };
 
-try {
-  window.addEventListener('storage', (e) => {
-    if (e.key === 'VITE_SUPABASE_URL' || e.key === 'VITE_SUPABASE_ANON_KEY') {
-      _cachedClient = null;
-    }
-  });
-} catch(e) {}
+// Rebuild the shared client only when the user explicitly changes the credentials
+onSupabaseCredentialsChanged(() => {
+  _cachedClient = null;
+});
+
+export const getSharedSupabaseClient = () => getClientInstance();
 
 export const supabase = new Proxy({}, {
   get(target, prop) {

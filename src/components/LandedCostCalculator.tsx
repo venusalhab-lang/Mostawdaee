@@ -5,6 +5,7 @@ import { translations } from '../translations';
 import { motion, AnimatePresence } from 'motion/react';
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from 'recharts';
 import { computeStockStatus } from '../lib/stock';
+import { apiUrl } from '../lib/apiBase';
 
 interface Props {
   language: Language;
@@ -63,7 +64,7 @@ export default function LandedCostCalculator({ language, settings, onAddProduct,
 
     setIsFetchingRate(true);
     try {
-      const response = await fetch(`/api/exchange-rate/${baseCurrency}`);
+      const response = await fetch(apiUrl(`/api/exchange-rate/${baseCurrency}`));
       if (!response.ok) throw new Error('Fetch failed');
       const data = await response.json();
       

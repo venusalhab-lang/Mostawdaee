@@ -1,3 +1,4 @@
+import { consumeInvoiceNumber } from '../lib/invoiceNumber';
 import React, { useState, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { translations } from '../translations';
@@ -33,7 +34,7 @@ interface InvoiceSystemProps {
 export default function InvoiceSystem({ language, initialView = 'list' }: InvoiceSystemProps) {
   const t = translations[language];
   const isRtl = language === 'ar';
-  const { products, invoices, saveInvoice, settings } = useFirebase();
+  const { products, invoices, saveInvoice, settings, user } = useFirebase();
   const { formatPrice: globalFormatPrice, preferredCurrency } = usePreferredCurrency();
   const activeCurrency = preferredCurrency === 'DEFAULT' ? (settings?.currency || 'JOD') : preferredCurrency;
 
@@ -852,7 +853,7 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
     const vatRate = Number(settings?.defaultVatRate) || 0;
     const tax = Number(((subtotal * vatRate) / 100).toFixed(4));
     
-    const invoiceNo = `${invoiceType === 'sale' ? 'SAL' : 'PUR'}-${Math.floor(1000 + Math.random() * 9000)}`;
+    const invoiceNo = consumeInvoiceNumber(invoiceType === 'sale' ? 'SAL' : 'PUR', user?.uid || 'guest');
     
     const newInvoice: Invoice = {
       id: crypto.randomUUID(),

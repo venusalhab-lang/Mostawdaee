@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
+import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { testConnection, db, doc, onSnapshot, setDoc, updateDoc, deleteDoc, collection, OperationType, handleFirestoreError, User, signInWithPopup, signOut, auth, GoogleAuthProvider, googleProvider } from '../services/firebase';
 import { supabase } from '../supabaseClient';
 import { runTransaction } from 'firebase/firestore';
@@ -174,7 +174,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
               reportBridgeFailure(bridgeError);
             }
             lastUidRef.current = mapped.uid;
-            setUser(wrapUserWithId(mapped as any));
+            setUser((prev) => (prev && prev.uid === mapped.uid ? prev : wrapUserWithId(mapped as any)));
           } else {
             setUser(null);
           }
@@ -190,27 +190,32 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     })();
 
     // Subscribe to future auth state changes from Supabase
-    const { data } = supabase.auth.onAuthStateChange(async (_event: any, session: any) => {
-      if (session && session.access_token) {
-        const mapped = mapSessionUser(session);
-        if (mapped) {
-          try {
-            await linkFirebaseAuth(session.access_token, mapped.uid);
-          } catch (bridgeError) {
-            reportBridgeFailure(bridgeError);
+    // IMPORTANT: Supabase holds its auth lock while this callback runs. Awaiting network calls
+    // here would block every other supabase request (getSession, queries...) and freeze the app,
+    // so the real work is deferred with setTimeout.
+    const { data } = supabase.auth.onAuthStateChange((_event: any, session: any) => {
+      setTimeout(async () => {
+        if (session && session.access_token) {
+          const mapped = mapSessionUser(session);
+          if (mapped) {
+            try {
+              await linkFirebaseAuth(session.access_token, mapped.uid);
+            } catch (bridgeError) {
+              reportBridgeFailure(bridgeError);
+            }
+            lastUidRef.current = mapped.uid;
+            setUser((prev) => (prev && prev.uid === mapped.uid ? prev : wrapUserWithId(mapped as any)));
           }
-          lastUidRef.current = mapped.uid;
-          setUser(wrapUserWithId(mapped as any));
+          return;
         }
-        return;
-      }
 
-      clearUserCache(lastUidRef.current);
-      lastUidRef.current = null;
-      try { await signOut(auth); } catch (e) {}
-      setUser(null);
-      setLoading(false);
-      resetLocalBusinessState();
+        clearUserCache(lastUidRef.current);
+        lastUidRef.current = null;
+        try { await signOut(auth); } catch (e) {}
+        setUser(null);
+        setLoading(false);
+        resetLocalBusinessState();
+      }, 0);
     });
 
     const subscription = data?.subscription;
@@ -1662,8 +1667,9 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
   };
 
-  return (
-    <FirebaseContext.Provider value={{ 
+  // Stable context value: consumers re-render only when real data changes, not on every
+  // provider render (the actions only close over the state listed in the deps below).
+  const contextValue = useMemo<FirebaseContextType>(() => ({ 
       user, 
       loading, 
       isAuthenticated: !!user, 
@@ -1703,7 +1709,13 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       logUserActivity,
       login, 
       logout 
-    }}>
+}), [
+    user, loading, settings, products, invoices, employees, payrollRecords, customers,
+    customerTransactions, vaultTransactions, stockMovements, warehouses, vault, auditLogs,
+  ]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  return (
+    <FirebaseContext.Provider value={contextValue}>
       {children}
     </FirebaseContext.Provider>
   );

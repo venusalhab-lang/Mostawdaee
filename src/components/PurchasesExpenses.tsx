@@ -1,3 +1,4 @@
+import { consumeInvoiceNumber, peekInvoiceNumber } from '../lib/invoiceNumber';
 import React, { useState, useMemo } from 'react';
 import { 
   ShoppingBag, 
@@ -54,7 +55,8 @@ export default function PurchasesExpenses({ language }: Props) {
     settings, 
     saveInvoice, 
     recordVaultTransaction, 
-    deleteInvoice 
+    deleteInvoice,
+    user
   } = useFirebase();
 
   // Active Tab
@@ -120,8 +122,7 @@ export default function PurchasesExpenses({ language }: Props) {
 
   // Generate a random invoice No if left empty
   const triggerAutoInvoiceNo = () => {
-    const randomNum = Math.floor(100000 + Math.random() * 900000);
-    setPurchaseInvoiceNo(`PINV-${randomNum}`);
+    setPurchaseInvoiceNo(peekInvoiceNumber('PINV', user?.uid || 'guest'));
   };
 
   // Calculated numbers for line item creation preview
@@ -209,7 +210,12 @@ export default function PurchasesExpenses({ language }: Props) {
       return;
     }
 
-    const finalInvoiceNo = purchaseInvoiceNo.trim() || `PINV-${Math.floor(100000 + Math.random() * 900000)}`;
+    const sessionUid = user?.uid || 'guest';
+    const typedInvoiceNo = purchaseInvoiceNo.trim();
+    // Empty or the auto-suggested number -> consume the sequence so the next one differs
+    const finalInvoiceNo = !typedInvoiceNo || typedInvoiceNo === peekInvoiceNumber('PINV', sessionUid)
+      ? consumeInvoiceNumber('PINV', sessionUid)
+      : typedInvoiceNo;
 
     const parsedItems = purchaseItems.map(item => {
       const q = parseInt(String(item.quantity), 10) || 0;

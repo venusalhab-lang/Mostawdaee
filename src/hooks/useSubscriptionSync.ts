@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 // @ts-ignore
 import { getSubscription, getProfileById } from '../supabaseClient';
 import { useAuth } from '../components/AuthContext';
@@ -19,6 +19,9 @@ export function useSubscriptionSync(passedUser?: any, passedIsGuest?: boolean) {
   const [profile, setProfile] = useState<any>(null);
   const [daysRemaining, setDaysRemaining] = useState<number>(365);
   const [hasOnboarded, setHasOnboarded] = useState<boolean>(true);
+  // True when the status could not be verified (slow/offline network) and nothing is cached
+  const [checkFailed, setCheckFailed] = useState<boolean>(false);
+  const loadedUserRef = useRef<string | null>(null);
 
   // Expose setSupabaseUser for backwards compatibility in App.tsx
   const setSupabaseUser = useCallback((userObj: any) => {
@@ -33,12 +36,29 @@ export function useSubscriptionSync(passedUser?: any, passedIsGuest?: boolean) {
       setLoading(false);
       return;
     }
-    setLoading(true);
+    // Stale-while-revalidate: show the spinner only the first time for this user
+    const cacheKey = `mustawdae:${userId}:subscription_cache`;
+    if (loadedUserRef.current !== userId) {
+      try {
+        const cached = JSON.parse(localStorage.getItem(cacheKey) || 'null');
+        if (cached?.subscription) {
+          setSubscription(cached.subscription);
+          if (cached.profile) setProfile(cached.profile);
+          setLoading(false);
+        } else {
+          setLoading(true);
+        }
+      } catch {
+        setLoading(true);
+      }
+    }
     try {
+      let freshProfile: any = null;
       // 1. Fetch user custom database profile from profiles table
       try {
         const profileData = await getProfileById(userId);
         if (profileData) {
+          freshProfile = profileData;
           setProfile(profileData);
         }
       } catch (pErr) {
@@ -63,8 +83,13 @@ export function useSubscriptionSync(passedUser?: any, passedIsGuest?: boolean) {
       });
 
       const data = await queryWithTimeout;
+      setCheckFailed(false);
+      loadedUserRef.current = userId;
       if (data) {
         setSubscription(data);
+        try {
+          localStorage.setItem(cacheKey, JSON.stringify({ subscription: data, profile: freshProfile }));
+        } catch { /* ignore */ }
         
         // Compute days remaining
         const expiry = new Date(data.expiry_date).getTime();
@@ -76,9 +101,9 @@ export function useSubscriptionSync(passedUser?: any, passedIsGuest?: boolean) {
         setSubscription(null);
       }
     } catch (err) {
-      console.error("[SubscriptionSync] Error retrieving database subscription status:", err);
-      setSubscription(null);
-      setDaysRemaining(0);
+      // A slow or offline network must NOT lock out a paying customer: keep the last known status.
+      console.warn("[SubscriptionSync] Could not verify subscription, keeping last known status:", err);
+      setCheckFailed(true);
     } finally {
       setLoading(false);
     }
@@ -87,7 +112,7 @@ export function useSubscriptionSync(passedUser?: any, passedIsGuest?: boolean) {
   // Automatically refresh subscription when user logins or switches
   useEffect(() => {
     refreshSubscription();
-  }, [supabaseUser, refreshSubscription]);
+  }, [supabaseUser?.id, supabaseUser?.uid, isGuest]); // key on the user id, not object identity
 
   // Compute live subscription checks with strict 25-day free trial boundary
   const trialStart = subscription?.trial_start_date ? new Date(subscription.trial_start_date).getTime() : Date.now();
@@ -109,7 +134,7 @@ export function useSubscriptionSync(passedUser?: any, passedIsGuest?: boolean) {
     profile?.subscription_status === 'active';
 
   const isSubscribed = isPremiumActive || isTrialActive;
-  const isExpired = !isSubscribed;
+  const isExpired = !isSubscribed && !(checkFailed && !subscription);
 
   // Set standard days remaining based on active mode
   const resolvedDaysRemaining = isPremiumActive 

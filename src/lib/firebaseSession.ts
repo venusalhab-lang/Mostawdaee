@@ -11,13 +11,24 @@ export async function linkFirebaseAuth(supabaseAccessToken: string, expectedUid:
     throw new Error('VITE_API_BASE_URL is not set: the mobile app cannot reach /api/firebase-session');
   }
 
-  const response = await fetch(apiUrl('/api/firebase-session'), {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${supabaseAccessToken}`,
-      'Content-Type': 'application/json',
-    },
-  });
+  // Never let an unreachable/cold server freeze app start-up
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8000);
+  let response: Response;
+  try {
+    response = await fetch(apiUrl('/api/firebase-session'), {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${supabaseAccessToken}`,
+        'Content-Type': 'application/json',
+      },
+      signal: controller.signal,
+    });
+  } catch (error: any) {
+    throw new Error(error?.name === 'AbortError' ? 'Firebase session bridge timed out' : (error?.message || 'Firebase session bridge unreachable'));
+  } finally {
+    clearTimeout(timeout);
+  }
 
   if (!response.ok) {
     const details = await response.json().catch(() => ({}));

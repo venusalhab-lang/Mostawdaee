@@ -7,6 +7,8 @@ import { toast } from 'sonner';
 import { computeStockStatus } from '../lib/stock';
 import { readVaultBalances } from '../lib/vaultMath';
 import { POS_CURRENCY_CODES } from '../lib/exchangeRates';
+import { apiUrl } from '../lib/apiBase';
+import { authHeaders } from '../lib/apiAuth';
 
 interface Props {
   language: Language;
@@ -404,9 +406,10 @@ export default function AIAssistant({
         }
       };
 
-      const response = await fetchWithRetry(`/api/chat?t=${Date.now()}`, {
+      const response = await fetchWithRetry(apiUrl(`/api/chat?t=${Date.now()}`), {
         method: 'POST',
         headers: { 
+          ...(await authHeaders()),
           'Content-Type': 'application/json',
           'Cache-Control': 'no-cache, no-store, must-revalidate',
           'Pragma': 'no-cache',
