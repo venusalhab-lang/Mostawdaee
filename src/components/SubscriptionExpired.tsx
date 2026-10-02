@@ -66,6 +66,7 @@ export default function SubscriptionExpired({
             await onRefresh();
           } catch (err) {
             toast.error((isRtl ? 'فشل تفعيل الاشتراك: ' : 'Could not activate the subscription: ') + (err instanceof Error ? err.message : ''));
+            throw err; // keeps the Google Play purchase pending so activation is retried
           } finally {
             setGplayProcessing(false);
           }
@@ -303,15 +304,6 @@ export default function SubscriptionExpired({
               >
                 <Smartphone size={14} className={gplayProcessing ? "animate-bounce" : ""} />
                 <span>{gplayProcessing ? (isRtl ? 'جاري الاتصال بـ Google Play...' : 'Connecting to Google Play...') : (isRtl ? 'ترقية فورية ترخيص مستودعي عبر Google Play ($100.00)' : 'Instant Upgrade via Google Play ($100.00)')}</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => { sounds.playClick(); setShowCheckout(true); }}
-                className="w-full py-4 bg-slate-900 border border-slate-850 hover:bg-slate-800 text-slate-350 hover:text-white font-bold text-xs rounded-xl transition flex items-center justify-center gap-2 cursor-pointer"
-              >
-                <CreditCard size={14} />
-                <span>{isRtl ? 'دفع بديل بالبطاقة الائتمانية' : 'Alternative Credit / Debit Card'}</span>
               </button>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">

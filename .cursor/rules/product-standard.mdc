@@ -1,0 +1,23 @@
+---
+description: Mostawdaee is being built as a global, trusted, premium warehouse and POS product
+alwaysApply: true
+---
+
+# Product standard
+
+Mostawdaee is being built as a **global, competitive, premium, practical, trusted and certifiable** warehouse/POS product. Treat every change as if it will ship to paying merchants.
+
+## Do
+
+- Prefer quiet, accurate UI over banners, fake urgency, or decorative noise in navigation.
+- Keep money, stock, payroll, debts and subscriptions **correct and verifiable**. Never invent numbers, mock paid unlocks, or hide overdrafts.
+- Separate currencies. Format amounts in their own currency. Do not swap symbols without converting.
+- Fail closed on paid or privileged actions: subscriptions, vault withdrawals, stock reductions, payroll.
+- Put commercial actions (upgrade, renew, billing) in Settings or the expired-subscription lock — not in the sidebar.
+- After UI changes, verify the real user path (click/navigate), not just a screenshot.
+
+## Do not
+
+- Add fake Google Pay / card forms, simulated purchase tokens, or client-side premium flags.
+- Leave dead buttons that look like they charge money.
+- Re-introduce sidebar upgrade cards, random invoice numbers, or second Supabase clients.

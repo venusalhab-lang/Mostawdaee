@@ -40,6 +40,11 @@ export interface ProcessedTransaction {
 // Active connection state
 let isInitialized = false;
 
+// Listeners are registered once, but the screen that triggers a purchase may change;
+// always call the most recent handlers.
+type PurchaseHandler = (tx: ProcessedTransaction) => void | Promise<void>;
+let currentHandlers: { onPurchaseSuccess: PurchaseHandler; onError: (message: string) => void } | null = null;
+
 /**
  * Checks if the application is running inside a native hybrid mobile container (Capacitor/Cordova)
  */
@@ -56,9 +61,11 @@ export function isMobileDevice(): boolean {
  * @param onError Callback for failed billing workflows
  */
 export function initializeBilling(
-  onPurchaseSuccess: (tx: ProcessedTransaction) => void,
+  onPurchaseSuccess: PurchaseHandler,
   onError: (message: string) => void
 ) {
+  currentHandlers = { onPurchaseSuccess, onError };
+
   // Safe guarding double initialization
   if (isInitialized) {
     console.log('[Google Play Billing] Already initialized.');
@@ -95,57 +102,53 @@ export function initializeBilling(
      * Handles the real-time response from Google's official payment sheet.
      */
     store.when()
-      .approved((transaction: any) => {
-        console.log('[Google Play Billing] Native Purchase APPROVED by Google Play Store:', transaction);
+      .approved(async (transaction: any) => {
+        console.log('[Google Play Billing] Purchase approved by Google Play');
 
-        // Capture purchase fields safely
-        const productId = transaction.productId;
+        const productId = transaction.products?.[0]?.id || transaction.productId;
         const matchingProduct = PLAY_STORE_PRODUCTS.find(p => p.id === productId);
-        
         if (!matchingProduct) {
-          console.warn(`[Google Play Billing] Purchased product ID ${productId} is not registered in our local catalog!`);
-          transaction.verify();
+          console.warn(`[Google Play Billing] Product ${productId} is not in our catalog; ignoring.`);
           return;
         }
 
-        // 4. Token Verification: Capture secure tokens for cryptographic backend verification
-        const purchaseToken = transaction.purchaseToken || 
-                              transaction.token || 
-                              (transaction.receipt && transaction.receipt.token) ||
-                              transaction.transactionId || 
-                              `token_${Date.now()}`;
+        // Real Google Play purchase token (the server verifies it with the Play Developer API).
+        const purchaseToken: string =
+          transaction.nativePurchase?.purchaseToken ||
+          transaction.purchaseToken ||
+          transaction.token ||
+          '';
+        if (!purchaseToken) {
+          currentHandlers?.onError('Google Play did not return a purchase token');
+          return;
+        }
 
         const processedTx: ProcessedTransaction = {
-          productId: transaction.productId,
-          transactionId: transaction.transactionId || `gplay_${Date.now()}`,
-          purchaseToken: purchaseToken,
+          productId,
+          transactionId: transaction.transactionId || '',
+          purchaseToken,
           currency: matchingProduct.currency,
           amount: matchingProduct.amount,
           type: matchingProduct.type,
           date: Date.now()
         };
 
-        console.info(`[Google Play Billing] Secure token retrieved successfully: ${purchaseToken.substring(0, 15)}...`);
-        console.info('[Google Play Billing] Dispatching processed transaction payload to secure ledger hooks...');
-
-        // Fire database update hook
-        onPurchaseSuccess(processedTx);
-
-        // Hand over validation to finalize transaction
-        transaction.verify();
-      })
-      .verified((receipt: any) => {
-        console.log('[Google Play Billing] Native Receipt VERIFIED successfully by store:', receipt);
-        receipt.finish();
-      })
-      .finished((receipt: any) => {
-        console.log('[Google Play Billing] Native Transaction fully FINISHED & consumed:', receipt);
+        try {
+          // 1. Activate on OUR server (which verifies the token with Google)
+          await currentHandlers?.onPurchaseSuccess(processedTx);
+          // 2. Only then acknowledge/finish with Google. Unacknowledged purchases are
+          //    refunded automatically after 3 days, and are re-delivered on the next launch,
+          //    so a failed activation is retried instead of being lost.
+          await transaction.finish();
+        } catch (err) {
+          console.warn('[Google Play Billing] Activation failed; purchase left pending for retry.', err);
+        }
       });
 
     // Error logging gate
     store.error((err: any) => {
       console.error('[Google Play Billing] Error from official billing system:', err);
-      onError(err.message || 'Billing subsystem encountered an unknown error');
+      currentHandlers?.onError(err.message || 'Billing subsystem encountered an unknown error');
     });
 
     // Initialize platform bindings
@@ -154,7 +157,7 @@ export function initializeBilling(
     console.log('[Google Play Billing] Official store listener bindings successfully attached and booted.');
   } catch (error: any) {
     console.error('[Google Play Billing] Critical official initialization failed:', error);
-    onError(error.message || 'Fatal initialization of payment sheet failed');
+    currentHandlers?.onError(error.message || 'Fatal initialization of payment sheet failed');
   }
 }
 
@@ -180,14 +183,16 @@ export async function makePurchase(
     try {
       const { store, Platform } = CdvPurchase;
       const productObj = store.get(productId, Platform.GOOGLE_PLAY);
-      if (!productObj) {
-        throw new Error(`Google Play billing could not retrieve product layout for ID: ${productId}. Make sure it is approved in the Play Console.`);
+      const offer = productObj?.getOffer?.();
+      if (!productObj || !offer) {
+        throw new Error(`Google Play billing could not retrieve product ${productId}. Make sure the subscription is active in the Play Console and the app is installed from a Play test track.`);
       }
 
-      console.log(`[Google Play Billing] Ordering official product code: ${productId}`);
-      
-      // Fires the native billing layout
-      productObj.order();
+      // Fires the native Google Play payment sheet (cordova-plugin-purchase v13: orders go through an Offer)
+      const error = await offer.order();
+      if (error) {
+        throw new Error(error.message || 'Google Play order failed');
+      }
       return true;
     } catch (e: any) {
       console.error('[Google Play Billing] Failed ordering via Google Play Billing Store:', e);

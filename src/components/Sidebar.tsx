@@ -14,14 +14,12 @@ import {
   Unlock,
   Activity,
   Zap,
-  Sparkles,
   Shield,
   Building2,
   ChevronLeft,
   ChevronRight,
   Cloud,
   ShoppingBag,
-  Crown,
   TrendingUp,
   Calculator
 } from 'lucide-react';
@@ -35,8 +33,6 @@ import { Search } from 'lucide-react';
 import { useDeviceType } from '../hooks/useDeviceType';
 import { toast } from 'sonner';
 import { sounds } from '../lib/sounds';
-import { useSubscriptionSync } from '../hooks/useSubscriptionSync';
-import PremiumUpgradeModal from './PremiumUpgradeModal';
 import { isAdminEmail } from '../lib/adminAccess';
 
 interface SidebarProps {
@@ -90,13 +86,6 @@ export default function Sidebar({
   const [tilt, setTilt] = useState({ x: 0, y: 0 });
   const [brandHovered, setBrandHovered] = useState(false);
   
-  // Custom Subscription and Upgrade States
-  const { 
-    isPremiumActive, 
-    daysRemaining, 
-    refreshSubscription 
-  } = useSubscriptionSync();
-  const [isUpgradeModalOpen, setIsUpgradeModalOpen] = useState(false);
   
   // State for Long Press Interactions (تفاعل الضغط المطول)
   const [holdingItemId, setHoldingItemId] = useState<string | null>(null);
@@ -824,93 +813,6 @@ export default function Sidebar({
           {/* Global Premium Glassmorphism Currency Switcher */}
           <CurrencySwitcher isExpanded={isExpanded} isRtl={isRtl} />
 
-          {/* Elegant Compact Subscription Card / Upgrade Banner */}
-          {isExpanded ? (
-            isPremiumActive ? (
-              <div className="mx-1 p-3 rounded-2xl bg-gradient-to-br from-[#04120f] to-[#0a261a] dark:from-[#020d0b] dark:to-[#051c13] border border-emerald-950/40 dark:border-emerald-500/10 shadow-lg text-white space-y-2 mt-1 relative overflow-hidden group">
-                <div className="absolute inset-0 bg-gradient-to-r from-transparent via-emerald-400/5 to-transparent -translate-x-full group-hover:animate-[shimmer_2s_infinite] pointer-events-none" />
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-1.5">
-                    <span className="relative flex h-2 w-2">
-                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                      <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-                    </span>
-                    <span className="text-[10px] font-black tracking-wider text-emerald-400 uppercase">
-                      {isRtl ? "النسخة الاخترافية" : "PREMIUM ACTIVE"}
-                    </span>
-                  </div>
-                  <span className="bg-emerald-950/60 text-emerald-400 text-[9px] font-bold px-1.5 py-0.5 rounded border border-emerald-800/40 leading-none">
-                    {isRtl ? "مفعّل" : "Licensed"}
-                  </span>
-                </div>
-                <p className="text-[11px] text-slate-300 font-arabic leading-normal font-medium max-w-[175px]">
-                  {isRtl 
-                    ? "أنت تعمل الآن بالنسخة الكاملة غير المحدودة." 
-                    : "You are now running the unlimited Premium Edition."}
-                </p>
-              </div>
-            ) : (
-              <div className="mx-1 p-3 rounded-2xl bg-gradient-to-br from-[#0c122c] to-[#151f47] dark:from-[#080d22] dark:to-[#0f1839] border border-indigo-950/40 dark:border-cyan-500/10 shadow-lg text-white space-y-2 mt-1 relative overflow-hidden group">
-                {/* Subtle shining effect */}
-                <div className="absolute inset-0 bg-gradient-to-r from-transparent via-indigo-400/5 to-transparent -translate-x-full group-hover:animate-[shimmer_2s_infinite] pointer-events-none" />
-                
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-1.5">
-                    <span className="relative flex h-2 w-2">
-                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75"></span>
-                      <span className="relative inline-flex rounded-full h-2 w-2 bg-cyan-500"></span>
-                    </span>
-                    <span className="text-[10px] font-black tracking-wider text-cyan-400 uppercase">
-                      {isRtl ? "فترة تجريبية" : "TRIAL ACTIVE"}
-                    </span>
-                  </div>
-                  <span className="bg-cyan-950/60 text-cyan-400 text-[9px] font-bold px-1.5 py-0.5 rounded border border-cyan-800/40 leading-none">
-                    {isRtl ? `${daysRemaining} يوماً متبقية` : `${daysRemaining} Days Left`}
-                  </span>
-                </div>
-                
-                <p className="text-[11px] text-slate-300 font-arabic leading-normal font-medium max-w-[175px]">
-                  {isRtl 
-                    ? "قم بالترقية الآن للوصول الكامل والدائم لمستودعك." 
-                    : "Upgrade now for permanent, full secure access."}
-                </p>
-                
-                <button
-                  type="button"
-                  onClick={() => {
-                    sounds?.playClick();
-                    setIsUpgradeModalOpen(true);
-                  }}
-                  className="w-full py-1.5 rounded-xl bg-gradient-to-r from-indigo-600 to-purple-650 hover:from-indigo-500 hover:to-purple-550 text-white font-extrabold text-[11px] font-arabic shadow-md active:scale-95 transition-all text-center cursor-pointer flex items-center justify-center gap-1.5 border border-indigo-500/20"
-                >
-                  <Sparkles className="w-3.5 h-3.5 text-cyan-300 animate-pulse shrink-0" />
-                  <span>{isRtl ? "ترقية للنسخة الكاملة" : "Get Premium Version"}</span>
-                </button>
-              </div>
-            )
-          ) : (
-            isPremiumActive ? (
-              <div
-                className="w-10 h-10 mx-auto rounded-xl flex items-center justify-center bg-emerald-950/60 dark:bg-emerald-950/40 border border-emerald-900/30 text-emerald-400 scale-100 mt-1"
-                title={isRtl ? "النسخة النشطة الكاملة" : "Premium Active"}
-              >
-                <Crown className="w-4.5 h-4.5 text-emerald-400" />
-              </div>
-            ) : (
-              <button
-                type="button"
-                onClick={() => {
-                  sounds?.playClick();
-                  setIsUpgradeModalOpen(true);
-                }}
-                className="w-10 h-10 mx-auto rounded-xl flex items-center justify-center bg-indigo-950/60 dark:bg-indigo-950/40 border border-indigo-900/30 hover:border-indigo-500 transition-all text-cyan-400 hover:scale-105 active:scale-95 mt-1"
-                title={isRtl ? `ترقية الحساب (${daysRemaining} يوماً متبقية)` : `Upgrade Account (${daysRemaining} days left)`}
-              >
-                <Sparkles className="w-4.5 h-4.5 animate-pulse text-cyan-400" />
-              </button>
-            )
-          )}
-
           {/* Quick-toggle language switch with glass card layout */}
           <button
             onClick={onLanguageToggle}
@@ -986,14 +888,6 @@ export default function Sidebar({
         </div>
       </motion.aside>
 
-      <PremiumUpgradeModal
-        isOpen={isUpgradeModalOpen}
-        onClose={() => setIsUpgradeModalOpen(false)}
-        language={language}
-        onUpgradeSuccess={() => {
-          refreshSubscription();
-        }}
-      />
     </>
   );
 }

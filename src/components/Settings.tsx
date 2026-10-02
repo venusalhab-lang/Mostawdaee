@@ -4,8 +4,9 @@ import {
   Sparkles, Palette, Zap, Moon, Sun, Monitor, 
   ShieldCheck, Bell, Database, Download, RefreshCw, Upload,
   Type, Volume2, Info, Copy, Check, FileText, DatabaseZap, CheckSquare, AlertTriangle,
-  Phone, MapPin, Mail
+  Phone, MapPin, Mail, Crown
 } from 'lucide-react';
+import SubscriptionSettings from './SubscriptionSettings';
 import { Language, AppSettings, Currency } from '../types';
 import { translations } from '../translations';
 import { motion, AnimatePresence } from 'motion/react';
@@ -23,7 +24,7 @@ interface Props {
   onSaveSettings: (settings: AppSettings) => void;
 }
 
-type SettingsSection = 'profile' | 'visuals' | 'inventory' | 'notifications' | 'system';
+type SettingsSection = 'profile' | 'visuals' | 'inventory' | 'notifications' | 'subscription' | 'system';
 
 export default function Settings({ language, onLanguageToggle, settings, onSaveSettings }: Props) {
   const t = translations[language];
@@ -130,6 +131,7 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
     { id: 'visuals', label: t.visuals, icon: Palette },
     { id: 'inventory', label: t.safetyLogic, icon: ShieldCheck },
     { id: 'notifications', label: t.notifications, icon: Bell },
+    { id: 'subscription', label: language === 'ar' ? 'الاشتراك' : 'Subscription', icon: Crown },
     { id: 'system', label: t.systemManagement, icon: Database },
   ];
 
@@ -1217,6 +1219,8 @@ CREATE INDEX idx_invoices_number ON invoices(invoice_number);`;
                   </div>
                 </div>
               )}
+
+              {activeSection === 'subscription' && <SubscriptionSettings language={language} />}
 
               {activeSection === 'system' && (
                 <div className="space-y-8">
