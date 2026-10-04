@@ -1,3 +1,4 @@
+-- ARCHIVED. Do not run: grants wider access than supabase_production_setup.sql and would reopen fixed holes.
 -- ====================================================================
 -- مَستودعي (Mostawdaee) - SUPABASE COMPLETE DDL & RLS SCHEMA SCRIPT
 -- ====================================================================

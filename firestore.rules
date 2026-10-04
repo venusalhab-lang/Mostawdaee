@@ -78,7 +78,8 @@ service cloud.firestore {
              && data.name is string
              && data.salary is number
              && data.status in ['active', 'on-leave', 'terminated']
-             && data.hiredDate is number;
+             && data.hiredDate is number
+             && (!data.keys().hasAny(['currency']) || data.currency in ['JOD', 'ILS', 'USD', 'IQD', 'SAR', 'LYD', 'EGP']);
     }
 
     function isValidPayrollRecord(data) {
@@ -102,7 +103,7 @@ service cloud.firestore {
              && data.phone is string && data.phone.size() <= 64
              && data.createdAt is string
              && data.totalDebt is number
-             && data.currency in ['JOD', 'ILS', 'USD', 'IQD', 'SAR', 'LYD'];
+             && data.currency in ['JOD', 'ILS', 'USD', 'IQD', 'SAR', 'LYD', 'EGP'];
     }
 
     function isValidCustomerTransaction(data) {
@@ -112,7 +113,7 @@ service cloud.firestore {
              && data.customerId is string
              && data.type in ['invoice', 'payment']
              && data.amount is number
-             && data.currency in ['JOD', 'ILS', 'USD', 'IQD', 'SAR', 'LYD']
+             && data.currency in ['JOD', 'ILS', 'USD', 'IQD', 'SAR', 'LYD', 'EGP']
              && data.exchangeRate is number
              && data.date is string
              && data.notes is string

@@ -1,3 +1,4 @@
+-- ARCHIVED. Do not run: grants wider access than supabase_production_setup.sql and would reopen fixed holes.
 -- ─── SUPABASE SCHEMA DEFINITIONS FOR MULTI-CURRENCY & PROFITS ─────────────────
 -- This SQL file configures the database schema on Supabase to enable robust multi-currency transactions.
 -- Put these statements inside the Supabase Query Editor and run them.

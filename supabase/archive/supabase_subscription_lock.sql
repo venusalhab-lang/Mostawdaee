@@ -1,3 +1,4 @@
+-- ARCHIVED. Do not run: grants wider access than supabase_production_setup.sql and would reopen fixed holes.
 -- Prevent clients from self-granting premium. Apply in the Supabase SQL editor.
 -- Users may insert/update only trial rows for themselves. Active status is service-role only.
 
