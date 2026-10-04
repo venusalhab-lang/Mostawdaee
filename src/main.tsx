@@ -2,13 +2,20 @@ import {StrictMode} from 'react';
 import {createRoot} from 'react-dom/client';
 import { HashRouter } from 'react-router-dom';
 import App from './App.tsx';
+import '@fontsource/cairo/400.css';
+import '@fontsource/cairo/500.css';
+import '@fontsource/cairo/600.css';
+import '@fontsource/cairo/700.css';
+import '@fontsource/inter/400.css';
+import '@fontsource/inter/500.css';
+import '@fontsource/inter/600.css';
+import '@fontsource/inter/700.css';
 import './index.css';
 import { FirebaseProvider } from './components/FirebaseProvider.tsx';
 import { CurrencyProvider } from './components/CurrencyContext.tsx';
 import { AuthProvider } from './components/AuthContext.tsx';
 import ErrorBoundary from './components/ErrorBoundary.tsx';
 import { registerSW } from 'virtual:pwa-register';
-import { supabase } from './supabaseClient';
 import { Toaster } from 'sonner';
 
 // OAuth providers may return to this server-side callback path. Normalize it
@@ -17,122 +24,14 @@ if (window.location.pathname === '/auth/callback' || window.location.pathname ==
   window.history.replaceState(null, '', `/${window.location.search}${window.location.hash}`);
 }
 
-// Helper functions to parse and decode tokens for early robust session sync
-function parseHashParams(hashString: string) {
-  const hash = hashString.startsWith('#') ? hashString.substring(1) : hashString;
-  const params: Record<string, string> = {};
-  hash.split('&').forEach(pair => {
-    const [key, val] = pair.split('=');
-    if (key && val) {
-      params[decodeURIComponent(key)] = decodeURIComponent(val);
-    }
-  });
-  return params;
+// Sessions are only ever created by the PKCE code exchange of a sign-in this device started.
+// Raw tokens in a link would let anyone sign this device into their own account.
+if (/[#&](access_token|refresh_token)=/.test(window.location.hash)) {
+  window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}`);
 }
-
-function decodeUserFromToken(token: string) {
-  try {
-    const base64Url = token.split('.')[1];
-    const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
-    const jsonPayload = decodeURIComponent(
-      atob(base64)
-        .split('')
-        .map(c => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2))
-        .join('')
-    );
-    const payload = JSON.parse(jsonPayload);
-    return {
-      id: payload.sub,
-      email: payload.email,
-      role: payload.role,
-      user_metadata: payload.user_metadata || {},
-      aud: payload.aud
-    };
-  } catch (error) {
-    console.error('[Auth Early Intercept] Error decoding JWT token:', error);
-    return null;
-  }
-}
-
-// Early intercept and write tokens to localStorage to guarantee persistent state immediately
 try {
-  const hashParams = parseHashParams(window.location.hash);
-  if (hashParams.access_token) {
-    const decodedUser = decodeUserFromToken(hashParams.access_token);
-    if (decodedUser) {
-      console.log('[Auth Early Intercept] Decoded and saved user session:', decodedUser.email);
-      localStorage.setItem('mustawdae_supabase_session_override', JSON.stringify(decodedUser));
-      
-      const sessionObj = {
-        access_token: hashParams.access_token,
-        token_type: hashParams.token_type || 'bearer',
-        expires_in: parseInt(hashParams.expires_in || '3600', 10),
-        refresh_token: hashParams.refresh_token || '',
-        user: decodedUser,
-        expires_at: Math.floor(Date.now() / 1000) + parseInt(hashParams.expires_in || '3600', 10)
-      };
-      
-      localStorage.setItem('sb-kwvrtsnvadjknioqbbxs-auth-token', JSON.stringify(sessionObj));
-
-      // Also let Supabase SDK attempt to parse and persist the session from URL if possible
-      try {
-        if ((supabase as any)?.auth?.getSessionFromUrl) {
-          // getSessionFromUrl helps the SDK parse code/token responses and persist session
-          (supabase as any).auth.getSessionFromUrl?.().catch(()=>{});
-        }
-      } catch (e) {}
-
-      // Dynamically write custom project reference key if we are configured for a different Supabase project
-      try {
-        const storedUrl = localStorage.getItem('VITE_SUPABASE_URL');
-        if (storedUrl && storedUrl.trim()) {
-          const match = storedUrl.match(/https?:\/\/([^.]+)\.supabase\.co/);
-          if (match && match[1]) {
-            const dynamicKey = `sb-${match[1]}-auth-token`;
-            localStorage.setItem(dynamicKey, JSON.stringify(sessionObj));
-            console.log('[Auth Early Intercept] Saved to custom project storage key:', dynamicKey);
-          }
-        }
-      } catch (err) {
-        console.warn('[Auth Early Intercept] Ignored custom storage reference write warning:', err);
-      }
-    }
-  }
-} catch (e) {
-  console.error('[Auth Early Intercept] Process error:', e);
-}
-
-// إغلاق النافذة المنبثقة لتسجيل الدخول تلقائياً بعد نجاح العملية وحفظ الجلسة
-// If this window is an OAuth popup or contains OAuth fragments, notify opener and close.
-if (window.opener && (window.name === 'supabase_oauth_popup' || window.location.hash.includes('access_token') || window.location.search.includes('code='))) {
-  console.log('[Auth] Detected OAuth callback popup. Syncing session and closing window.');
-  try {
-    const hashParams = parseHashParams(window.location.hash);
-    const decodedUser = hashParams.access_token ? decodeUserFromToken(hashParams.access_token) : null;
-    
-    const oauthPayload = {
-      type: 'supabse_oauth_success',
-      access_token: hashParams.access_token || null,
-      refresh_token: hashParams.refresh_token || null,
-      expires_in: hashParams.expires_in || null,
-      token_type: hashParams.token_type || null,
-      user: decodedUser
-    };
-
-    // Post both formats to opener for extreme resilience:
-    window.opener.postMessage(oauthPayload, window.location.origin);
-    window.opener.postMessage('supabse_oauth_success', window.location.origin);
-  } catch (e) {
-    console.error('Error postMessage to opener:', e);
-  }
-  setTimeout(() => {
-    try {
-      window.close();
-    } catch (e) {
-      console.error('Error closing popup:', e);
-    }
-  }, 1200);
-}
+  localStorage.removeItem('mustawdae_supabase_session_override');
+} catch { /* storage unavailable */ }
 
 // If the URL contains an OAuth error (e.g., bad_oauth_state), clear stale Supabase session keys
 try {
@@ -142,7 +41,7 @@ try {
     console.warn('[Auth] Detected OAuth error in URL:', oauthErr);
     try {
       Object.keys(localStorage).forEach(k => {
-        if (/^sb-|supabase|mustawdae_supabase_session_override|sb-.*-auth-token/i.test(k)) {
+        if (/^sb-.*-auth-token|^sb-.*-code-verifier/i.test(k)) {
           localStorage.removeItem(k);
         }
       });
@@ -187,6 +86,19 @@ if (isSandboxPreview) {
   }
 }
 
+// After a deploy, an open tab may request JS chunks that no longer exist. Reload once to fetch the new build;
+// the guard stops a reload loop if the chunk is genuinely missing.
+const PRELOAD_RELOAD_KEY = 'mostawdaee_preload_reload_at';
+window.addEventListener('vite:preloadError', (event) => {
+  try {
+    const last = Number(sessionStorage.getItem(PRELOAD_RELOAD_KEY)) || 0;
+    if (Date.now() - last < 60_000) return;
+    sessionStorage.setItem(PRELOAD_RELOAD_KEY, String(Date.now()));
+  } catch { /* storage unavailable: still reload once */ }
+  event.preventDefault();
+  window.location.reload();
+});
+
 // Register the PWA service worker with auto-update (only if not loaded inside the sandbox web preview)
 if (!isSandboxPreview) {
   registerSW({ immediate: true });
@@ -198,7 +110,7 @@ createRoot(document.getElementById('root')!).render(
       <FirebaseProvider>
         <CurrencyProvider>
           <AuthProvider>
-            <ErrorBoundary>
+            <ErrorBoundary variant="app">
               <App />
             </ErrorBoundary>
             <Toaster richColors closeButton position="top-center" dir="auto" duration={4000} />

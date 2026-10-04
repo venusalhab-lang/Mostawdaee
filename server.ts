@@ -1,14 +1,29 @@
 import express from "express";
+import helmet from "helmet";
+import compression from "compression";
 import path from "path";
 import fs from "fs";
-import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
 import { createClient } from "@supabase/supabase-js";
-import { cert, getApps, initializeApp } from "firebase-admin/app";
-import { getAuth } from "firebase-admin/auth";
-import { GoogleAuth } from "google-auth-library";
+import { GoogleAuth, OAuth2Client } from "google-auth-library";
 import { fileURLToPath } from "url";
+import { isAdminEmail, isVerifiedAdmin } from "./src/lib/adminAccess";
+import {
+  MAX_SUBSCRIPTION_GRANT_DAYS,
+  SUBSCRIPTION_DAY_MS,
+  TRIAL_DAYS,
+  subscriptionWindow,
+  trialStartForEnd,
+} from "./src/lib/subscriptionAccess";
+import { PlayTokenState, isEntitled, reconcilePlaySubscription } from "./src/lib/playEntitlement";
+import {
+  ASSISTANT_LIMITS,
+  buildSystemInstruction,
+  sanitizeAssistantAction,
+  sanitizeContext,
+  sanitizeHistory,
+} from "./src/lib/assistantContext";
 
 dotenv.config();
 
@@ -20,6 +35,8 @@ const isProduction = process.env.NODE_ENV === "production" ||
                      __filename.endsWith("server.js") || 
                      __filename.includes("dist") ||
                      !fs.existsSync(path.resolve(process.cwd(), 'src/main.tsx'));
+
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash";
 
 // Lazy initialization of Gemini
 let ai: GoogleGenAI | null = null;
@@ -56,59 +73,46 @@ function getSupabaseServiceClient() {
   return createClient(url, serviceKey, { auth: { persistSession: false, autoRefreshToken: false } });
 }
 
-let firebaseAdminReady = false;
-function ensureFirebaseAdmin() {
-  if (getApps().length > 0) {
-    firebaseAdminReady = true;
-    return true;
-  }
-  const raw = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
-  if (!raw) return false;
-  try {
-    const credential = JSON.parse(raw);
-    initializeApp({ credential: cert(credential) });
-    firebaseAdminReady = true;
-    return true;
-  } catch (error) {
-    console.error("[Firebase Admin] Invalid FIREBASE_SERVICE_ACCOUNT_JSON:", error);
-    return false;
-  }
-}
-
-
 const PLAY_PRODUCT_ID = "mostawdaee_premium_100";
+const PLAY_PACKAGE_NAME = process.env.GOOGLE_PLAY_PACKAGE_NAME || "com.mostawdaee.app";
 
-type PlayVerification =
-  | { ok: true; expiryDate: string }
+type PlayFetch =
+  | {
+      ok: true;
+      state: string;
+      expiry: string | null;
+      acknowledged: boolean;
+      linkedPurchaseToken: string | null;
+    }
   | { ok: false; status: number; message: string };
 
-/**
- * Verifies a purchase token with the Google Play Developer API (never trust the client).
- * Fails closed: without credentials the subscription is NOT granted.
- */
-async function verifyPlaySubscription(purchaseToken: string): Promise<PlayVerification> {
+let playAuth: GoogleAuth | null = null;
+
+async function playAccessToken(): Promise<string | { status: number; message: string }> {
   const raw = process.env.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON;
-  const packageName = process.env.GOOGLE_PLAY_PACKAGE_NAME || "com.mostawdaee.app";
-  if (!raw) {
-    return { ok: false, status: 503, message: "GOOGLE_PLAY_SERVICE_ACCOUNT_JSON is not configured on the server" };
+  if (!raw) return { status: 503, message: "GOOGLE_PLAY_SERVICE_ACCOUNT_JSON is not configured on the server" };
+  if (!playAuth) {
+    let credentials: any;
+    try {
+      credentials = JSON.parse(raw);
+    } catch {
+      return { status: 503, message: "GOOGLE_PLAY_SERVICE_ACCOUNT_JSON is not valid JSON" };
+    }
+    playAuth = new GoogleAuth({ credentials, scopes: ["https://www.googleapis.com/auth/androidpublisher"] });
   }
+  const token = (await (await playAuth.getClient()).getAccessToken()).token;
+  return token || { status: 502, message: "Could not obtain a Google Play API token" };
+}
 
-  let credentials: any;
+/** Reads a purchase token's current state from the Google Play Developer API (never trust the client). */
+async function fetchPlaySubscription(purchaseToken: string): Promise<PlayFetch> {
   try {
-    credentials = JSON.parse(raw);
-  } catch {
-    return { ok: false, status: 503, message: "GOOGLE_PLAY_SERVICE_ACCOUNT_JSON is not valid JSON" };
-  }
+    const accessToken = await playAccessToken();
+    if (typeof accessToken !== "string") return { ok: false, ...accessToken };
 
-  try {
-    const auth = new GoogleAuth({ credentials, scopes: ["https://www.googleapis.com/auth/androidpublisher"] });
-    const client = await auth.getClient();
-    const accessToken = (await client.getAccessToken()).token;
-    if (!accessToken) return { ok: false, status: 502, message: "Could not obtain a Google Play API token" };
-
-    const url = `https://androidpublisher.googleapis.com/androidpublisher/v3/applications/${encodeURIComponent(packageName)}/purchases/subscriptionsv2/tokens/${encodeURIComponent(purchaseToken)}`;
+    const url = `https://androidpublisher.googleapis.com/androidpublisher/v3/applications/${encodeURIComponent(PLAY_PACKAGE_NAME)}/purchases/subscriptionsv2/tokens/${encodeURIComponent(purchaseToken)}`;
     const response = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
-    if (response.status === 404 || response.status === 400) {
+    if (response.status === 404 || response.status === 400 || response.status === 410) {
       return { ok: false, status: 400, message: "Purchase token was not found in Google Play" };
     }
     if (!response.ok) {
@@ -116,26 +120,102 @@ async function verifyPlaySubscription(purchaseToken: string): Promise<PlayVerifi
     }
 
     const data: any = await response.json();
-    const state = String(data?.subscriptionState || "");
-    const activeStates = ["SUBSCRIPTION_STATE_ACTIVE", "SUBSCRIPTION_STATE_IN_GRACE_PERIOD"];
-    if (!activeStates.includes(state)) {
-      return { ok: false, status: 402, message: `Subscription is not active (${state || "unknown"})` };
-    }
-
     const line = (data?.lineItems || []).find((item: any) => item?.productId === PLAY_PRODUCT_ID);
     if (!line) {
       return { ok: false, status: 400, message: "Purchase token does not belong to the premium product" };
     }
-
     const expiryMs = Date.parse(line.expiryTime || "");
-    if (!Number.isFinite(expiryMs) || expiryMs <= Date.now()) {
-      return { ok: false, status: 402, message: "Subscription has already expired" };
-    }
-    return { ok: true, expiryDate: new Date(expiryMs).toISOString() };
+    return {
+      ok: true,
+      state: String(data?.subscriptionState || ""),
+      expiry: Number.isFinite(expiryMs) ? new Date(expiryMs).toISOString() : null,
+      acknowledged: data?.acknowledgementState === "ACKNOWLEDGEMENT_STATE_ACKNOWLEDGED",
+      linkedPurchaseToken: data?.linkedPurchaseToken || null,
+    };
   } catch (error: any) {
-    console.error("[Play verification]", error);
-    return { ok: false, status: 502, message: error?.message || "Google Play verification error" };
+    console.error("[Play verification]", error?.message || error);
+    return { ok: false, status: 502, message: "Google Play verification error" };
   }
+}
+
+/** Google refunds purchases that stay unacknowledged for 3 days, so the server acknowledges once access is granted. */
+async function acknowledgePlaySubscription(purchaseToken: string) {
+  const accessToken = await playAccessToken();
+  if (typeof accessToken !== "string") return;
+  const url = `https://androidpublisher.googleapis.com/androidpublisher/v3/applications/${encodeURIComponent(PLAY_PACKAGE_NAME)}/purchases/subscriptions/${encodeURIComponent(PLAY_PRODUCT_ID)}/tokens/${encodeURIComponent(purchaseToken)}:acknowledge`;
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+    body: "{}",
+  });
+  if (!response.ok && response.status !== 400) {
+    console.warn(`[Play acknowledge] failed (${response.status})`);
+  }
+}
+
+type ServiceClient = NonNullable<ReturnType<typeof getSupabaseServiceClient>>;
+
+/**
+ * Re-reads every Play token the account owns from Google and writes the resulting paid window.
+ * Covers first purchase, renewals, cancellation, grace, refunds and revocations.
+ */
+async function syncPlayEntitlement(service: ServiceClient, userId: string) {
+  const { data: rows, error } = await service
+    .from("play_purchases")
+    .select("purchase_token")
+    .eq("user_id", userId);
+  if (error) throw new Error(`play_purchases table is not available: ${error.message}`);
+  if (!rows?.length) return null;
+
+  const tokens: PlayTokenState[] = [];
+  for (const row of rows) {
+    const result = await fetchPlaySubscription(row.purchase_token);
+    if (result.ok === false) {
+      if (result.status === 400) {
+        tokens.push({ state: "SUBSCRIPTION_STATE_EXPIRED", expiry: null });
+        continue;
+      }
+      // Google is unreachable: change nothing rather than revoke or grant on partial data.
+      throw Object.assign(new Error(result.message), { status: result.status });
+    }
+    tokens.push({ state: result.state, expiry: result.expiry });
+    await service.from("play_purchases").update({
+      state: result.state,
+      expiry_time: result.expiry,
+      linked_purchase_token: result.linkedPurchaseToken,
+      updated_at: new Date().toISOString(),
+    }).eq("purchase_token", row.purchase_token);
+    if (!result.acknowledged && isEntitled({ state: result.state, expiry: result.expiry })) {
+      await acknowledgePlaySubscription(row.purchase_token).catch(() => {});
+    }
+  }
+
+  const { data: current, error: currentError } = await service
+    .from("user_subscriptions")
+    .select("subscription_status, expiry_date")
+    .eq("user_id", userId)
+    .maybeSingle();
+  if (currentError) throw new Error(currentError.message);
+
+  const change = reconcilePlaySubscription(
+    current ? { status: current.subscription_status, expiry: current.expiry_date } : null,
+    tokens,
+  );
+  if (change) {
+    const { error: writeError } = await service.from("user_subscriptions").upsert({
+      user_id: userId,
+      subscription_status: change.status,
+      expiry_date: change.expiry,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: "user_id" });
+    if (writeError) throw new Error(writeError.message);
+    await service.from("profiles").update({
+      is_premium: change.status === "active",
+      subscription_status: change.status,
+      updated_at: new Date().toISOString(),
+    }).eq("id", userId);
+  }
+  return change;
 }
 
 async function getRequestUser(req: { headers: { authorization?: string } }) {
@@ -149,10 +229,61 @@ async function getRequestUser(req: { headers: { authorization?: string } }) {
   return data.user;
 }
 
+const USER_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function presentSubscriber(authUser: any, profile: any, sub: any) {
+  const status = sub?.subscription_status || "trial";
+  const trialStart = sub?.trial_start_date || authUser?.created_at || null;
+  const expiry = sub?.expiry_date || null;
+  const access = subscriptionWindow({ status, trialStart, expiry });
+  return {
+    id: authUser?.id || profile?.id,
+    email: authUser?.email || "",
+    displayName: profile?.user_name || authUser?.user_metadata?.full_name || "",
+    businessName: profile?.business_name || authUser?.user_metadata?.business_name || "",
+    role: isVerifiedAdmin(authUser) ? "super_admin" : "user",
+    status: access.kind === "paid" ? "active" : access.kind === "trial" ? "trial" : "expired",
+    trialStart,
+    expiry,
+    endsAt: access.endsAt ? new Date(access.endsAt).toISOString() : null,
+    daysRemaining: access.daysRemaining,
+  };
+}
+
+async function listAuthUsers(service: ReturnType<typeof getSupabaseServiceClient>) {
+  const users: any[] = [];
+  for (let page = 1; page <= 20; page += 1) {
+    const { data, error } = await service!.auth.admin.listUsers({ page, perPage: 200 });
+    if (error) throw error;
+    const batch = data?.users || [];
+    users.push(...batch);
+    if (batch.length < 200) break;
+  }
+  return users;
+}
+
 async function startServer() {
   const app = express();
   const PORT = process.env.PORT || 3000;
   if (isProduction) app.set("trust proxy", 1); // real client IP behind a reverse proxy
+
+  app.disable("x-powered-by");
+  app.use(helmet({
+    // A full script/connect allowlist needs device testing of Google sign-in, Drive and Play first.
+    contentSecurityPolicy: {
+      useDefaults: false,
+      directives: {
+        "frame-ancestors": ["'none'"],
+        "object-src": ["'none'"],
+        "base-uri": ["'self'"],
+      },
+    },
+    crossOriginEmbedderPolicy: false,
+    // Google sign-in popups need to talk back to this window.
+    crossOriginOpenerPolicy: { policy: "same-origin-allow-popups" },
+    hsts: isProduction ? { maxAge: 15552000, includeSubDomains: true } : false,
+  }));
+  app.use(compression());
 
   // Add robust but clean request logging (API and primary navigation only)
   app.use((req, res, next) => {
@@ -162,7 +293,7 @@ async function startServer() {
     const hasExtension = path.extname(url.split('?')[0]) !== '';
 
     if (isApi || (isHtml && !hasExtension && !url.includes('__vite') && !url.includes('hot'))) {
-      console.log(`[Express Server] Incoming request: ${req.method} ${url}`);
+      console.log(`[Express Server] Incoming request: ${req.method} ${url.split("?")[0]}`);
     }
     next();
   });
@@ -213,33 +344,6 @@ async function startServer() {
     res.json({ status: "ok" });
   });
 
-  app.post("/api/firebase-session", async (req, res) => {
-    try {
-      if (!rateLimit(`session:${req.ip}`, 30, 60_000)) {
-        return res.status(429).json({ message: "Too many requests" });
-      }
-      const user = await getRequestUser(req);
-      if (!user) {
-        return res.status(401).json({ message: "Invalid or missing Supabase session" });
-      }
-
-      if (!ensureFirebaseAdmin()) {
-        return res.status(503).json({
-          message: "FIREBASE_SERVICE_ACCOUNT_JSON is not configured on the server",
-        });
-      }
-
-      const token = await getAuth().createCustomToken(user.id, {
-        email: user.email || "",
-        provider: "supabase",
-      });
-      return res.json({ token });
-    } catch (error: any) {
-      console.error("[Firebase session]", error);
-      return res.status(500).json({ message: error?.message || "Failed to mint Firebase session" });
-    }
-  });
-
   app.post("/api/subscription/activate", async (req, res) => {
     try {
       if (!rateLimit(`activate:${req.ip}`, 10, 60_000)) {
@@ -272,9 +376,12 @@ async function startServer() {
       }
 
       // 1. Verify the purchase with Google Play (fails closed)
-      const verification = await verifyPlaySubscription(purchaseToken);
+      const verification = await fetchPlaySubscription(purchaseToken);
       if (verification.ok === false) {
         return res.status(verification.status).json({ message: verification.message });
+      }
+      if (!isEntitled({ state: verification.state, expiry: verification.expiry })) {
+        return res.status(402).json({ message: `Subscription is not active (${verification.state || "unknown"})` });
       }
 
       // 2. A purchase token can only ever belong to ONE account (blocks sharing/replaying a valid token)
@@ -284,7 +391,8 @@ async function startServer() {
         .eq("purchase_token", purchaseToken)
         .maybeSingle();
       if (lookupError) {
-        return res.status(503).json({ message: `play_purchases table is not available: ${lookupError.message}` });
+        console.error("[Subscription activate] play_purchases lookup failed", lookupError.message);
+        return res.status(503).json({ message: "Purchase records are not available on the server" });
       }
       if (existingPurchase && existingPurchase.user_id !== user.id) {
         return res.status(409).json({ message: "This purchase is already linked to another account" });
@@ -296,34 +404,274 @@ async function startServer() {
           product_id: productId,
         });
         if (insertError) {
-          return res.status(500).json({ message: insertError.message });
+          console.error("[Subscription activate] link failed", insertError.message);
+          return res.status(500).json({ message: "Could not link the purchase to this account" });
         }
       }
 
-      const expiryDate = verification.expiryDate;
-      const { error: subError } = await service.from("user_subscriptions").upsert({
-        user_id: user.id,
-        subscription_status: "active",
-        expiry_date: expiryDate,
-        updated_at: new Date().toISOString(),
-      }, { onConflict: "user_id" });
+      // 3. Grant from Google's state across all of this account's tokens, then acknowledge.
+      await syncPlayEntitlement(service, user.id);
+      const { data: sub } = await service
+        .from("user_subscriptions")
+        .select("subscription_status, expiry_date")
+        .eq("user_id", user.id)
+        .maybeSingle();
+      return res.json({ ok: true, status: sub?.subscription_status, expiry_date: sub?.expiry_date });
+    } catch (error: any) {
+      console.error("[Subscription activate]", error?.message || error);
+      return res.status(error?.status || 500).json({ message: "Activation failed" });
+    }
+  });
 
-      if (subError) {
-        return res.status(500).json({ message: subError.message });
+  // Re-checks the account's Play purchases (renewals, refunds). Safe to call on every app start.
+  app.post("/api/subscription/sync", async (req, res) => {
+    try {
+      const user = await getRequestUser(req);
+      if (!user) return res.status(401).json({ message: "Invalid or missing Supabase session" });
+      if (!rateLimit(`sync:${user.id}`, 6, 60_000)) {
+        return res.status(429).json({ message: "Too many requests" });
+      }
+      const service = getSupabaseServiceClient();
+      if (!service) return res.status(503).json({ message: "SUPABASE_SERVICE_ROLE_KEY is not configured" });
+      const change = await syncPlayEntitlement(service, user.id);
+      return res.json({ ok: true, changed: !!change });
+    } catch (error: any) {
+      console.error("[Subscription sync]", error?.message || error);
+      return res.status(error?.status || 500).json({ message: "Subscription sync failed" });
+    }
+  });
+
+  // Google Play Real-time Developer Notifications (Pub/Sub push with an OIDC token).
+  app.post("/api/play/rtdn", async (req, res) => {
+    const audience = process.env.PLAY_RTDN_AUDIENCE;
+    if (!audience) return res.status(503).json({ message: "PLAY_RTDN_AUDIENCE is not configured" });
+    try {
+      const header = req.headers.authorization || "";
+      const idToken = header.startsWith("Bearer ") ? header.slice(7) : "";
+      if (!idToken) return res.sendStatus(401);
+      const ticket = await new OAuth2Client().verifyIdToken({ idToken, audience });
+      const claims = ticket.getPayload();
+      const expectedSender = process.env.PLAY_RTDN_SERVICE_ACCOUNT;
+      if (!claims?.email_verified || (expectedSender && claims.email !== expectedSender)) {
+        return res.sendStatus(403);
+      }
+    } catch {
+      return res.sendStatus(401);
+    }
+
+    try {
+      const raw = Buffer.from(String(req.body?.message?.data || ""), "base64").toString("utf8");
+      const notification = raw ? JSON.parse(raw) : null;
+      if (notification?.packageName && notification.packageName !== PLAY_PACKAGE_NAME) return res.sendStatus(204);
+      const purchaseToken = String(
+        notification?.subscriptionNotification?.purchaseToken
+          || notification?.voidedPurchaseNotification?.purchaseToken
+          || "",
+      );
+      if (!purchaseToken) return res.sendStatus(204);
+
+      const service = getSupabaseServiceClient();
+      if (!service) return res.sendStatus(503);
+      const { data: owner } = await service
+        .from("play_purchases")
+        .select("user_id")
+        .eq("purchase_token", purchaseToken)
+        .maybeSingle();
+      let userId = owner?.user_id as string | undefined;
+      if (!userId) {
+        // A re-subscription carries a new token linked to one we already know.
+        const fetched = await fetchPlaySubscription(purchaseToken);
+        if (fetched.ok && fetched.linkedPurchaseToken) {
+          const { data: linked } = await service
+            .from("play_purchases")
+            .select("user_id")
+            .eq("purchase_token", fetched.linkedPurchaseToken)
+            .maybeSingle();
+          if (linked?.user_id) {
+            userId = linked.user_id;
+            await service.from("play_purchases").upsert({
+              purchase_token: purchaseToken,
+              user_id: userId,
+              product_id: PLAY_PRODUCT_ID,
+            }, { onConflict: "purchase_token", ignoreDuplicates: true });
+          }
+        }
+      }
+      // Unknown token: the app links it on activation, so there is nothing to update yet.
+      if (!userId) return res.sendStatus(204);
+      await syncPlayEntitlement(service, userId);
+      return res.sendStatus(204);
+    } catch (error: any) {
+      console.error("[Play RTDN]", error?.message || error);
+      // A 5xx makes Pub/Sub redeliver the notification.
+      return res.sendStatus(500);
+    }
+  });
+
+  async function requireOwner(req: any, res: any) {
+    const user = await getRequestUser(req);
+    if (!user) {
+      res.status(401).json({ message: "يجب تسجيل الدخول" });
+      return null;
+    }
+    if (!isVerifiedAdmin(user)) {
+      res.status(403).json({ message: "هذه اللوحة لصاحب النظام فقط" });
+      return null;
+    }
+    const service = getSupabaseServiceClient();
+    if (!service) {
+      res.status(503).json({ message: "مفتاح الخدمة غير مضبوط على الخادم، ولن يُمنح اشتراك من المتصفح" });
+      return null;
+    }
+    if (!rateLimit(`admin:${user.id}`, 40, 60_000)) {
+      res.status(429).json({ message: "محاولات كثيرة، انتظر دقيقة" });
+      return null;
+    }
+    return { user, service };
+  }
+
+  app.get("/api/admin/subscribers", async (req, res) => {
+    const owner = await requireOwner(req, res);
+    if (!owner) return;
+    try {
+      const [authUsers, profilesResult, subsResult] = await Promise.all([
+        listAuthUsers(owner.service),
+        owner.service.from("profiles").select("id, user_name, business_name, role"),
+        owner.service.from("user_subscriptions").select("user_id, subscription_status, trial_start_date, expiry_date"),
+      ]);
+      if (profilesResult.error) throw profilesResult.error;
+      if (subsResult.error) throw subsResult.error;
+      const profiles = profilesResult.data || [];
+      const subs = subsResult.data || [];
+      const seen = new Set<string>();
+      const subscribers = authUsers.map((authUser) => {
+        seen.add(authUser.id);
+        const profile = profiles.find((row) => row.id === authUser.id);
+        const sub = subs.find((row) => row.user_id === authUser.id);
+        return presentSubscriber(authUser, profile, sub);
+      });
+      for (const profile of profiles) {
+        if (seen.has(profile.id)) continue;
+        const sub = subs.find((row) => row.user_id === profile.id);
+        subscribers.push(presentSubscriber(null, profile, sub));
+      }
+      subscribers.sort((a, b) => {
+        if (a.endsAt === b.endsAt) return a.email.localeCompare(b.email);
+        if (!a.endsAt) return 1;
+        if (!b.endsAt) return -1;
+        return a.endsAt < b.endsAt ? -1 : 1;
+      });
+      return res.json({ subscribers });
+    } catch (error: any) {
+      console.error("[Admin subscribers]", error);
+      return res.status(500).json({ message: "تعذر قراءة المشتركين" });
+    }
+  });
+
+  app.post("/api/admin/subscription", async (req, res) => {
+    const owner = await requireOwner(req, res);
+    if (!owner) return;
+    const userId = String(req.body?.userId || "");
+    const op = String(req.body?.op || "");
+    if (!USER_ID_PATTERN.test(userId)) {
+      return res.status(400).json({ message: "معرّف الحساب غير صالح" });
+    }
+    if (!["extend", "expire", "mark_paid", "set_trial", "set_expiry"].includes(op)) {
+      return res.status(400).json({ message: "الأمر غير معروف" });
+    }
+    const days = req.body?.days === undefined || req.body?.days === null ? null : Number(req.body.days);
+    if (days !== null && (!Number.isInteger(days) || days < 1 || days > MAX_SUBSCRIPTION_GRANT_DAYS)) {
+      return res.status(400).json({ message: "عدد الأيام يجب أن يكون بين 1 و 730" });
+    }
+    if (op === "extend" && days === null) {
+      return res.status(400).json({ message: "حدد عدد أيام التمديد" });
+    }
+
+    try {
+      const authLookup = await owner.service.auth.admin.getUserById(userId);
+      if (authLookup.error || !authLookup.data.user) {
+        return res.status(404).json({ message: "الحساب غير موجود" });
+      }
+      const authUser = authLookup.data.user;
+      const { data: existing, error: readError } = await owner.service
+        .from("user_subscriptions")
+        .select("subscription_status, trial_start_date, expiry_date")
+        .eq("user_id", userId)
+        .maybeSingle();
+      if (readError) throw readError;
+
+      const current = subscriptionWindow({
+        status: existing?.subscription_status || "trial",
+        trialStart: existing?.trial_start_date || authUser.created_at,
+        expiry: existing?.expiry_date,
+      });
+      const now = Date.now();
+      let status: "trial" | "active" | "expired" = existing?.subscription_status === "active"
+        ? "active"
+        : existing?.subscription_status === "expired"
+          ? "expired"
+          : "trial";
+      let endsAt = current.endsAt && current.endsAt > now ? current.endsAt : now;
+
+      if (op === "extend") {
+        endsAt += days! * SUBSCRIPTION_DAY_MS;
+        if (status === "expired") status = "trial";
+      } else if (op === "mark_paid") {
+        status = "active";
+        if (days) endsAt += days * SUBSCRIPTION_DAY_MS;
+        if (endsAt <= now) endsAt = now + 30 * SUBSCRIPTION_DAY_MS;
+      } else if (op === "set_trial") {
+        status = "trial";
+        endsAt = now + TRIAL_DAYS * SUBSCRIPTION_DAY_MS;
+      } else if (op === "expire") {
+        status = "expired";
+        endsAt = now;
+      } else {
+        const expiryDate = Date.parse(`${req.body?.expiry}T23:59:59.000Z`);
+        if (!Number.isFinite(expiryDate)) {
+          return res.status(400).json({ message: "تاريخ الانتهاء غير صالح" });
+        }
+        if (expiryDate <= now || expiryDate > now + MAX_SUBSCRIPTION_GRANT_DAYS * SUBSCRIPTION_DAY_MS) {
+          return res.status(400).json({ message: "التاريخ يجب أن يكون خلال 730 يوماً" });
+        }
+        endsAt = expiryDate;
+        if (status === "expired") status = "trial";
       }
 
-      await service.from("profiles").update({
-        is_premium: true,
-        user_role: "premium",
-        role: "premium",
-        subscription_status: "active",
+      const trialStart = status === "trial"
+        ? trialStartForEnd(endsAt)
+        : (existing?.trial_start_date || authUser.created_at || new Date(now).toISOString());
+      const expiry = new Date(endsAt).toISOString();
+      const { error: writeError } = await owner.service.from("user_subscriptions").upsert({
+        user_id: userId,
+        subscription_status: status,
+        trial_start_date: trialStart,
+        expiry_date: expiry,
         updated_at: new Date().toISOString(),
-      }).eq("id", user.id);
+      }, { onConflict: "user_id" });
+      if (writeError) throw writeError;
 
-      return res.json({ ok: true, expiry_date: expiryDate });
+      await owner.service.from("profiles").update({
+        is_premium: status === "active",
+        subscription_status: status,
+        updated_at: new Date().toISOString(),
+      }).eq("id", userId);
+
+      const { data: profile } = await owner.service
+        .from("profiles")
+        .select("id, user_name, business_name, role")
+        .eq("id", userId)
+        .maybeSingle();
+      return res.json({
+        subscriber: presentSubscriber(authUser, profile, {
+          subscription_status: status,
+          trial_start_date: trialStart,
+          expiry_date: expiry,
+        }),
+      });
     } catch (error: any) {
-      console.error("[Subscription activate]", error);
-      return res.status(500).json({ message: error?.message || "Activation failed" });
+      console.error("[Admin subscription]", error);
+      return res.status(500).json({ message: "تعذر تعديل الاشتراك" });
     }
   });
 
@@ -332,7 +680,7 @@ async function startServer() {
   // This guarantees that the Single Page Application's assets load correctly,
   // and enables the client-side Supabase SDK to parse both query string and hash parameters flawlessly.
   app.get(["/auth/callback", "/auth/callback/"], async (req, res, next) => {
-    console.log(`[Express Server] /auth/callback triggered client-side fallback query:`, req.query);
+    console.log(`[Express Server] /auth/callback fallback (query keys: ${Object.keys(req.query || {}).join(",") || "none"})`);
     
     if (!isProduction) {
       // In development mode, hand off to the Vite fallback handler to serve index.html with transformations
@@ -358,12 +706,15 @@ async function startServer() {
   app.get("/api/exchange-rate/:base", async (req, res) => {
     const { base } = req.params;
     const baseUpper = (base || "USD").toUpperCase();
+    if (!/^[A-Z]{3}$/.test(baseUpper)) {
+      return res.status(400).json({ message: "Invalid currency code" });
+    }
     
     // Built-in offline fallback dictionary
     const fallbackRates: Record<string, Record<string, number>> = {
-      USD: { USD: 1, JOD: 0.709, ILS: 3.70, EGP: 47.50, EUR: 0.92, SAR: 3.75, AED: 3.67 },
-      JOD: { JOD: 1, USD: 1.41, ILS: 5.22, EGP: 67.00, EUR: 1.30, SAR: 5.29, AED: 5.18 },
-      ILS: { ILS: 1, USD: 0.27, JOD: 0.1916, EGP: 12.83, EUR: 0.25, SAR: 1.01, AED: 0.99 }
+      USD: { USD: 1, JOD: 0.709, ILS: 3.70, EGP: 47.50, EUR: 0.92, SAR: 3.75, AED: 3.67, IQD: 1310, LYD: 4.8 },
+      JOD: { JOD: 1, USD: 1.41, ILS: 5.22, EGP: 67.00, EUR: 1.30, SAR: 5.29, AED: 5.18, IQD: 1850, LYD: 6.77 },
+      ILS: { ILS: 1, USD: 0.27, JOD: 0.1916, EGP: 12.83, EUR: 0.25, SAR: 1.01, AED: 0.99, IQD: 354, LYD: 1.30 }
     };
 
     try {
@@ -391,7 +742,7 @@ async function startServer() {
     const initialized = !!process.env.GEMINI_API_KEY;
     res.json({
       status: initialized ? "configured" : "missing_key",
-      model: "gemini-3.5-flash",
+      model: GEMINI_MODEL,
       features: {
         chat: initialized,
         analysis: initialized
@@ -399,275 +750,123 @@ async function startServer() {
     });
   });
 
-  app.post("/api/chat", async (req, res, next) => {
-    // The real Gemini key is paid: only signed-in users may use it, with a rate limit.
-    // (The offline fallback below costs nothing, so guests can still use it.)
-    if (getAI()) {
-      const authUser = await getRequestUser(req);
-      if (!authUser) {
-        return res.status(401).json({ message: "Sign in to use the AI assistant" });
-      }
-      if (!rateLimit(`chat:${authUser.id}`, 30, 60_000)) {
-        return res.status(429).json({ message: "Too many requests, please slow down" });
-      }
-    } else if (!rateLimit(`chat:${req.ip}`, 60, 60_000)) {
-      return res.status(429).json({ message: "Too many requests, please slow down" });
+  /** Null when the user may use the paid assistant, otherwise the refusal to send. Fails closed. */
+  async function checkAssistantAccess(user: any): Promise<{ status: number; code: string; message: string } | null> {
+    if (isVerifiedAdmin(user)) return null;
+    const service = getSupabaseServiceClient();
+    if (!service) {
+      return { status: 503, code: "subscription_check_unavailable", message: "Subscription check is not configured on the server" };
     }
-    const { message, history, context, verbosity, currency } = req.body;
-    const currencyLabel = currency === 'JOD' ? 'الدينار الأردني (JOD)' : currency === 'USD' ? 'الدولار الأمريكي ($)' : 'الشيكل الإسرائيلي (₪)';
-    const verbosityInstruction = verbosity === 'concise' 
-      ? "يجب أن تكون إجاباتك قصيرة جداً ومباشرة. استخدم النقاط (bullet points) فقط. يمنع تماماً استخدام أي مقدمات أو خاتمة. قدم المعلومة فوراً وبأقل قدر ممكن من الكلمات والرموز المكررة."
-      : "قدم شرحاً مهنياً دقيقاً وهادفاً لكل نقطة مع توضيح الأسباب والتحليل المالي المباشر بشكل مميز وسهل الفهم.";
+    const { data, error } = await service
+      .from("user_subscriptions")
+      .select("subscription_status, trial_start_date, expiry_date")
+      .eq("user_id", user.id)
+      .maybeSingle();
+    if (error) {
+      return { status: 503, code: "subscription_check_unavailable", message: "Could not read the subscription" };
+    }
+    const access = subscriptionWindow({
+      status: data?.subscription_status || "trial",
+      trialStart: data?.trial_start_date || user.created_at,
+      expiry: data?.expiry_date,
+    });
+    if (access.kind === "expired") {
+      return { status: 402, code: "subscription_required", message: "An active subscription is required" };
+    }
+    return null;
+  }
 
+  app.post("/api/chat", async (req, res) => {
     const genAI = getAI();
     if (!genAI) {
-      // Simulate/fallback offline smart handler when API key is missing, without raising console warnings or throwing errors
-      const lowercaseMsg = (message || "").toLowerCase();
-      let fallbackText = "";
-      let fallbackAction: any = undefined;
-
-      if (lowercaseMsg.includes("أضف صنف") || lowercaseMsg.includes("اضف صنف") || lowercaseMsg.includes("أضف منتج") || lowercaseMsg.includes("اضف منتج") || lowercaseMsg.includes("add product") || lowercaseMsg.includes("create product")) {
-        const prNameMatch = (message || "").match(/(?:منتج|صنف|باسم|اسم|بإسم)\s+([^\s،,]+)/) || (message || "").match(/(?:add|create)\s+([a-zA-Z0-9\s]+)/i);
-        const prName = prNameMatch ? prNameMatch[1] : "صنف مسحوق";
-        fallbackText = `**تم معالجة الطلب بنجاح! تم رصد رغبتك في إضافة صنف جديد باسم: "${prName}"**\n\n• **المحاكاة الذكية الذاتية:** تم صياغة هيكلية المنتج وإدراج الرمز الشريطي والبيانات الافتراضية المناسبة محلياً!\n\n• **تنويه مالك النظام:** للاستفادة الكاملة من محرك التحليلات الفوري للأصناف والتقارير عبر الذكاء الاصطناعي، يرجى ملء مفتاح \`GEMINI_API_KEY\` صالح من خلال الإعدادات (Settings > Secrets). تفعيل المفتاح يربطك بالخادم الحقيقي مباشرة.`;
-        fallbackAction = {
-          type: "add_product",
-          product: {
-            name: prName,
-            sku: "AUTO-" + Math.floor(1000 + Math.random() * 9000),
-            category: "افتراضي",
-            brand: "عالمي",
-            quantity: 15,
-            unitCost: 10,
-            sellingPrice: 18,
-            lowStockThreshold: 3
-          }
-        };
-      } else if (lowercaseMsg.includes("حذف صنف") || lowercaseMsg.includes("حذف منتج") || lowercaseMsg.includes("delete product") || lowercaseMsg.includes("remove product")) {
-        fallbackText = `**تم تلقي مؤشر الرغبة في حذف صنف:**\n\n• **توصية لوجستية:** حماية لسلامة المستندات المالية والقيود المحاسبية التراكمية، يُنصح دائماً بالقيام بعمليات الحذف يدوياً عبر قائمة المنتجات المتاحة للتأكيد التام والتفحيص.`;
-      } else if (lowercaseMsg.includes("فاتورة") || lowercaseMsg.includes("invoice") || lowercaseMsg.includes("تقرير مبيعات")) {
-        fallbackText = `**توجيه نظام الفواتير الذكي:**\n\n• المساعد في وضع المحاكاة المحمية حالياً.\n\n• يمكنك إنشاء التقارير المالية والفواتير التفصيلية لكافة المبيعات والمشتريات بمرونة تامة عبر الضغط مباشرة على خيار (Invoice System) المتواجد بالقائمة الجانبية بنظام معالجة فائق السرعة.`;
-      } else {
-        const totalProducts = context?.products?.length || 0;
-        const lowStockCount = context?.products?.filter((p: any) => p.quantity <= (p.lowStockThreshold || 3))?.length || 0;
-        
-        fallbackText = `**مرحباً بك في مستودعي الذكي!** 🤖✨\n\n• **حالة المستودع الحالية:** يحتوي نظامك المحاسبي واللوجستي على **${totalProducts}** منتج مقيد.\n\n• **رصد النقص:** يوجد **${lowStockCount}** منتج برصيد حرج منخفض يرجى إعادة طلبها لتجنب نفاد المخزون.\n\n• **ملاحظة فنية هامة:** مفتاح بوابة الذكاء الاصطناعي السحابية \`GEMINI_API_KEY\` مفقود أو غير فعال. كمالك للمستودع يمكنك تزويده في أي وقت عبر تبويب (Settings > Secrets) لتنشيط نماذج المحادثات الحقيقية المتقدمة وتحليل الفواتير فورياً.`;
-      }
-
-      return res.json({
-        text: fallbackText,
-        action: fallbackAction,
-        isSimulated: true
-      });
+      return res.status(503).json({ code: "ai_not_configured", message: "The AI assistant is not configured on this server" });
+    }
+    const authUser = await getRequestUser(req);
+    if (!authUser) {
+      return res.status(401).json({ code: "sign_in_required", message: "Sign in to use the AI assistant" });
+    }
+    if (!rateLimit(`chat:${authUser.id}`, 20, 60_000)) {
+      return res.status(429).json({ code: "rate_limited", message: "Too many requests, please wait a minute" });
+    }
+    const refusal = await checkAssistantAccess(authUser);
+    if (refusal) {
+      return res.status(refusal.status).json({ code: refusal.code, message: refusal.message });
     }
 
+    const message = typeof req.body?.message === "string" ? req.body.message.trim() : "";
+    if (!message || message.length > ASSISTANT_LIMITS.messageChars) {
+      return res.status(400).json({ code: "invalid_message", message: "Message is empty or too long" });
+    }
+    const context = sanitizeContext(req.body?.context);
+    const verbosity = req.body?.verbosity === "concise" ? "concise" : "detailed";
+    const language = req.body?.language === "en" ? "en" : "ar";
+    const turns = sanitizeHistory(req.body?.history, message);
+
     try {
-
-      // Support multi-turn chat contents from history
-      let contentsList: any[] = [];
-      if (Array.isArray(history) && history.length > 0) {
-        // Exclude initial assistant welcome message to prevent polluting context
-        const filteredHistory = history.filter((h: any, idx: number) => {
-          if (idx === 0 && h.role === "assistant") return false;
-          return !!h.content;
-        });
-
-        contentsList = filteredHistory.map((h: any) => {
-          return {
-            role: h.role === "assistant" ? "model" : "user",
-            parts: [{ text: h.content }]
-          };
-        });
-
-        // Ensure the latest user message is appended if not already the last turn
-        const lastTurn = filteredHistory[filteredHistory.length - 1];
-        if (message && (!lastTurn || lastTurn.content !== message || lastTurn.role !== 'user')) {
-          contentsList.push({
-            role: "user",
-            parts: [{ text: message }]
-          });
-        }
-      } else {
-        contentsList = [{ role: "user", parts: [{ text: message || "مرحبا" }] }];
-      }
-
-      console.log(`[Express Server] Calling Gemini API (gemini-3.5-flash) with ${contentsList.length} chat turns.`);
-
       const response = await genAI.models.generateContent({
-        model: "gemini-3.5-flash",
-        contents: contentsList,
+        model: GEMINI_MODEL,
+        contents: turns.map((t) => ({ role: t.role === "assistant" ? "model" : "user", parts: [{ text: t.content }] })),
         config: {
+          systemInstruction: buildSystemInstruction({ context, verbosity, language }),
           responseMimeType: "application/json",
           responseSchema: {
             type: Type.OBJECT,
             properties: {
-              text: {
-                type: Type.STRING,
-                description: "Conversational textual reply in Arabic (or matching language) following the strict rules of spacing and formatting."
-              },
+              text: { type: Type.STRING, description: "The reply shown to the user." },
               action: {
                 type: Type.OBJECT,
-                description: "Optional action if the user wants to add/update/delete records",
+                description: "Only when the user explicitly asked to add a product, delete a product, or add a customer.",
                 properties: {
-                  type: {
-                    type: Type.STRING,
-                    description: "The action to execute: 'add_product', 'delete_product', 'add_invoice', 'add_customer'"
-                  },
+                  type: { type: Type.STRING, enum: ["add_product", "delete_product", "add_customer"] },
                   product: {
                     type: Type.OBJECT,
                     properties: {
                       name: { type: Type.STRING },
                       sku: { type: Type.STRING },
-                      category: { type: Type.STRING },
-                      brand: { type: Type.STRING },
                       quantity: { type: Type.NUMBER },
                       unitCost: { type: Type.NUMBER },
                       sellingPrice: { type: Type.NUMBER },
-                      lowStockThreshold: { type: Type.NUMBER }
                     },
-                    required: ["name"]
                   },
-                  productId: {
-                    type: Type.STRING
-                  },
-                  invoice: {
-                    type: Type.OBJECT,
-                    properties: {
-                      invoiceNumber: { type: Type.STRING },
-                      subtotal: { type: Type.NUMBER },
-                      taxAmount: { type: Type.NUMBER },
-                      totalAmount: { type: Type.NUMBER },
-                      type: { type: Type.STRING, description: "either 'sale' or 'purchase'" },
-                      items: {
-                        type: Type.ARRAY,
-                        items: {
-                          type: Type.OBJECT,
-                          properties: {
-                            productId: { type: Type.STRING },
-                            description: { type: Type.STRING },
-                            quantity: { type: Type.NUMBER },
-                            unitPrice: { type: Type.NUMBER },
-                            total: { type: Type.NUMBER }
-                          },
-                          required: ["productId", "description", "quantity", "unitPrice", "total"]
-                        }
-                      }
-                    },
-                    required: ["invoiceNumber", "totalAmount", "type", "items"]
-                  },
+                  productId: { type: Type.STRING },
                   customer: {
                     type: Type.OBJECT,
                     properties: {
                       name: { type: Type.STRING },
                       phone: { type: Type.STRING },
-                      currency: { type: Type.STRING }
+                      currency: { type: Type.STRING },
                     },
-                    required: ["name"]
-                  }
+                  },
                 },
-                required: ["type"]
-              }
+                required: ["type"],
+              },
             },
-            required: ["text"]
+            required: ["text"],
           },
-          systemInstruction: `أنت 'مساعد مستودعي الذكي' (Mostawdaee Smart Assistant). مستشار خبير في التكنولوجيا المالية ومستودعات التجارة الدولية واللوجستيات وحساب التكلفة الواصلة (Landed Cost).
-
-          قواعد صارمة ومحددة للغاية للإجابات:
-          1. ممنوع تماماً المقدمات والترحيب الباهت والتمهيد أو الخاتمة والتوديع. ابدأ فوراً بصلب الجواب.
-          2. يجب تقديم إجابات ذكية وعملية وتكون قصيرة للغاية ومباشرة (Direct and Highly Concise).
-          3. صِغ الرد بنقاط قصيرة جداً (Short Bullet Points)، مع ترك سطر فارغ بين كل نقطة وأخرى (Double Line Breaks '\\n\\n') لتحقيق وضوح بصري فائق ومريح للعين.
-          4. احرص على استخدام الخط العريض للمصطلحات الجوهرية (مثال: **توصية:** أو **المخزون:**) ليسهل على العميل مسحها ببصرة واحدة.
-          5. لغة الرد مطابقة للغة المستخدم؛ إن سألك بالعربية أجب بالفصحى الدقيقة، وإن سألك بالإنجليزية فقابلها بها بالكامل مع الحفاظ التام على شروط القصر والتنسيق النقطي الفسيح ومحاسبة العملة.
-          6. إذا طلب منك المستخدم بشكل صريح إضافة صنف (منتج) جديد، أو حذف صنف، أو تسجيل فاتورة مبيعات/مشتريات جديدة أو إضافة عميل جديد، يجب عليك تضمين حقل الـ 'action' المناسب بالبيانات المستخرجة وتعيين 'type' ليكون أحد الأنواع التالية: 'add_product' أو 'delete_product' أو 'add_invoice' أو 'add_customer'.
-             - لعمل إضافة منتج ('add_product'): استخرج الاسم (name)، والرمز (sku)، والتكلفة (unitCost)، وسعر البيع (sellingPrice)، والكمية (quantity). إذا لم يذكر رمز الصنف ابتكره من اسم الصنف بالإنجليزية أو رمز عشوائي.
-             - لعمل حذف صنف ('delete_product'): ابحث عن الـ id الخاص بالصنف من المنتجات المتوفرة في السياق، وعيّنه في 'productId'.
-             - لعمل فاتورة ('add_invoice'): عيّن 'invoiceNumber' عشوائي أو رقم الفاتورة المذكور، وحدد 'type' ليكون 'sale' (مبيعات) أو 'purchase' (مشتريات)، وحدد تفاصيل الأصناف في قائمة 'items'. قم بحساب قيم 'subtotal' و'totalAmount'.
-             - لعمل إضافة عميل ('add_customer'): استخرج الاسم (name) ورقم الهاتف (phone) والعملة المفضلة (currency).
-          
-          الوضع والتعليمات التفصيلية:
-          \${verbosityInstruction}
-          
-          سياق المخزون الحالي الفعلي للمستخدم بالتفصيل:
-          \${JSON.stringify(context)}
-          
-          المستخدم يدير مستودعه في منطقة محاسبية تعتمد: \${currencyLabel}.`,
         },
       });
 
-      let responseText = "";
+      let parsed: any = null;
       try {
-        responseText = response.text || "";
-      } catch (err) {
-        console.warn("Could not retrieve '.text' from Gemini response directly:", err);
+        parsed = JSON.parse(response.text || "");
+      } catch {
+        parsed = null;
       }
-
-      if (!responseText && response.candidates && response.candidates.length > 0) {
-        const candidate = response.candidates[0];
-        if (candidate.content && candidate.content.parts) {
-          responseText = candidate.content.parts
-            .map((part: any) => part.text || "")
-            .join("");
-        }
+      const text = typeof parsed?.text === "string" ? parsed.text.trim() : "";
+      if (!text) {
+        return res.status(502).json({ code: "ai_empty", message: "The AI returned no usable answer" });
       }
-
-      const finalListText = responseText || "{}";
-      
-      let parsedData: any = { text: "عذراً، لم أتمكن من الحصول على رد مفيد." };
-      try {
-        parsedData = JSON.parse(finalListText);
-      } catch (err) {
-        console.warn("Could not parse result as JSON directly, creating fallback shape:", err);
-        parsedData = { text: finalListText };
-      }
-
-      res.json(parsedData);
+      return res.json({ text, action: sanitizeAssistantAction(parsed?.action, context), model: GEMINI_MODEL });
     } catch (error: any) {
-      console.warn("Gemini API Error in /api/chat route handler, initiating smart local fallback simulation:", error?.message || error);
-      
-      const lowercaseMsg = (message || "").toLowerCase();
-      let fallbackText = "";
-      let fallbackAction: any = undefined;
-
-      // Clean check if the user is explicitly requesting to add a product
-      if (lowercaseMsg.includes("أضف صنف") || lowercaseMsg.includes("اضف صنف") || lowercaseMsg.includes("أضف منتج") || lowercaseMsg.includes("اضف منتج") || lowercaseMsg.includes("add product") || lowercaseMsg.includes("create product")) {
-        const prNameMatch = (message || "").match(/(?:منتج|صنف|باسم|اسم|بإسم)\s+([^\s،,]+)/) || (message || "").match(/(?:add|create)\s+([a-zA-Z0-9\s]+)/i);
-        const prName = prNameMatch ? prNameMatch[1] : "صنف مسحوق";
-        fallbackText = `**تم معالجة الطلب بنجاح! تم رصد رغبتك في إضافة صنف جديد باسم: "${prName}"**\n\n• **المحاكاة الذكية الذاتية:** تم صياغة هيكلية المنتج وإدراج الرمز الشريطي والبيانات الافتراضية المناسبة محلياً!\n\n• **تنويه مالك النظام:** للاستفادة الكاملة من محرك التحليلات الفوري للأصناف والتقارير عبر الذكاء الاصطناعي، يرجى ملء مفتاح \`GEMINI_API_KEY\` صالح من خلال الإعدادات (Settings > Secrets). تفعيل المفتاح يربطك بالخادم الحقيقي مباشرة.`;
-        fallbackAction = {
-          type: "add_product",
-          product: {
-            name: prName,
-            sku: "AUTO-" + Math.floor(1000 + Math.random() * 9000),
-            category: "افتراضي",
-            brand: "عالمي",
-            quantity: 15,
-            unitCost: 10,
-            sellingPrice: 18,
-            lowStockThreshold: 3
-          }
-        };
-      } else if (lowercaseMsg.includes("حذف صنف") || lowercaseMsg.includes("حذف منتج") || lowercaseMsg.includes("delete product") || lowercaseMsg.includes("remove product")) {
-        fallbackText = `**تم تلقي مؤشر الرغبة في حذف صنف:**\n\n• **توصية لوجستية:** حماية لسلامة المستندات المالية والقيود المحاسبية التراكمية، يُنصح دائماً بالقيام بعمليات الحذف يدوياً عبر قائمة المنتجات المتاحة للتأكيد التام والتفحيص.`;
-      } else if (lowercaseMsg.includes("فاتورة") || lowercaseMsg.includes("invoice") || lowercaseMsg.includes("تقرير مبيعات")) {
-        fallbackText = `**توجيه نظام الفواتير الذكي:**\n\n• المساعد في وضع المحاكاة المحمية حالياً.\n\n• يمكنك إنشاء التقارير المالية والفواتير التفصيلية لكافة المبيعات والمشتريات بمرونة تامة عبر الضغط مباشرة على خيار (Invoice System) المتواجد بالقائمة الجانبية بنظام معالجة فائق السرعة.`;
-      } else {
-        const totalProducts = context?.products?.length || 0;
-        const lowStockCount = context?.products?.filter((p: any) => p.quantity <= (p.lowStockThreshold || 3))?.length || 0;
-        
-        fallbackText = `**مرحباً بك في مستودعي الذكي!** 🤖✨\n\n• **حالة المستودع الحالية:** يحتوي نظامك المحاسبي واللوجستي على **${totalProducts}** منتج مقيد.\n\n• **رصد النقص:** يوجد **${lowStockCount}** منتج برصيد حرج منخفض يرجى إعادة طلبها لتجنب نفاد المخزون.\n\n• **ملاحظة فنية هامة:** مفتاح بوابة الذكاء الاصطناعي السحابية \`GEMINI_API_KEY\` مفقود أو غير فعال. كمالك للمستودع يمكنك تزويده في أي وقت عبر تبويب (Settings > Secrets) لتنشيط نماذج المحادثات الحقيقية المتقدمة وتحليل الفواتير فورياً.`;
-      }
-
-      res.json({
-        text: fallbackText,
-        action: fallbackAction,
-        isSimulated: true
-      });
+      console.warn("[AI chat] Gemini request failed:", error?.message || error);
+      return res.status(502).json({ code: "ai_failed", message: "The AI service did not respond" });
     }
   });
 
   // Vite middleware for development
   if (!isProduction) {
     console.log("Starting in development mode with Vite middleware...");
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
@@ -703,7 +902,15 @@ async function startServer() {
     console.log(`Starting in production mode. Serving static files from: ${distPath}`);
     
     // Explicitly serve static files
-    app.use(express.static(distPath, { index: false }));
+    app.use(express.static(distPath, {
+      index: false,
+      setHeaders(res, filePath) {
+        // Hashed bundles never change; index.html must always be fresh so it points at existing bundles.
+        if (filePath.includes(`${path.sep}assets${path.sep}`)) {
+          res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+        }
+      },
+    }));
     
     // Serve index.html for all other routes (SPA)
     app.get('*', (req, res) => {
@@ -721,12 +928,13 @@ async function startServer() {
       }
 
       // Try resolving via absolute process directory first (most bulletproof configuration)
+      res.setHeader("Cache-Control", "no-cache");
       const processPath = path.resolve(process.cwd(), 'dist/index.html');
       if (fs.existsSync(processPath)) {
-        res.sendFile(processPath);
+        res.sendFile(processPath, { cacheControl: false });
       } else {
         // Fallback to __dirname resolved index.html
-        res.sendFile(path.resolve(__dirname, '../dist/index.html'));
+        res.sendFile(path.resolve(__dirname, '../dist/index.html'), { cacheControl: false });
       }
     });
   }
@@ -741,9 +949,9 @@ async function startServer() {
     const statusCode = err.status || err.statusCode || 500;
 
     res.status(statusCode).json({
-      error: errorName,
-      message: errorMessage,
-      details: process.env.NODE_ENV !== "production" ? err.stack : undefined
+      error: isProduction ? "ServerError" : errorName,
+      message: isProduction && statusCode >= 500 ? "An unexpected server error occurred." : errorMessage,
+      details: isProduction ? undefined : err.stack,
     });
   });
 
@@ -751,5 +959,9 @@ async function startServer() {
     console.log(`Server running on port ${PORT}`);
   });
 }
+
+process.on("unhandledRejection", (reason) => {
+  console.error("[Server] Unhandled promise rejection:", reason);
+});
 
 startServer();

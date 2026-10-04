@@ -3,11 +3,9 @@ import { supabase as sharedSupabase } from '../supabaseClient';
 import {
   getSupabaseCredentials,
   isSupabaseConfigured,
-  saveSupabaseCredentials,
-  clearSupabaseCredentials,
 } from '../lib/supabaseConfig';
 
-export { getSupabaseCredentials, isSupabaseConfigured, saveSupabaseCredentials, clearSupabaseCredentials };
+export { getSupabaseCredentials, isSupabaseConfigured };
 
 /**
  * Returns the ONE shared Supabase client (same session/auth storage as the rest of the app).

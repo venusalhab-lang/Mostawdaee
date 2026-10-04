@@ -8,9 +8,7 @@ interface AdminProtectedRouteProps {
 }
 
 /**
- * حارس المسارات الخاص بالمسؤول الخارق (AdminProtectedRoute)
- * يقوم بالتحقق من صلاحية الإدارة (isAdmin) المطابقة لـ mohammad.salhab@example.com
- * وإذا حاول أي مستخدم غير مصرح به الدخول، يتم توجيهه تلقائياً إلى الصفحة الرئيسية مع حظر تام للبيانات.
+ * حارس واجهة فقط: صلاحيات الإدارة الفعلية يفرضها الخادم (requireOwner) ببريد مؤكَّد.
  */
 export default function AdminProtectedRoute({ children }: AdminProtectedRouteProps) {
   const { isAdmin, loading, user } = useAuth();

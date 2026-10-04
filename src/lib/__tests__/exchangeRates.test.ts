@@ -2,8 +2,8 @@ import { describe, it, expect } from 'vitest';
 import { convertMoney, convertAmount, formatMoney, currencyDecimals, buildUsdUnitRates, POS_CURRENCY_CODES } from '../exchangeRates';
 
 describe('exchangeRates', () => {
-  it('has the six supported currencies', () => {
-    expect([...POS_CURRENCY_CODES]).toEqual(['JOD', 'ILS', 'USD', 'IQD', 'SAR', 'LYD']);
+  it('has the supported currencies', () => {
+    expect([...POS_CURRENCY_CODES]).toEqual(['JOD', 'ILS', 'USD', 'IQD', 'SAR', 'LYD', 'EGP']);
   });
 
   it('uses the right decimals per currency', () => {
@@ -26,5 +26,27 @@ describe('exchangeRates', () => {
   it('formats with the currency own symbol', () => {
     expect(formatMoney(10, 'ILS')).toContain('₪');
     expect(formatMoney(10, 'SAR')).toContain('ر.س');
+  });
+
+  it('converts Egyptian pounds from a live USD rate', () => {
+    const rates = buildUsdUnitRates(null, { EGP: 48.2, JOD: 0.709 });
+    expect(convertMoney(1, 'USD', 'EGP', rates)).toBe(48.2);
+    expect(currencyDecimals('EGP')).toBe(2);
+  });
+
+  it('keeps live rates when manual mode is off', () => {
+    const rates = buildUsdUnitRates(
+      { useManualExchangeRates: false, exchangeRateJOD_USD: 2 },
+      { JOD: 0.71, ILS: 3.7 }
+    );
+    expect(rates.JOD).toBe(0.71);
+  });
+
+  it('uses merchant-entered rates only in manual mode', () => {
+    const rates = buildUsdUnitRates(
+      { useManualExchangeRates: true, exchangeRateJOD_USD: 2 },
+      { JOD: 0.71, ILS: 3.7 }
+    );
+    expect(rates.JOD).toBeCloseTo(0.5, 6);
   });
 });

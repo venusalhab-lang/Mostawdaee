@@ -66,14 +66,14 @@ export default function InteractiveButton({
             transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
             className="absolute bottom-full left-1/2 mb-2 flex flex-col items-center z-50 pointer-events-none"
           >
-            <div className="bg-slate-900/95 dark:bg-[#0c1221]/95 border border-slate-705/50 dark:border-white/10 backdrop-blur-md text-[11px] font-semibold text-gray-100 px-3 py-1.5 rounded-lg shadow-2xl whitespace-nowrap flex items-center gap-2 font-sans">
+            <div className="bg-slate-900/95 dark:bg-[#0c1221]/95 border border-slate-700/50 dark:border-white/10 backdrop-blur-md text-[11px] font-semibold text-gray-100 px-3 py-1.5 rounded-lg shadow-2xl whitespace-nowrap flex items-center gap-2 font-sans">
               <span>{tooltipText || defaultTooltip}</span>
               <kbd className="bg-white/15 dark:bg-white/10 px-1.5 py-0.5 rounded text-[9px] font-sans font-bold border border-white/10 text-white shadow-xs">
                 {shortcut}
               </kbd>
             </div>
             {/* Subtle micro arrow pointer at bottom of floating panel */}
-            <div className="w-1.5 h-1.5 bg-slate-900/95 dark:bg-[#0c1221]/95 rotate-45 -mt-0.5 border-r border-b border-slate-705/50 dark:border-white/10"></div>
+            <div className="w-1.5 h-1.5 bg-slate-900/95 dark:bg-[#0c1221]/95 rotate-45 -mt-0.5 border-r border-b border-slate-700/50 dark:border-white/10"></div>
           </motion.div>
         )}
       </AnimatePresence>

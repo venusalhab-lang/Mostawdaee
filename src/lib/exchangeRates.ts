@@ -1,4 +1,6 @@
-export const POS_CURRENCY_CODES = ['JOD', 'ILS', 'USD', 'IQD', 'SAR', 'LYD'] as const;
+import { apiUrl } from './apiBase';
+
+export const POS_CURRENCY_CODES = ['JOD', 'ILS', 'USD', 'IQD', 'SAR', 'LYD', 'EGP'] as const;
 export type PosCurrency = (typeof POS_CURRENCY_CODES)[number];
 
 export const CURRENCY_SYMBOLS: Record<string, string> = {
@@ -8,6 +10,7 @@ export const CURRENCY_SYMBOLS: Record<string, string> = {
   IQD: 'د.ع',
   SAR: 'ر.س',
   LYD: 'د.ل',
+  EGP: 'ج.م',
 };
 
 /** Minor-unit digits used for money rounding/printing per currency. */
@@ -17,6 +20,7 @@ export const CURRENCY_DECIMALS: Record<string, number> = {
   SAR: 2,
   JOD: 3,
   LYD: 3,
+  EGP: 2,
   IQD: 0,
 };
 
@@ -85,28 +89,68 @@ export function readCachedLiveRates(maxAgeMs = Infinity): Record<string, number>
   }
 }
 
+function parseUsdRatesPayload(data: unknown): Record<string, number> | null {
+  const rates = (data as { rates?: Record<string, number> } | null)?.rates;
+  if (!rates) return null;
+  const out: Record<string, number> = { USD: 1 };
+  for (const code of TRACKED) {
+    const v = Number(rates[code]);
+    if (v > 0) out[code] = v;
+  }
+  if (!(out.JOD > 0) || !(out.ILS > 0)) return null;
+  return out;
+}
+
+function persistLiveRates(out: Record<string, number>) {
+  try {
+    localStorage.setItem(CACHE_KEY, JSON.stringify({ ts: Date.now(), rates: out } satisfies CachedRates));
+  } catch {
+    // ignore quota errors
+  }
+}
+
+export function readCachedLiveRatesTimestamp(): number | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as CachedRates;
+    return typeof parsed?.ts === 'number' ? parsed.ts : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Fetches live USD-based rates (same source as the header ticker) and caches them. */
 export async function fetchLiveUsdRates(force = false): Promise<Record<string, number> | null> {
   if (!force) {
     const fresh = readCachedLiveRates(CACHE_TTL_MS);
     if (fresh) return fresh;
   }
-  try {
-    const res = await fetch('https://open.er-api.com/v6/latest/USD');
+
+  const tryUrl = async (url: string, rejectFallback = false): Promise<Record<string, number> | null> => {
+    const res = await fetch(url);
     if (!res.ok) throw new Error(`rates http ${res.status}`);
     const data = await res.json();
-    const out: Record<string, number> = { USD: 1 };
-    for (const code of TRACKED) {
-      const v = Number(data?.rates?.[code]);
-      if (v > 0) out[code] = v;
+    if (rejectFallback && data?.provider === 'local_database_fallback') return null;
+    return parseUsdRatesPayload(data);
+  };
+
+  try {
+    const proxied = await tryUrl(apiUrl('/api/exchange-rate/USD'), true);
+    if (proxied) {
+      persistLiveRates(proxied);
+      return proxied;
     }
-    if (!(out.JOD > 0) || !(out.ILS > 0)) throw new Error('incomplete rates payload');
-    try {
-      localStorage.setItem(CACHE_KEY, JSON.stringify({ ts: Date.now(), rates: out } satisfies CachedRates));
-    } catch {
-      // ignore quota errors
-    }
-    return out;
+  } catch {
+    // fall through to the public feed
+  }
+
+  try {
+    const direct = await tryUrl('https://open.er-api.com/v6/latest/USD');
+    if (!direct) throw new Error('incomplete rates payload');
+    persistLiveRates(direct);
+    return direct;
   } catch (e) {
     console.warn('[exchangeRates] live fetch failed, using cache/defaults', e);
     return readCachedLiveRates();
@@ -132,7 +176,8 @@ export function buildUsdUnitRates(
 ): Record<string, number> {
   const rates: Record<string, number> = { ...DEFAULT_USD_UNITS };
   if (live) Object.assign(rates, live);
-  if (settings?.useManualExchangeRates || !live) applySettings(rates, settings);
+  if (settings?.useManualExchangeRates) applySettings(rates, settings);
+  else if (!live) applySettings(rates, settings);
   rates.USD = 1;
   return rates;
 }

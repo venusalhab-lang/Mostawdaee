@@ -12,7 +12,6 @@ import {
   Barcode,
   Lock,
   Unlock,
-  Activity,
   Zap,
   Shield,
   Building2,
@@ -21,7 +20,9 @@ import {
   Cloud,
   ShoppingBag,
   TrendingUp,
-  Calculator
+  Calculator,
+  ClipboardCheck,
+  Banknote
 } from 'lucide-react';
 import Logo from './Logo';
 import CurrencySwitcher from './CurrencySwitcher';
@@ -30,8 +31,8 @@ import { translations } from '../translations';
 import { motion, AnimatePresence } from 'motion/react';
 import { useFirebase } from './FirebaseProvider';
 import { Search } from 'lucide-react';
+import GlobalSearch from './GlobalSearch';
 import { useDeviceType } from '../hooks/useDeviceType';
-import { toast } from 'sonner';
 import { sounds } from '../lib/sounds';
 import { isAdminEmail } from '../lib/adminAccess';
 
@@ -52,17 +53,6 @@ interface MenuItem {
   id: string;
   icon: React.ComponentType<any>;
   label: string;
-}
-
-// Arabic text normalization helper to unify letters and handle Arabic typoes
-function normalizeArabic(text: string): string {
-  if (!text) return "";
-  return text
-    .trim()
-    .toLowerCase()
-    .replace(/[أإآا]/g, "ا") // توحيد الألفات
-    .replace(/[ةه]/g, "ه")   // توحيد التاء المربوطة والهاء
-    .replace(/[ىي]/g, "ي");  // توحيد الياء
 }
 
 export default function Sidebar({ 
@@ -96,39 +86,8 @@ export default function Sidebar({
   const holdTimerRef = useRef<NodeJS.Timeout | null>(null);
   const progressIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Live warehouse and CRM datasets from main context
-  const { products = [], invoices = [], employees = [], user } = useFirebase();
-
-  // Global Search and Result-set states
-  const [searchVal, setSearchVal] = useState('');
-  const [debouncedSearchVal, setDebouncedSearchVal] = useState('');
-  const [showSearchResults, setShowSearchResults] = useState(false);
+  const { user } = useFirebase();
   const searchInputRef = useRef<HTMLInputElement>(null);
-  const dropdownRef = useRef<HTMLDivElement>(null);
-
-  // Debouncing effect (300ms)
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      setDebouncedSearchVal(searchVal);
-    }, 300);
-    return () => clearTimeout(timer);
-  }, [searchVal]);
-
-  // Dismiss dropdown results upon selecting any outside layout focus
-  useEffect(() => {
-    const handleDocumentClick = (e: MouseEvent) => {
-      if (
-        dropdownRef.current && 
-        !dropdownRef.current.contains(e.target as Node) && 
-        searchInputRef.current && 
-        !searchInputRef.current.contains(e.target as Node)
-      ) {
-        setShowSearchResults(false);
-      }
-    };
-    document.addEventListener('mousedown', handleDocumentClick);
-    return () => document.removeEventListener('mousedown', handleDocumentClick);
-  }, []);
 
   // Expand criteria: Expanded if mobile view, or if hovered, or if locked by logo toggle
   const isExpanded = isMobile ? true : (isHovered || isLocked);
@@ -140,46 +99,23 @@ export default function Sidebar({
     }
   }, [isExpanded, onExpandedChange]);
 
-  // Dynamically compute real-time matches across warehouse Products, customer invoices, and employee logs
-  const searchMatches = React.useMemo(() => {
-    if (!debouncedSearchVal.trim()) return { products: [], invoices: [], employees: [] };
-    const queryTerm = normalizeArabic(debouncedSearchVal);
+  const focusSearch = () => {
+    setIsLocked(true);
+    setTimeout(() => searchInputRef.current?.focus(), 100);
+  };
 
-    const matchedProducts = products
-      .filter((p) => 
-        normalizeArabic(p.name || '').includes(queryTerm) || 
-        normalizeArabic(p.sku || '').includes(queryTerm) || 
-        normalizeArabic(p.category || '').includes(queryTerm)
-      )
-      .slice(0, 3);
-
-    const matchedInvoices = invoices
-      .filter((i) => 
-        normalizeArabic(i.invoiceNumber || '').includes(queryTerm) || 
-        normalizeArabic(i.customerName || '').includes(queryTerm) || 
-        normalizeArabic(i.supplierName || '').includes(queryTerm)
-      )
-      .slice(0, 3);
-
-    const matchedEmployees = employees
-      .filter((e) => 
-        normalizeArabic(e.name || '').includes(queryTerm) || 
-        normalizeArabic(e.role || '').includes(queryTerm) || 
-        normalizeArabic(e.contact || '').includes(queryTerm)
-      )
-      .slice(0, 3);
-
-    return {
-      products: matchedProducts,
-      invoices: matchedInvoices,
-      employees: matchedEmployees
+  useEffect(() => {
+    if (isMobile) return;
+    const onShortcut = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        if (isExpanded) searchInputRef.current?.focus();
+        else focusSearch();
+      }
     };
-  }, [debouncedSearchVal, products, invoices, employees]);
-
-  const hasMatches = 
-    searchMatches.products.length > 0 || 
-    searchMatches.invoices.length > 0 || 
-    searchMatches.employees.length > 0;
+    window.addEventListener('keydown', onShortcut);
+    return () => window.removeEventListener('keydown', onShortcut);
+  }, [isMobile, isExpanded]);
 
   // Strict admin check for displaying the Control Panel link.
   // Requirement: only show the admin dashboard link for the exact master email.
@@ -189,9 +125,11 @@ export default function Sidebar({
     { id: 'dashboard', icon: LayoutDashboard, label: t.dashboard },
     { id: 'pos', icon: Barcode, label: t.pos },
     { id: 'inventory', icon: Package, label: isRtl ? "إدارة المنتجات" : t.inventory },
+    { id: 'inventory-audit', icon: ClipboardCheck, label: isRtl ? "الجرد والتسوية" : "Stocktaking" },
     { id: 'warehouses', icon: Building2, label: isRtl ? "إدارة المستودعات" : "Warehouses System" },
     { id: 'invoices', icon: FileText, label: t.invoices },
     { id: 'customers', icon: Users, label: isRtl ? "العملاء والديون" : "Customers & Debt" },
+    { id: 'cheques', icon: Banknote, label: isRtl ? "إدارة الشيكات" : "Cheques" },
     { id: 'employees', icon: Briefcase, label: isRtl ? "الموظفين والرواتب" : "Employees & Payroll" },
     { id: 'vault', icon: Shield, label: t.vault },
     { id: 'purchases-expenses', icon: ShoppingBag, label: isRtl ? "المشتريات والمصاريف" : "Purchases & Expenses" },
@@ -416,7 +354,7 @@ export default function Sidebar({
               
               {/* Spherical glass-box logo with active neon pulse breathing outline */}
               <div 
-                className={`relative w-[44px] h-[44px] rounded-[14px] bg-slate-100/60 dark:bg-white/5 border border-slate-350 dark:border-white/10 shadow-[0_4px_12px_rgba(0,0,0,0.03)] dark:shadow-[0_0_15px_rgba(255,255,255,0.04)] flex items-center justify-center transition-all duration-500 group-hover/header:rotate-6
+                className={`relative w-[44px] h-[44px] rounded-[14px] bg-slate-100/60 dark:bg-white/5 border border-slate-300 dark:border-white/10 shadow-[0_4px_12px_rgba(0,0,0,0.03)] dark:shadow-[0_0_15px_rgba(255,255,255,0.04)] flex items-center justify-center transition-all duration-500 group-hover/header:rotate-6
                   ${brandHovered ? 'animate-phosphor-breathing dark:border-cyan-400/40 border-cyan-400/30' : ''}`}
               >
                 <Logo 
@@ -449,18 +387,6 @@ export default function Sidebar({
                 {isRtl ? 'مستودعي' : 'Mostawdaee'}
               </span>
               
-              {/* Beautiful, responsive capsule status badge (الكلمات اسفل الشعار متفاعلة وجميلة) */}
-              <div 
-                className="flex items-center gap-1.5 mt-1.5 px-2 py-0.5 rounded-full bg-cyan-500/10 dark:bg-cyan-400/10 border border-cyan-500/10 dark:border-cyan-400/20 text-cyan-600 dark:text-cyan-400 transition-all duration-300 select-none"
-              >
-                <span className="relative flex h-1.5 w-1.5 shrink-0">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 bg-cyan-400"></span>
-                  <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-cyan-500"></span>
-                </span>
-                <span className="text-[10px] font-bold tracking-wide leading-none whitespace-nowrap font-arabic">
-                  {isRtl ? 'النسخة الاحترافية' : 'Premium Edition'}
-                </span>
-              </div>
             </div>
           </div>
           
@@ -473,8 +399,8 @@ export default function Sidebar({
                   e.stopPropagation();
                   setIsLocked(!isLocked);
                 }}
-                className="p-1.5 rounded-lg text-slate-450 hover:text-cyan-500 dark:hover:text-cyan-400 hover:bg-cyan-50/50 dark:hover:bg-cyan-950/20 cursor-pointer transition-all duration-150 active:scale-90"
-                title={isLocked ? "إلغاء تثبيت القائمة" : "تثبيت القائمة الجانبية الحالية"}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-cyan-500 dark:hover:text-cyan-400 hover:bg-cyan-50/50 dark:hover:bg-cyan-950/20 cursor-pointer transition-all duration-150 active:scale-90"
+                title={isLocked ? "إلغاء تثبيت القائمة" : "تثبيت القائمة الجانبية الحالية"} aria-label={isLocked ? "إلغاء تثبيت القائمة" : "تثبيت القائمة الجانبية الحالية"}
               >
                 {isLocked ? <Lock size={13} className="animate-pulse text-cyan-500" /> : <Unlock size={13} />}
               </button>
@@ -487,183 +413,36 @@ export default function Sidebar({
                 onClose();
               }}
               className="p-1.5 rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-500/10 cursor-pointer transition-all duration-150 active:scale-95 shrink-0"
-              title={isRtl ? "إغلاق القائمة" : "Close Sidebar"}
+              title={isRtl ? "إغلاق القائمة" : "Close Sidebar"} aria-label={isRtl ? "إغلاق القائمة" : "Close Sidebar"}
             >
               <X size={15} />
             </button>
           </div>
         </div>
 
-        {/* Global Sidebar Search Container */}
         {!isExpanded ? (
           <div className="px-2 py-2 flex justify-center border-b border-slate-200/40 dark:border-white/5 relative z-40">
-            <button 
+            <button
               type="button"
-              onClick={() => {
-                setIsLocked(true);
-                setTimeout(() => {
-                  searchInputRef.current?.focus();
-                }, 100);
-              }}
+              onClick={focusSearch}
               className="w-[44px] h-[44px] rounded-[14px] bg-slate-100/40 dark:bg-white/5 border border-transparent hover:border-cyan-400/35 flex items-center justify-center text-slate-500 hover:text-cyan-500 dark:hover:text-[#00E5FF] transition-all hover:scale-105"
-              title={isRtl ? 'البحث السريع' : 'Quick Search'}
+              title={isRtl ? 'البحث (Ctrl K)' : 'Search (Ctrl K)'}
+              aria-label={isRtl ? 'البحث' : 'Search'}
               id="collapsed-sidebar-search-trigger"
             >
               <Search size={16} />
             </button>
           </div>
         ) : (
-          <div className="sidebar-search-container px-4 py-3 border-b border-slate-200/40 dark:border-white/5 select-none relative z-40 transition-all bg-white/45 dark:bg-[#0c1221]/15">
-            {/* Search Input Box */}
-            <div className="search-input-wrapper relative flex items-center bg-slate-100/60 dark:bg-slate-900/40 border border-slate-200/60 dark:border-white/5 rounded-xl px-3 py-2.5 group transition-all duration-300 hover:border-cyan-500/40 focus-within:border-cyan-500 hover:dark:border-[#00E5FF]/40 focus-within:dark:border-[#00E5FF] focus-within:ring-1 focus-within:ring-cyan-500/20 shadow-xs">
-              <Search className="search-icon w-4 h-4 text-slate-400 group-focus-within:text-cyan-500 dark:group-focus-within:text-[#00E5FF] transition-colors shrink-0" />
-              <input 
-                ref={searchInputRef}
-                type="text" 
-                id="global-search"
-                value={searchVal}
-                onFocus={() => setShowSearchResults(true)}
-                onChange={(e) => {
-                  setSearchVal(e.target.value);
-                  setShowSearchResults(true);
-                }}
-                placeholder={isRtl ? 'ابحث عن مادة، فاتورة، أو عميل...' : 'Search product, invoice, or client...'}
-                className="w-full bg-transparent outline-none border-none text-xs text-slate-800 dark:text-white placeholder-slate-450 dark:placeholder-slate-550 mx-2 font-bold focus:ring-0 focus:outline-none"
-                autoComplete="off"
-              />
-              {searchVal && (
-                <button 
-                  type="button" 
-                  onClick={() => {
-                    setSearchVal('');
-                    setShowSearchResults(false);
-                  }}
-                  className="text-slate-400 hover:text-slate-600 dark:hover:text-white transition-colors"
-                >
-                  <X size={14} />
-                </button>
-              )}
-            </div>
-
-            {/* Dropdown matched components (With elegant expand transition) */}
-            <AnimatePresence>
-              {showSearchResults && debouncedSearchVal.trim() && (
-                <motion.div 
-                  id="search-results-dropdown"
-                  ref={dropdownRef}
-                  initial={{ opacity: 0, height: 0 }}
-                  animate={{ opacity: 1, height: 'auto' }}
-                  exit={{ opacity: 0, height: 0 }}
-                  className="overflow-hidden mt-3 bg-slate-50/70 dark:bg-black/35 rounded-2xl border border-slate-200/50 dark:border-white/[0.04] p-3 space-y-3.5 shadow-xs"
-                >
-                  {/* Result group 1: Inventory & Products */}
-                  {searchMatches.products.length > 0 && (
-                    <div className="results-section space-y-1.5">
-                      <div className="section-header text-[10px] font-black text-cyan-600 dark:text-[#00E5FF] uppercase tracking-wider px-1">
-                        {isRtl ? 'المخزن والمواد' : 'Inventory & Products'}
-                      </div>
-                      <div className="space-y-1">
-                        {searchMatches.products.map(p => (
-                          <button
-                            key={p.id}
-                            type="button"
-                            onClick={() => {
-                              setActiveScreen('inventory');
-                              navigator.clipboard.writeText(p.sku || p.id);
-                              toast.success(isRtl ? `تم نسخ رمز SKU (${p.sku}) والانتقال للمستودع` : `SKU (${p.sku}) copied. Navigating to inventory.`);
-                              setShowSearchResults(false);
-                              onClose();
-                            }}
-                            className="result-item w-full text-right flex items-center justify-between p-2 rounded-xl text-[11px] hover:bg-white dark:hover:bg-white/5 transition-colors text-slate-700 dark:text-slate-200 hover:text-slate-900 hover:dark:text-white"
-                          >
-                            <span className="item-title font-bold truncate max-w-[130px]">{p.name}</span>
-                            <span className={`item-badge text-stock text-[9px] font-black px-1.5 py-0.5 rounded ${
-                              p.quantity <= 0 
-                              ? 'bg-red-500/10 text-red-500' 
-                              : p.quantity <= (p.lowStockThreshold || 5) 
-                                ? 'bg-amber-500/10 text-amber-500' 
-                                : 'bg-emerald-500/10 text-emerald-500'
-                            }`}>
-                              {isRtl ? `${p.quantity} قطعة` : `${p.quantity} units`}
-                            </span>
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Result group 2: Invoices & Sales */}
-                  {searchMatches.invoices.length > 0 && (
-                    <div className="results-section space-y-1.5">
-                      <div className="section-header text-[10px] font-black text-emerald-600 dark:text-emerald-400 uppercase tracking-wider px-1">
-                        {isRtl ? 'المبيعات والفواتير' : 'Invoices & Sales'}
-                      </div>
-                      <div className="space-y-1">
-                        {searchMatches.invoices.map(i => (
-                          <button
-                            key={i.id}
-                            type="button"
-                            onClick={() => {
-                              setActiveScreen('invoices');
-                              navigator.clipboard.writeText(i.invoiceNumber);
-                              toast.success(isRtl ? `تم نسخ رقم الفاتورة (${i.invoiceNumber}) والانتقال للبحث` : `Invoice #${i.invoiceNumber} copied. Navigating to invoices.`);
-                              setShowSearchResults(false);
-                              onClose();
-                            }}
-                            className="result-item w-full text-right flex items-center justify-between p-2 rounded-xl text-[11px] hover:bg-white dark:hover:bg-white/5 transition-colors text-slate-700 dark:text-slate-200 hover:text-slate-900 hover:dark:text-white"
-                          >
-                            <span className="item-title font-bold truncate max-w-[130px]">
-                              #{i.invoiceNumber} - {i.customerName || i.supplierName || (isRtl ? 'عميل افتراضي' : 'Walk-in')}
-                            </span>
-                            <span className="item-badge text-currency text-[9px] font-black text-cyan-600 dark:text-[#00E5FF] font-mono">
-                              {i.totalAmount} {i.currency}
-                            </span>
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Result group 3: Customers & Suppliers */}
-                  {searchMatches.employees.length > 0 && (
-                    <div className="results-section space-y-1.5">
-                      <div className="section-header text-[10px] font-black text-indigo-500 dark:text-indigo-400 uppercase tracking-wider px-1">
-                        {isRtl ? 'العملاء والموردين' : 'Customers & Partners'}
-                      </div>
-                      <div className="space-y-1">
-                        {searchMatches.employees.map(e => (
-                          <button
-                            key={e.id}
-                            type="button"
-                            onClick={() => {
-                              setActiveScreen('employees');
-                              navigator.clipboard.writeText(e.name);
-                              toast.success(isRtl ? `تم نسخ اسم الشريك (${e.name}) والانتقال للحسابات` : `Partner ${e.name} copied. Navigating to CRM.`);
-                              setShowSearchResults(false);
-                              onClose();
-                            }}
-                            className="result-item w-full text-right flex items-center justify-between p-2 rounded-xl text-[11px] hover:bg-white dark:hover:bg-white/5 transition-colors text-slate-700 dark:text-slate-200 hover:text-slate-900 hover:dark:text-white"
-                          >
-                            <span className="item-title font-bold truncate max-w-[130px]">{e.name}</span>
-                            <span className="item-badge text-user text-[9px] font-bold bg-indigo-500/10 text-indigo-500 dark:text-indigo-400 px-1.5 py-0.5 rounded">
-                              {e.role || (isRtl ? 'عميل' : 'Client')}
-                            </span>
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Empty State */}
-                  {!hasMatches && (
-                    <div className="text-center py-4 text-[11px] font-bold text-slate-450 dark:text-slate-500">
-                      {isRtl ? 'لا توجد نتائج مطابقة لبحثك' : 'No matching items found'}
-                    </div>
-                  )}
-                </motion.div>
-              )}
-            </AnimatePresence>
-          </div>
+          <GlobalSearch
+            language={language}
+            inputRef={searchInputRef}
+            showShortcutHint={!isMobile}
+            onNavigate={(screen) => {
+              setActiveScreen(screen);
+              onClose();
+            }}
+          />
         )}
 
         {/* Navigation panel options with Long-Press (الضغط المطول) integration and tactile touch targets */}
@@ -699,10 +478,10 @@ export default function Sidebar({
                     } 
                     ${isActive 
                       /* High contrast crystal premium dark layout design */
-                      ? `bg-gradient-to-l from-cyan-950/40 to-blue-950/40 font-semibold text-cyan-600 dark:text-cyan-410 shadow-[2px_0_15px_rgba(34,211,238,0.15)] dark:border-cyan-500/30 ${
+                      ? `bg-gradient-to-l from-cyan-950/40 to-blue-950/40 font-semibold text-cyan-600 dark:text-cyan-400 shadow-[2px_0_15px_rgba(34,211,238,0.15)] dark:border-cyan-500/30 ${
                           isRtl ? 'border-r-4 border-cyan-400' : 'border-l-4 border-cyan-400'
                         }`
-                      : 'text-slate-700 dark:text-slate-350 border-transparent hover:bg-slate-100/40 dark:hover:bg-cyan-950/10 hover:text-slate-950 hover:dark:text-white'
+                      : 'text-slate-700 dark:text-slate-300 border-transparent hover:bg-slate-100/40 dark:hover:bg-cyan-950/10 hover:text-slate-950 hover:dark:text-white'
                     }
                     /* Custom double neon border if supercharged via long press */
                     ${isSuperCharged ? 'border-emerald-500/40 dark:border-emerald-400/50 bg-emerald-500/[0.04] dark:bg-emerald-400/[0.06] shadow-[0_0_20px_rgba(16,185,129,0.25)]' : ''}
@@ -710,7 +489,7 @@ export default function Sidebar({
                     /* Interactive click compression feedback */
                     active:scale-[0.93] active:bg-cyan-500/15 active:dark:bg-cyan-500/20 active:shadow-[inset_0_1px_8px_rgba(6,182,212,0.25)]
                   `}
-                  title={!isExpanded ? item.label : undefined}
+                  title={!isExpanded ? item.label : undefined} aria-label={!isExpanded ? item.label : undefined}
                 >
                   {/* Glowing vertical activation bar */}
                   {isActive && (
@@ -761,7 +540,7 @@ export default function Sidebar({
                       className={`w-4.5 h-4.5 shrink-0 transition-all duration-300
                         ${isActive 
                           ? 'text-cyan-600 dark:text-cyan-400 drop-shadow-[0_0_8px_rgba(6,182,212,0.7)]' 
-                          : 'text-slate-450 dark:text-slate-350 group-hover:text-cyan-500 dark:group-hover:text-cyan-400'
+                          : 'text-slate-400 dark:text-slate-300 group-hover:text-cyan-500 dark:group-hover:text-cyan-400'
                         }
                         ${isSuperCharged ? 'text-emerald-500 dark:text-emerald-400 drop-shadow-[0_0_8px_rgba(16,185,129,0.9)] scale-110' : ''}
                       `} 
@@ -777,7 +556,7 @@ export default function Sidebar({
                         : 'opacity-0 max-w-0 invisible' + (isRtl ? ' translate-x-4' : ' -translate-x-4')
                     }
                     ${isActive ? 'text-cyan-600 dark:text-cyan-300' : ''}
-                    ${isSuperCharged ? 'text-emerald-700 dark:text-emerald-350 font-black' : ''}`}
+                    ${isSuperCharged ? 'text-emerald-700 dark:text-emerald-300 font-black' : ''}`}
                   >
                     {item.label}
                   </span>
@@ -788,13 +567,6 @@ export default function Sidebar({
                     ) : (
                       <ChevronRight size={16} className="text-cyan-500 animate-pulse ms-auto shrink-0" />
                     )
-                  )}
-
-                  {/* Super charged double indicator label badge */}
-                  {isSuperCharged && isExpanded && (
-                    <span className="ml-auto bg-emerald-500/10 text-emerald-600 dark:text-emerald-450 text-[9px] font-black px-1.5 py-0.5 rounded-full uppercase border border-emerald-500/20 shadow-xs scale-90">
-                      LIVE
-                    </span>
                   )}
 
                   {/* Elegant sliding shimmer across unselected buttons when hovered */}
@@ -819,21 +591,11 @@ export default function Sidebar({
             className={`w-full flex items-center rounded-xl transition-all duration-200 cursor-pointer text-slate-700 dark:text-slate-300 hover:bg-slate-100/60 dark:hover:bg-white/5 hover:text-slate-950 hover:dark:text-white p-2.5 ${
               isExpanded ? 'justify-start gap-4 px-3.5' : 'justify-center px-2'
             }`}
-            title={t.switchLanguage}
+            title={t.switchLanguage} aria-label={t.switchLanguage}
           >
             <Globe className="w-4.5 h-4.5 shrink-0 text-slate-400 group-hover:text-cyan-400 transition-colors" />
             {isExpanded && <span className="text-xs font-black truncate leading-none">{t.switchLanguage}</span>}
           </button>
-
-          {/* Secure connected status indicators */}
-          {isExpanded && (
-            <div className="mx-1 px-3 py-2 rounded-xl bg-emerald-500/5 dark:bg-emerald-500/5 border border-emerald-500/10 dark:border-emerald-500/15 flex items-center gap-2 select-none hover:bg-emerald-500/10 transition">
-              <Activity size={11} className="text-emerald-500 shrink-0 animate-pulse" />
-              <span className="text-[10px] font-black text-emerald-600 dark:text-emerald-400 uppercase tracking-widest leading-none">
-                {isRtl ? 'اتصال مشفر آمن بـ SSL' : 'SSL Secure Connection'}
-              </span>
-            </div>
-          )}
 
           {/* Clean crystalline user profile banner */}
           <div className="border-t border-slate-200/40 dark:border-white/5 pt-3">
@@ -841,7 +603,7 @@ export default function Sidebar({
               <div className="flex items-center gap-3 p-2 rounded-2xl bg-white/40 dark:bg-white/5 border border-slate-200/50 dark:border-cyan-500/10 hover:bg-slate-100/70 dark:hover:bg-white/8 transition-all duration-300">
                 
                 {/* Profile icon bubble */}
-                <div className="w-[36px] h-[36px] rounded-full bg-slate-150 dark:bg-cyan-500/10 flex items-center justify-center border border-slate-250 dark:border-cyan-500/25 shadow-xs shrink-0 select-none overflow-hidden">
+                <div className="w-[36px] h-[36px] rounded-full bg-slate-100 dark:bg-cyan-500/10 flex items-center justify-center border border-slate-200 dark:border-cyan-500/25 shadow-xs shrink-0 select-none overflow-hidden">
                   {user && user.photoURL ? (
                     <img 
                       src={user.photoURL} 
@@ -859,18 +621,20 @@ export default function Sidebar({
                 {/* Enterprise meta labels */}
                 <div className="flex flex-col min-w-0 flex-1 overflow-hidden" style={{ textAlign: isRtl ? 'right' : 'left' }}>
                   <span className="text-xs font-black text-slate-900 dark:text-gray-100 truncate">
-                    {userName || (isRtl ? 'محمد أحمد' : 'User')}
+                    {userName || (isRtl ? 'حسابي' : 'My account')}
                   </span>
-                  <span className="text-[11px] text-slate-450 dark:text-slate-400 font-bold truncate mt-0.5">
-                    {businessName || (isRtl ? 'مدير النظام' : 'Administrator')}
-                  </span>
+                  {businessName && (
+                    <span className="text-[11px] text-slate-500 dark:text-slate-400 font-bold truncate mt-0.5">
+                      {businessName}
+                    </span>
+                  )}
                 </div>
                 
                 {/* Sleek, clickable logout door */}
                 <button
                   onClick={onLogout}
-                  className="p-1.5 rounded-xl text-rose-500 dark:text-rose-450 hover:text-rose-600 hover:bg-rose-500/10 dark:hover:bg-rose-950/20 transition-all cursor-pointer shrink-0 active:scale-90"
-                  title={t.logout}
+                  className="p-1.5 rounded-xl text-rose-500 dark:text-rose-400 hover:text-rose-600 hover:bg-rose-500/10 dark:hover:bg-rose-950/20 transition-all cursor-pointer shrink-0 active:scale-90"
+                  title={t.logout} aria-label={t.logout}
                 >
                   <LogOut className="w-4 h-4 text-rose-500" />
                 </button>
@@ -879,7 +643,7 @@ export default function Sidebar({
               <button
                 onClick={onLogout}
                 className="w-10 h-10 mx-auto rounded-xl flex items-center justify-center text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950/20 cursor-pointer transition-all duration-150"
-                title={t.logout}
+                title={t.logout} aria-label={t.logout}
               >
                 <LogOut className="w-4 h-4 text-rose-500 animate-pulse" />
               </button>

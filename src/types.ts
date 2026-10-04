@@ -1,5 +1,5 @@
 export type Language = 'en' | 'ar';
-export type Currency = 'JOD' | 'USD' | 'ILS' | 'IQD' | 'SAR' | 'LYD';
+export type Currency = 'JOD' | 'USD' | 'ILS' | 'IQD' | 'SAR' | 'LYD' | 'EGP';
 
 export interface CalculationResults {
   totalFOBCost: number;
@@ -100,6 +100,8 @@ export interface Employee {
   role: string;
   contact: string;
   salary: number;
+  /** Currency the salary amount is stored in. Older rows omit it and mean the store currency. */
+  currency?: Currency;
   status: 'active' | 'on-leave' | 'terminated';
   hiredDate: number;
 }
@@ -112,6 +114,42 @@ export interface Customer {
   createdAt: string;
   totalDebt: number;
   currency: Currency;
+}
+
+export type ChequeType = 'incoming' | 'outgoing';
+export type ChequeStatus = 'pending' | 'cashed' | 'bounced' | 'endorsed' | 'returned';
+export type ChequeContactType = 'customer' | 'supplier';
+
+export interface Cheque {
+  id: string;
+  chequeNumber: string;
+  bankName: string;
+  amount: number;
+  currency: Currency;
+  /** YYYY-MM-DD */
+  dueDate: string;
+  type: ChequeType;
+  status: ChequeStatus;
+  drawerName: string;
+  contactType: ChequeContactType | null;
+  /** Customer id from the sync store; suppliers have no id, only a name. */
+  contactId: string | null;
+  contactName: string;
+  /** Who an incoming cheque was endorsed over to. Required when status is 'endorsed'. */
+  endorsedTo: string;
+  notes: string;
+  statusChangedAt: string | null;
+  createdAt: string;
+}
+
+export type ChequeInput = Omit<Cheque, 'id' | 'status' | 'statusChangedAt' | 'createdAt' | 'endorsedTo'>;
+
+export interface ChequeFilters {
+  status: ChequeStatus | 'all';
+  bank: string;
+  from: string;
+  to: string;
+  search: string;
 }
 
 export interface CustomerTransaction {
@@ -168,6 +206,11 @@ export interface InvoiceItem {
   quantity: number;
   unitPrice: number;
   total: number;
+  /** Snapshot at issue time so reprints stay stable if the product SKU later changes. */
+  sku?: string;
+  /** Product unit cost at sale time, in costCurrency. Profit uses this, not today's cost. */
+  unitCost?: number;
+  costCurrency?: string;
 }
 
 export interface Invoice {
@@ -179,6 +222,8 @@ export interface Invoice {
   items: InvoiceItem[];
   subtotal: number;
   taxAmount: number;
+  /** VAT % stored with the invoice. Reprints must use this, not the current settings. */
+  vatRate?: number;
   totalAmount: number;
   type: 'sale' | 'purchase';
   currency: Currency;
@@ -188,6 +233,11 @@ export interface Invoice {
   /** 'credit' = آجل: no cash enters the vault until the customer pays. Missing = cash. */
   paymentMethod?: 'cash' | 'card' | 'wallet' | 'credit';
   customerId?: string;
+  /** Credit sale: debt added to the customer, in the customer's own currency. */
+  debtAmount?: number;
+  debtCurrency?: Currency;
+  /** Whether saving this invoice moved the cash vault. Missing on invoices saved before card/wallet were excluded. */
+  vaultPosted?: boolean;
 }
 
 export type VaultSource =
@@ -222,6 +272,7 @@ export interface Vault {
   balanceIQD?: number;
   balanceSAR?: number;
   balanceLYD?: number;
+  balanceEGP?: number;
   lastUpdated: number;
 }
 
@@ -244,6 +295,36 @@ export interface Warehouse {
   location?: string;
   parentId: string | null; // NULL if main, or ID of parent warehouse if sub-warehouse
   createdAt: number;
+}
+
+export type InventoryAuditStatus = 'draft' | 'completed';
+
+/** One stocktake session. Rows live in Supabase `inventory_audits`. */
+export interface InventoryAudit {
+  id: string;
+  auditNumber: string;
+  status: InventoryAuditStatus;
+  notes: string;
+  createdAt: string;
+  createdBy: string;
+}
+
+/** One counted product. `difference` is actualQty − expectedQty. */
+export interface InventoryAuditItem {
+  id: string;
+  auditId: string;
+  productId: string;
+  expectedQty: number;
+  actualQty: number;
+  difference: number;
+  unitCost: number;
+}
+
+/** Count-sheet fields kept beside the row so the archive can show a name after reload. */
+export interface InventoryAuditLine extends InventoryAuditItem {
+  productName: string;
+  sku: string;
+  currency: string;
 }
 
 export interface AuditLog {

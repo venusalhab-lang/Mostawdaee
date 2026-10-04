@@ -9,8 +9,4 @@ export const supabase: SupabaseClient<Database, 'public', any>;
 export default supabase;
 
 // Common helpers exported from src/supabaseClient.js
-export const updateSubscription: any;
 export const updateProfile: any;
-export const createCompletedInvoice: any;
-export const createCompletedExpense: any;
-export const createCompletedPurchase: any;

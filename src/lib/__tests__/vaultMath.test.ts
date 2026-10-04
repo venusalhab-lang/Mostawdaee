@@ -41,7 +41,7 @@ describe('vaultMath balances', () => {
   });
 
   it('runs a full multi-currency scenario', () => {
-    let L: any = buildVaultDoc({ JOD: 100, ILS: 0, USD: 50, IQD: 0, SAR: 0, LYD: 0 });
+    let L: any = buildVaultDoc({ JOD: 100, ILS: 0, USD: 50, IQD: 0, SAR: 0, LYD: 0, EGP: 0 });
     L = applyVaultDelta(L, 'JOD', 25.5).doc;
     L = applyVaultDelta(L, 'JOD', -40).doc;
     L = applyVaultDelta(L, 'USD', -10).doc;
@@ -51,10 +51,19 @@ describe('vaultMath balances', () => {
 });
 
 describe('planInvoiceVaultEntry', () => {
-  it('cash/card sales are income, rounded to currency precision', () => {
+  it('cash sales are income, rounded to currency precision', () => {
     expect(planInvoiceVaultEntry(baseInvoice)?.type).toBe('income');
     expect(planInvoiceVaultEntry(baseInvoice)?.amount).toBe(12.346);
-    expect(planInvoiceVaultEntry({ ...baseInvoice, paymentMethod: 'card' })?.type).toBe('income');
+  });
+
+  it('card and wallet money never enters the cash vault', () => {
+    expect(planInvoiceVaultEntry({ ...baseInvoice, paymentMethod: 'card' })).toBeNull();
+    expect(planInvoiceVaultEntry({ ...baseInvoice, paymentMethod: 'wallet' })).toBeNull();
+    expect(planInvoiceVaultEntry({ ...baseInvoice, type: 'purchase', paymentMethod: 'card' })).toBeNull();
+  });
+
+  it('can reproduce the entry an older card invoice posted, so deleting it reverses it', () => {
+    expect(planInvoiceVaultEntry({ ...baseInvoice, paymentMethod: 'card' }, { includeNonCash: true })?.type).toBe('income');
   });
 
   it('credit (آجل) sales never touch the vault', () => {

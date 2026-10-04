@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { Capacitor } from '@capacitor/core';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   Globe2,
@@ -18,6 +19,7 @@ import Logo from './Logo';
 import { useAuth } from './AuthContext';
 import { supabase } from '../supabaseClient';
 import { APP_NAME_EN, appName } from '../lib/brand';
+import { NATIVE_OAUTH_REDIRECT } from '../lib/nativeAuth';
 
 interface Props {
   language?: 'en' | 'ar';
@@ -157,7 +159,7 @@ export default function Auth({ language = 'ar', onLanguageToggle = () => {}, onL
       setAuthError(null);
       try {
         const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), {
-          redirectTo: window.location.origin,
+          redirectTo: Capacitor.isNativePlatform() ? NATIVE_OAUTH_REDIRECT : window.location.origin,
         });
         if (error) throw error;
         setSuccessKey('reset_sent');
@@ -353,7 +355,7 @@ export default function Auth({ language = 'ar', onLanguageToggle = () => {}, onL
                 autoComplete="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                placeholder={isRtl ? 'البريد الإلكتروني' : 'Email address'}
+                placeholder={isRtl ? 'البريد الإلكتروني' : 'Email address'} aria-label={isRtl ? 'البريد الإلكتروني' : 'Email address'}
                 className="w-full ps-11 pe-4 py-3 bg-white border border-gray-200 hover:border-gray-300 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 rounded-2xl text-sm transition text-gray-800 placeholder-gray-400 outline-none"
                 disabled={loading}
                 required
@@ -373,6 +375,8 @@ export default function Auth({ language = 'ar', onLanguageToggle = () => {}, onL
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder={recoveryMode
                   ? (isRtl ? 'كلمة المرور الجديدة' : 'New password')
+                  : (isRtl ? 'كلمة المرور' : 'Password')} aria-label={recoveryMode
+                  ? (isRtl ? 'كلمة المرور الجديدة' : 'New password')
                   : (isRtl ? 'كلمة المرور' : 'Password')}
                 className="w-full ps-11 pe-12 py-3 bg-white border border-gray-200 hover:border-gray-300 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 rounded-2xl text-sm transition text-gray-800 placeholder-gray-400 outline-none"
                 disabled={loading}
@@ -383,7 +387,7 @@ export default function Auth({ language = 'ar', onLanguageToggle = () => {}, onL
                 type="button"
                 onClick={() => setShowPassword((v) => !v)}
                 className="absolute inset-y-0 end-3 flex items-center text-gray-400 hover:text-gray-600 cursor-pointer"
-                title={showPassword ? (isRtl ? 'إخفاء' : 'Hide') : (isRtl ? 'إظهار' : 'Show')}
+                title={showPassword ? (isRtl ? 'إخفاء' : 'Hide') : (isRtl ? 'إظهار' : 'Show')} aria-label={showPassword ? (isRtl ? 'إخفاء' : 'Hide') : (isRtl ? 'إظهار' : 'Show')}
               >
                 {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
               </button>
@@ -400,7 +404,7 @@ export default function Auth({ language = 'ar', onLanguageToggle = () => {}, onL
                 autoComplete="new-password"
                 value={confirmPassword}
                 onChange={(e) => setConfirmPassword(e.target.value)}
-                placeholder={isRtl ? 'تأكيد كلمة المرور' : 'Confirm password'}
+                placeholder={isRtl ? 'تأكيد كلمة المرور' : 'Confirm password'} aria-label={isRtl ? 'تأكيد كلمة المرور' : 'Confirm password'}
                 className="w-full ps-11 pe-4 py-3 bg-white border border-gray-200 hover:border-gray-300 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 rounded-2xl text-sm transition text-gray-800 placeholder-gray-400 outline-none"
                 disabled={loading}
                 minLength={6}
@@ -468,7 +472,7 @@ export default function Auth({ language = 'ar', onLanguageToggle = () => {}, onL
               setAuthError(null);
               setSuccessKey(null);
             }}
-            className="text-indigo-605 hover:text-indigo-700 hover:underline transition font-bold focus:outline-none cursor-pointer"
+            className="text-indigo-600 hover:text-indigo-700 hover:underline transition font-bold focus:outline-none cursor-pointer"
           >
             {forgotMode || recoveryMode
               ? (isRtl ? 'العودة لتسجيل الدخول' : 'Back to sign in')
@@ -556,7 +560,7 @@ export default function Auth({ language = 'ar', onLanguageToggle = () => {}, onL
                 <button
                   onClick={() => { sounds.playClick(); setShowPrivacyModal(false); }}
                   className="p-1.5 hover:bg-gray-100 text-gray-400 hover:text-gray-600 rounded-xl transition cursor-pointer"
-                >
+                 aria-label={isRtl ? 'إغلاق' : 'Close'}>
                   <X size={18} />
                 </button>
               </div>
@@ -675,7 +679,7 @@ export default function Auth({ language = 'ar', onLanguageToggle = () => {}, onL
                 <button
                   onClick={() => { sounds.playClick(); setShowTermsModal(false); }}
                   className="p-1.5 hover:bg-gray-100 text-gray-400 hover:text-gray-600 rounded-xl transition cursor-pointer"
-                >
+                 aria-label={isRtl ? 'إغلاق' : 'Close'}>
                   <X size={18} />
                 </button>
               </div>
@@ -776,7 +780,7 @@ export default function Auth({ language = 'ar', onLanguageToggle = () => {}, onL
                 <button
                   onClick={() => { sounds.playClick(); setShowDisclaimerModal(false); }}
                   className="p-1.5 hover:bg-gray-100 text-gray-400 hover:text-gray-600 rounded-xl transition cursor-pointer"
-                >
+                 aria-label={isRtl ? 'إغلاق' : 'Close'}>
                   <X size={18} />
                 </button>
               </div>

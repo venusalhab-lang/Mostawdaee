@@ -1,4 +1,4 @@
-import React, { useState, useEffect, Suspense, lazy } from 'react';
+import React, { useState, useEffect, useRef, Suspense, lazy } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Capacitor } from '@capacitor/core';
 import { App as CapApp } from '@capacitor/app';
@@ -6,6 +6,8 @@ import { useFirebase } from './components/FirebaseProvider';
 import Sidebar from './components/Sidebar';
 import Login from './components/Auth';
 import LandingPage from './components/LandingPage';
+import ErrorBoundary from './components/ErrorBoundary';
+import { decideBack, hasUnsavedWork } from './lib/backNavigation';
 import Header from './components/Header';
 import CurrencyTicker from './components/CurrencyTicker';
 import { AuthContext, mockUserObj } from './components/AuthContext';
@@ -16,24 +18,30 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 const supabase: SupabaseClient<any, 'public', any> = (rawSupabase as unknown) as SupabaseClient<any, 'public', any>;
 import { setDriveAccessToken } from './services/googleDrive';
 import { toast } from 'sonner';
-import { usePreferredCurrency } from './components/CurrencyContext';
+import { usePreferredCurrency, type UserPreferredCurrency } from './components/CurrencyContext';
+import { POS_CURRENCY_CODES, type PosCurrency } from './lib/exchangeRates';
+import type { AppSettings, Currency } from './types';
 import { sounds } from './lib/sounds';
 import { Coins, LayoutDashboard, Package, Users, Sparkles, MessageSquare, Plus, Settings as SettingsIcon } from 'lucide-react';
 import QuickActionModal from './components/QuickActionModal';
 import CommandPalette from './components/CommandPalette';
 import AdminProtectedRoute from './components/AdminProtectedRoute';
-import { isAdminEmail } from './lib/adminAccess';
+import { isVerifiedAdmin } from './lib/adminAccess';
 import { NATIVE_OAUTH_REDIRECT } from './lib/nativeAuth';
+import { claimOAuthCallback, oauthProviderError, readOAuthCallbackParams, urlLooksLikeOAuthCallback } from './lib/completeOAuthSession';
 import { Browser } from '@capacitor/browser';
 import { useSubscriptionSync } from './hooks/useSubscriptionSync';
+import { usePlayBillingSync } from './hooks/usePlayBillingSync';
 import SubscriptionExpired from './components/SubscriptionExpired';
 
-const Dashboard = lazy(() => import('./components/Dashboard'));
+const HomeDesk = lazy(() => import('./components/HomeDesk'));
 const POSSystem = lazy(() => import('./components/POSSystem'));
 const InventoryManagement = lazy(() => import('./components/InventoryManagement'));
+const InventoryAudit = lazy(() => import('./components/InventoryAudit'));
 const WarehouseManagement = lazy(() => import('./components/WarehouseManagement'));
 const InvoiceSystem = lazy(() => import('./components/InvoiceSystem'));
 const CustomerManagement = lazy(() => import('./components/CustomerManagement'));
+const ChequesManagement = lazy(() => import('./components/ChequesManagement'));
 const EmployeeManagement = lazy(() => import('./components/EmployeeManagement'));
 const VaultManagement = lazy(() => import('./components/VaultManagement'));
 const PurchasesExpenses = lazy(() => import('./components/PurchasesExpenses'));
@@ -93,82 +101,52 @@ export default function App() {
     let isActive = true;
     let listener: { remove: () => Promise<void> } | null = null;
 
-    const subscribeToDeepLink = async () => {
-      listener = await CapApp.addListener('appUrlOpen', async ({ url }) => {
-        // Ensure the URL is an authentication/OAuth deep link (contains google-auth, access_token, code or refresh_token)
-        const isAuthLink = url.includes('google-auth') || url.includes('access_token') || url.includes('code=') || url.includes('refresh_token');
-        const hasOAuthError = /[?#&](error|error_description)=/.test(url);
-        if (!isActive || (!isAuthLink && !hasOAuthError)) return;
+    const finishNativeOAuth = async (url: string) => {
+      const providerError = oauthProviderError(url);
+      const isAuthLink = urlLooksLikeOAuthCallback(url) || url.includes('google-auth');
+      if (!isActive || (!isAuthLink && !providerError)) return;
+      if (!claimOAuthCallback(url)) return;
 
-        // Always dismiss the system browser tab once the app is re-opened by the deep link.
-        try { await Browser.close(); } catch (e) { /* not open or unsupported platform */ }
+      try { await Browser.close(); } catch { /* browser already closed */ }
 
-        if (hasOAuthError) {
-          const errParams = new URLSearchParams(url.split(/[?#]/).slice(1).join('&'));
-          const description = errParams.get('error_description') || errParams.get('error') || '';
-          console.error('[Auth] OAuth provider returned an error:', description);
-          toast.error(isRtl
-            ? `تعذر تسجيل الدخول بواسطة Google${description ? `: ${description}` : ''}`
-            : `Google sign-in failed${description ? `: ${description}` : ''}`);
+      if (providerError) {
+        console.error('[Auth] OAuth provider returned an error:', providerError);
+        toast.error(isRtl
+          ? `تعذر تسجيل الدخول بواسطة Google: ${providerError}`
+          : `Google sign-in failed: ${providerError}`);
+        return;
+      }
+
+      try {
+        const { code } = readOAuthCallbackParams(url);
+
+        if (code) {
+          const { error } = await supabase.auth.exchangeCodeForSession(code);
+          if (error) {
+            const { data } = await supabase.auth.getSession();
+            if (data.session?.access_token) return;
+            throw error;
+          }
           return;
         }
 
-        try {
-          let code: string | null = null;
-          let accessToken: string | null = null;
-          let refreshToken: string | null = null;
+        throw new Error('No PKCE code found in deep link URL.');
+      } catch (error) {
+        console.error('[Auth] Native OAuth deep-link handling failed:', error);
+        toast.error(isRtl ? 'تعذر إكمال تسجيل الدخول: رابط غير صالح أو منتهي الصلاحية' : 'Could not complete sign-in: invalid or expired link');
+      }
+    };
 
-          try {
-            // Standard URL parsing (handles standard deep links)
-            const parsedUrl = new URL(url);
-            code = parsedUrl.searchParams.get('code');
-            
-            // Extract from hash fragment if present (implicit grant flow or PKCE redirect details)
-            const hash = parsedUrl.hash || '';
-            const hashParams = new URLSearchParams(hash.replace(/^#/, ''));
-            if (!code) {
-              code = hashParams.get('code');
-            }
-            accessToken = hashParams.get('access_token') || parsedUrl.searchParams.get('access_token');
-            refreshToken = hashParams.get('refresh_token') || parsedUrl.searchParams.get('refresh_token');
-          } catch (e) {
-            console.warn('[Auth] standard URL construct parsing failed, trying robust regex/split fallback:', e);
-            // Fallback parsing for custom schemes like "com.hamza.mostawdaee://google-auth#access_token=..." where standard URL can fail
-            const urlWithoutScheme = url.includes('://') ? url.split('://')[1] : url;
-            const parts = urlWithoutScheme.split('#');
-            const searchPart = parts[0].split('?')[1] || '';
-            const hashPart = parts[1] || '';
-
-            const searchParams = new URLSearchParams(searchPart);
-            const hashParams = new URLSearchParams(hashPart);
-
-            code = searchParams.get('code') || hashParams.get('code');
-            accessToken = hashParams.get('access_token') || searchParams.get('access_token');
-            refreshToken = hashParams.get('refresh_token') || searchParams.get('refresh_token');
-          }
-
-          if (code) {
-            const { error } = await supabase.auth.exchangeCodeForSession(code);
-            if (error) throw error;
-            toast.success(isRtl ? 'تم تسجيل الدخول بنجاح!' : 'Logged in successfully!');
-            return;
-          }
-
-          if (accessToken) {
-            const { error } = await supabase.auth.setSession({
-              access_token: accessToken,
-              refresh_token: refreshToken || '',
-            });
-            if (error) throw error;
-            toast.success(isRtl ? 'تم تسجيل الدخول بنجاح!' : 'Logged in successfully!');
-          } else {
-            throw new Error('No code or access_token found in deep link URL.');
-          }
-        } catch (error) {
-          console.error('[Auth] Native OAuth deep-link handling failed:', error);
-          toast.error(isRtl ? 'تعذر إكمال تسجيل الدخول: رابط غير صالح أو منتهي الصلاحية' : 'Could not complete sign-in: invalid or expired link');
-        }
+    const subscribeToDeepLink = async () => {
+      listener = await CapApp.addListener('appUrlOpen', async ({ url }) => {
+        await finishNativeOAuth(url);
       });
+
+      // Cold start: the first deep link arrives as the launch URL, not as appUrlOpen.
+      try {
+        const launch = await CapApp.getLaunchUrl();
+        if (launch?.url) await finishNativeOAuth(launch.url);
+      } catch { /* unsupported on this platform */ }
     };
 
     void subscribeToDeepLink();
@@ -186,6 +164,82 @@ export default function App() {
   }, [activeScreen]);
 
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+
+  // Screen history for the Android back button.
+  const screenHistoryRef = useRef<string[]>([]);
+  const navigatingBackRef = useRef(false);
+  const exitArmedAtRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (navigatingBackRef.current) {
+      navigatingBackRef.current = false;
+      return;
+    }
+    const history = screenHistoryRef.current;
+    if (history[history.length - 1] !== activeScreen) history.push(activeScreen);
+    if (history.length > 30) history.shift();
+  }, [activeScreen]);
+
+  const backStateRef = useRef({ isCommandPaletteOpen, isSidebarOpen, isQuickActionModalOpen, activeScreen, isRtl });
+  backStateRef.current = { isCommandPaletteOpen, isSidebarOpen, isQuickActionModalOpen, activeScreen, isRtl };
+
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform()) return;
+    const visibleOverlay = () => [...document.querySelectorAll<HTMLElement>('.fixed.inset-0')]
+      .find((el) => el.getClientRects().length > 0 && getComputedStyle(el).pointerEvents !== 'none');
+
+    const handle = CapApp.addListener('backButton', () => {
+      const st = backStateRef.current;
+      if (st.isCommandPaletteOpen) return setIsCommandPaletteOpen(false);
+      if (st.isQuickActionModalOpen) return setIsQuickActionModalOpen(false);
+      if (st.isSidebarOpen) return setIsSidebarOpen(false);
+
+      const history = screenHistoryRef.current;
+      const action = decideBack({
+        overlayOpen: !!visibleOverlay(),
+        unsavedWork: hasUnsavedWork(),
+        screen: st.activeScreen,
+        homeScreen: 'dashboard',
+        previousScreen: history.length > 1 ? history[history.length - 2] : null,
+        exitArmedAt: exitArmedAtRef.current,
+        now: Date.now(),
+      });
+
+      switch (action) {
+        case 'close-overlay': {
+          // Same as tapping outside the window; if it stays open it needs an explicit choice.
+          document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+          const overlay = visibleOverlay();
+          overlay?.click();
+          setTimeout(() => {
+            if (visibleOverlay()) {
+              toast.info(st.isRtl ? 'أغلق النافذة المفتوحة أولاً' : 'Close the open window first', { id: 'back-overlay' });
+            }
+          }, 150);
+          return;
+        }
+        case 'blocked-unsaved':
+          toast.warning(st.isRtl
+            ? 'لديك عمل غير محفوظ (مثل سلة بيع). أكمله أو أفرغه قبل مغادرة الشاشة.'
+            : 'You have unsaved work (such as a sale cart). Finish or clear it before leaving.', { id: 'back-unsaved' });
+          return;
+        case 'previous-screen':
+          history.pop();
+          navigatingBackRef.current = true;
+          setActiveScreen(history[history.length - 1]);
+          return;
+        case 'home':
+          setActiveScreen('dashboard');
+          return;
+        case 'arm-exit':
+          exitArmedAtRef.current = Date.now();
+          toast.info(st.isRtl ? 'اضغط رجوع مرة أخرى للخروج' : 'Press back again to exit', { id: 'back-exit', duration: 2000 });
+          return;
+        case 'exit':
+          void CapApp.exitApp();
+      }
+    });
+    return () => { void handle.then((h) => h.remove()); };
+  }, []);
 
   // Global keyboard shortcut for Command Palette (Ctrl/Cmd+K)
   useEffect(() => {
@@ -207,17 +261,35 @@ export default function App() {
 
   const [isMuted, setIsMuted] = useState(sounds.isMuted);
 
-  // Initialize preferred currency to 'USD' (symbol $) if not already configured
+  // The saved store currency is the system currency. Keep the header on it.
   useEffect(() => {
-    try {
-      const saved = localStorage.getItem('mustawdae_preferred_currency');
-      if (!saved) {
-        setPreferredCurrency('USD');
-      }
-    } catch (e) {
-      console.warn(e);
+    if (!settings?.currency) return;
+    setPreferredCurrency(settings.currency);
+  }, [settings?.currency, setPreferredCurrency]);
+
+  const selectSystemCurrency = (code: UserPreferredCurrency) => {
+    if (code === 'DEFAULT') {
+      if (settings?.currency) setPreferredCurrency(settings.currency);
+      return;
     }
-  }, [setPreferredCurrency]);
+    if (!(POS_CURRENCY_CODES as readonly string[]).includes(code)) return;
+    const next = code as PosCurrency;
+    setPreferredCurrency(next);
+    if (settings?.currency === next) return;
+    const base: AppSettings = settings ?? {
+      userName: '',
+      businessName: '',
+      defaultVatRate: 16,
+      defaultCustomsDuty: 5,
+      defaultLanguage: language,
+      enableAnimations: true,
+      aiVerbosity: 'detailed',
+      theme: 'modern',
+      darkMode: false,
+      currency: next,
+    };
+    void saveSettings({ ...base, currency: next as Currency });
+  };
 
   // Sync dark mode class
   useEffect(() => {
@@ -326,13 +398,21 @@ export default function App() {
     }
   };
 
-  const isAdmin = isAdminEmail(user?.email);
+  const isAdmin = isVerifiedAdmin(user as any);
+  const hasRealSession = !!user && !user.isAnonymous;
+
+  useEffect(() => {
+    if (hasRealSession && isGuestModeActive) setIsGuestModeActive(false);
+  }, [hasRealSession, isGuestModeActive]);
 
   const {
     loading: subscriptionLoading,
     isExpired,
+    lockReason,
+    subscription,
     refreshSubscription,
-  } = useSubscriptionSync(user, isGuestModeActive || !!user?.isAnonymous);
+  } = useSubscriptionSync(user, !hasRealSession);
+  usePlayBillingSync(hasRealSession ? user?.uid : null, refreshSubscription);
 
   // Auth Context actions to support custom Login (Auth.tsx) handlers
   // تسجيل الدخول بواسطة جوجل
@@ -350,7 +430,7 @@ const signInWithGoogle = async () => {
       },
     });
     if (error) throw error;
-    if (!data?.url) throw new Error('Google sign-in URL was not returned by Supabase');
+    if (!data?.url) throw new Error('Google sign-in could not start. Try again.');
     await Browser.open({ url: data.url, presentationStyle: 'fullscreen' });
     return data;
   }
@@ -391,11 +471,16 @@ const signUpWithEmail = async (emailVal: string, passwordVal: string) => {
 };
 
 // تسجيل الخروج
-const handleSignOut = async () => {
-  await firebaseLogout();
+  const handleSignOut = async () => {
+    try {
+      await firebaseLogout();
+    } catch (error: any) {
+      if (!error?.notified) toast.error(isRtl ? 'تعذّر تسجيل الخروج' : 'Could not sign out');
+      return;
+    }
     setIsGuestModeActive(false);
-  setActiveScreen('dashboard');
-};
+    setActiveScreen('dashboard');
+  };
 
   const handleQuickActionClick = (actionId: string) => {
     setIsQuickActionModalOpen(false);
@@ -410,10 +495,7 @@ const handleSignOut = async () => {
     } else if (actionId === 'debts') {
       setActiveScreen('customers');
     } else if (actionId === 'reports') {
-      setActiveScreen('dashboard');
-      setTimeout(() => {
-        document.getElementById('bento-analysis-tab')?.scrollIntoView({ behavior: 'smooth' });
-      }, 150);
+      setActiveScreen('profits-dashboard');
     }
   };
 
@@ -491,12 +573,14 @@ const handleSignOut = async () => {
     );
   }
 
-  if (user && !isAdmin && !isGuestModeActive && !subscriptionLoading && isExpired) {
+  if (hasRealSession && !isAdmin && !subscriptionLoading && isExpired) {
     return (
       <AuthContext.Provider value={authContextValue}>
         <SubscriptionExpired
           language={language}
           onLanguageToggle={toggleLanguage}
+          reason={lockReason}
+          expiryDate={lockReason === 'trial' ? null : subscription?.expiry_date}
           onRefresh={refreshSubscription}
           onLogout={handleSignOut}
         />
@@ -504,28 +588,27 @@ const handleSignOut = async () => {
     );
   }
 
+  const screenSettings: AppSettings = settings ?? {
+    userName: '',
+    businessName: '',
+    defaultVatRate: 16,
+    defaultCustomsDuty: 5,
+    defaultLanguage: language,
+    enableAnimations: true,
+    aiVerbosity: 'detailed',
+    theme: 'modern',
+    darkMode: false,
+    currency: ((POS_CURRENCY_CODES as readonly string[]).includes(preferredCurrency) ? preferredCurrency : 'JOD') as Currency,
+  };
+
   // 3. Render screen handler
   const renderScreen = (screenName = activeScreen) => {
     switch (screenName) {
       case 'dashboard':
         return (
-          <Dashboard 
-            language={language} 
-            products={products} 
-            settings={settings || {
-              userName: '',
-              businessName: '',
-              defaultVatRate: 16,
-              defaultCustomsDuty: 5,
-              defaultLanguage: language,
-              enableAnimations: true,
-              aiVerbosity: 'detailed',
-              theme: 'modern',
-              darkMode: false,
-              currency: 'JOD',
-            }} 
-            vault={vault} 
-            vaultTransactions={vaultTransactions} 
+          <HomeDesk
+            language={language}
+            settings={screenSettings}
           />
         );
       case 'pos':
@@ -535,78 +618,32 @@ const handleSignOut = async () => {
           <InventoryManagement 
             language={language} 
             products={products} 
-            settings={settings || {
-              userName: '',
-              businessName: '',
-              defaultVatRate: 16,
-              defaultCustomsDuty: 5,
-              defaultLanguage: language,
-              enableAnimations: true,
-              aiVerbosity: 'detailed',
-              theme: 'modern',
-              darkMode: false,
-              currency: 'JOD',
-            }} 
+            settings={screenSettings} 
             onAddProduct={saveProduct} 
             onUpdateProduct={saveProduct}
             onDeleteProduct={deleteProduct} 
             transactions={invoices as any} 
           />
         );
+      case 'inventory-audit':
+        return (
+          <InventoryAudit
+            language={language}
+            settings={screenSettings}
+          />
+        );
       case 'warehouses':
-        return <WarehouseManagement language={language} settings={settings || {
-              userName: '',
-              businessName: '',
-              defaultVatRate: 16,
-              defaultCustomsDuty: 5,
-              defaultLanguage: language,
-              enableAnimations: true,
-              aiVerbosity: 'detailed',
-              theme: 'modern',
-              darkMode: false,
-              currency: 'JOD',
-            }} />;
+        return <WarehouseManagement language={language} settings={screenSettings} />;
       case 'invoices':
         return <InvoiceSystem language={language} />;
       case 'customers':
-        return <CustomerManagement language={language} settings={settings || {
-              userName: '',
-              businessName: '',
-              defaultVatRate: 16,
-              defaultCustomsDuty: 5,
-              defaultLanguage: language,
-              enableAnimations: true,
-              aiVerbosity: 'detailed',
-              theme: 'modern',
-              darkMode: false,
-              currency: 'JOD',
-            }} />;
+        return <CustomerManagement language={language} settings={screenSettings} />;
+      case 'cheques':
+        return <ChequesManagement language={language} settings={screenSettings} />;
       case 'employees':
-        return <EmployeeManagement language={language} settings={settings || {
-              userName: '',
-              businessName: '',
-              defaultVatRate: 16,
-              defaultCustomsDuty: 5,
-              defaultLanguage: language,
-              enableAnimations: true,
-              aiVerbosity: 'detailed',
-              theme: 'modern',
-              darkMode: false,
-              currency: 'JOD',
-            }} />;
+        return <EmployeeManagement language={language} settings={screenSettings} />;
       case 'vault':
-        return <VaultManagement language={language} settings={settings || {
-              userName: '',
-              businessName: '',
-              defaultVatRate: 16,
-              defaultCustomsDuty: 5,
-              defaultLanguage: language,
-              enableAnimations: true,
-              aiVerbosity: 'detailed',
-              theme: 'modern',
-              darkMode: false,
-              currency: 'JOD',
-            }} />;
+        return <VaultManagement language={language} settings={screenSettings} />;
       case 'purchases-expenses':
         return <PurchasesExpenses language={language} />;
       case 'google-drive':
@@ -622,7 +659,7 @@ const handleSignOut = async () => {
                   }}
                   className={`flex-1 py-3 px-4 text-xs font-black uppercase rounded-xl transition-all duration-300 flex items-center justify-center gap-2 select-none cursor-pointer
                     ${backupTab === 'local'
-                      ? 'bg-indigo-650 text-white shadow-md'
+                      ? 'bg-indigo-600 text-white shadow-md'
                       : 'text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800/10'}`}
                 >
                   <span className="text-sm">🗄️</span>
@@ -635,7 +672,7 @@ const handleSignOut = async () => {
                   }}
                   className={`flex-1 py-3 px-4 text-xs font-black uppercase rounded-xl transition-all duration-300 flex items-center justify-center gap-2 select-none cursor-pointer
                     ${backupTab === 'cloud'
-                      ? 'bg-indigo-650 text-white shadow-md'
+                      ? 'bg-indigo-600 text-white shadow-md'
                       : 'text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800/10'}`}
                 >
                   <span className="text-sm">☁️</span>
@@ -662,18 +699,7 @@ const handleSignOut = async () => {
           <Settings 
             language={language} 
             onLanguageToggle={toggleLanguage} 
-            settings={settings || {
-              userName: '',
-              businessName: '',
-              defaultVatRate: 16,
-              defaultCustomsDuty: 5,
-              defaultLanguage: language,
-              enableAnimations: true,
-              aiVerbosity: 'detailed',
-              theme: 'modern',
-              darkMode: false,
-              currency: 'JOD',
-            }} 
+            settings={screenSettings} 
             onSaveSettings={saveSettings} 
           />
         );
@@ -681,18 +707,7 @@ const handleSignOut = async () => {
         return (
           <LandedCostCalculator 
             language={language} 
-            settings={settings || {
-              userName: '',
-              businessName: '',
-              defaultVatRate: 16,
-              defaultCustomsDuty: 5,
-              defaultLanguage: language,
-              enableAnimations: true,
-              aiVerbosity: 'detailed',
-              theme: 'modern',
-              darkMode: false,
-              currency: 'JOD',
-            }}
+            settings={screenSettings}
             onAddProduct={saveProduct} 
             defaultVat={settings?.defaultVatRate ?? 16} 
             defaultCustoms={settings?.defaultCustomsDuty ?? 5} 
@@ -731,20 +746,6 @@ const handleSignOut = async () => {
     <AuthContext.Provider value={authContextValue}>
       <div className="app-container min-h-screen flex flex-col bg-slate-50 dark:bg-slate-950" dir={isRtl ? 'rtl' : 'ltr'}>
         
-        {/* Toggle Button for Mobile Only */}
-        {activeScreen !== 'ai-assistant' && (
-          <button 
-            id="sidebar-btn" 
-            className="sidebar-toggle-btn lg:hidden fixed bottom-6 left-6 z-55 bg-indigo-650 hover:bg-indigo-700 text-white w-14 h-14 rounded-full shadow-2xl flex items-center justify-center font-black active:scale-95 transition-all text-xl cursor-pointer border border-indigo-505/20"
-            onClick={(e) => {
-              e.stopPropagation();
-              setIsSidebarOpen(prev => !prev);
-            }}
-            title={isRtl ? "تبديل القائمة الجانبية" : "Toggle Sidebar"}
-          >
-            ☰
-          </button>
-        )}
 
         {/* Brand New Modern Integrated Responsive Header Component */}
         <Header 
@@ -755,7 +756,7 @@ const handleSignOut = async () => {
           isClassDarkMode={isClassDarkMode}
           onToggleDarkMode={handleToggleDarkMode}
           preferredCurrency={preferredCurrency}
-          onPreferredCurrencyChange={setPreferredCurrency}
+          onPreferredCurrencyChange={selectSystemCurrency}
           onOpenSidebar={() => setIsSidebarOpen(true)}
           onChangeScreen={setActiveScreen}
           activeScreen={activeScreen}
@@ -807,7 +808,9 @@ const handleSignOut = async () => {
                     exit={{ opacity: 0, y: -15 }}
                     transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
                   >
-                    {renderScreen(lastNonAiScreen)}
+                    <ErrorBoundary variant="screen" isRtl={isRtl} resetKey={lastNonAiScreen}>
+                      {renderScreen(lastNonAiScreen)}
+                    </ErrorBoundary>
                   </motion.div>
                 </AnimatePresence>
               </Suspense>
@@ -815,28 +818,20 @@ const handleSignOut = async () => {
 
             {activeScreen === 'ai-assistant' && (
               <div className="relative block">
+                <ErrorBoundary variant="screen" isRtl={isRtl} resetKey="ai-assistant">
+                <Suspense fallback={null}>
                 <AIAssistant 
                   language={language} 
                   products={products} 
-                  settings={settings || {
-              userName: '',
-              businessName: '',
-              defaultVatRate: 16,
-              defaultCustomsDuty: 5,
-              defaultLanguage: language,
-              enableAnimations: true,
-              aiVerbosity: 'detailed',
-              theme: 'modern',
-              darkMode: false,
-              currency: 'JOD',
-            }} 
+                  settings={screenSettings} 
                   verbosity={settings?.aiVerbosity || 'detailed'} 
                   onAddProduct={saveProduct} 
                   onDeleteProduct={deleteProduct} 
-                  onAddInvoice={saveInvoice} 
                   onAddCustomer={saveCustomer} 
                   onClose={() => setActiveScreen(lastNonAiScreen)}
                 />
+                </Suspense>
+                </ErrorBoundary>
               </div>
             )}
           </main>
@@ -867,7 +862,7 @@ const handleSignOut = async () => {
           </div>
 
           {/* Interactive Nav Content */}
-          <div className="absolute inset-0 flex items-center justify-between px-2 pb-safe-bottom pointer-events-auto">
+          <div className="absolute inset-0 flex items-center justify-between px-2 pb-[env(safe-area-inset-bottom)] pointer-events-auto">
             
             {/* Left Navigation Actions (Home, Inventory) */}
             <div className="flex-1 flex justify-around items-center">
@@ -880,7 +875,7 @@ const handleSignOut = async () => {
                 }}
                 className={`flex flex-col items-center justify-center w-14 h-14 rounded-2xl transition-all cursor-pointer ${
                   activeScreen === 'dashboard' 
-                    ? 'text-indigo-650 dark:text-indigo-400 bg-indigo-50/55 dark:bg-indigo-950/25' 
+                    ? 'text-indigo-600 dark:text-indigo-400 bg-indigo-50/55 dark:bg-indigo-950/25' 
                     : 'text-slate-400 hover:text-slate-600 dark:text-slate-500'
                 }`}
               >
@@ -898,7 +893,7 @@ const handleSignOut = async () => {
                 }}
                 className={`flex flex-col items-center justify-center w-14 h-14 rounded-2xl transition-all cursor-pointer ${
                   activeScreen === 'inventory' 
-                    ? 'text-indigo-650 dark:text-indigo-400 bg-indigo-50/55 dark:bg-indigo-950/25' 
+                    ? 'text-indigo-600 dark:text-indigo-400 bg-indigo-50/55 dark:bg-indigo-950/25' 
                     : 'text-slate-400 hover:text-slate-600 dark:text-slate-500'
                 }`}
               >
@@ -917,7 +912,7 @@ const handleSignOut = async () => {
                   sounds.playClick();
                   setIsQuickActionModalOpen(true);
                 }}
-                className="w-14 h-14 bg-gradient-to-tr from-indigo-650 to-indigo-800 hover:from-indigo-750 hover:to-indigo-900 active:scale-90 text-white rounded-full flex items-center justify-center shadow-xl shadow-indigo-600/35 border-4 border-white dark:border-slate-900 -translate-y-5 transition-all cursor-pointer group"
+                className="w-14 h-14 bg-gradient-to-tr from-indigo-600 to-indigo-800 hover:from-indigo-700 hover:to-indigo-900 active:scale-90 text-white rounded-full flex items-center justify-center shadow-xl shadow-indigo-600/35 border-4 border-white dark:border-slate-900 -translate-y-5 transition-all cursor-pointer group"
                 title={isRtl ? 'الإجراءات السريعة الفائقة' : 'Quick Actions'}
               >
                 <Plus size={26} className="text-white group-hover:rotate-90 transition-transform duration-300 stroke-[2.5]" />
@@ -935,7 +930,7 @@ const handleSignOut = async () => {
                 }}
                 className={`flex flex-col items-center justify-center w-14 h-14 rounded-2xl transition-all cursor-pointer ${
                   activeScreen === 'customers' 
-                    ? 'text-indigo-650 dark:text-indigo-400 bg-indigo-50/55 dark:bg-indigo-950/25' 
+                    ? 'text-indigo-600 dark:text-indigo-400 bg-indigo-50/55 dark:bg-indigo-950/25' 
                     : 'text-slate-400 hover:text-slate-600 dark:text-slate-500'
                 }`}
               >
@@ -953,7 +948,7 @@ const handleSignOut = async () => {
                 }}
                 className={`flex flex-col items-center justify-center w-14 h-14 rounded-2xl transition-all cursor-pointer ${
                   activeScreen === 'settings' 
-                    ? 'text-indigo-650 dark:text-indigo-400 bg-indigo-50/55 dark:bg-indigo-950/25' 
+                    ? 'text-indigo-600 dark:text-indigo-400 bg-indigo-50/55 dark:bg-indigo-950/25' 
                     : 'text-slate-400 hover:text-slate-600 dark:text-slate-500'
                 }`}
               >

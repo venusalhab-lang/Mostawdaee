@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
-import { supabase as supabaseRaw } from '../supabaseClient';
 import { toast } from 'sonner';
+import { fetchAdminSubscribers, mutateAdminSubscription } from '../lib/adminSubscriptionApi';
 import {
   Shield, 
   UserCheck, 
@@ -17,8 +17,6 @@ import {
   BadgeDollarSign
 } from 'lucide-react';
 
-const supabase = supabaseRaw as any;
-
 export default function CoreCommandCenter() {
   const [users, setUsers] = useState<any[]>([]);
   const [stats, setStats] = useState({ total: 0, active: 0, trial: 0, expired: 0, revenue: 0 });
@@ -28,115 +26,34 @@ export default function CoreCommandCenter() {
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
 
+  const applyStats = (rows: any[]) => {
+    setStats({
+      total: rows.length,
+      active: rows.filter(u => u.subscription_status === 'active').length,
+      trial: rows.filter(u => u.subscription_status === 'trial').length,
+      expired: rows.filter(u => u.subscription_status === 'expired').length,
+      revenue: 0,
+    });
+  };
+
   const fetchCoreData = async () => {
     try {
       setLoading(true);
-      console.log("[CoreCommandCenter] Running high-fidelity authentication profiles and subscriptions fetch...");
-      
-      let authUsers: any[] = [];
-      try {
-        const { data, error: rpcErr } = await supabase.rpc('get_auth_users');
-        if (!rpcErr && data) {
-          authUsers = data;
-          console.log("[CoreCommandCenter] RPC get_auth_users loaded successfully:", authUsers.length, "users");
-        } else {
-          console.warn("[CoreCommandCenter] RPC get_auth_users error:", rpcErr);
-        }
-      } catch (rpcEx) {
-        console.warn("[CoreCommandCenter] Exception calling get_auth_users rpc:", rpcEx);
-      }
-
-      // Fetch profiles
-      const { data: profiles, error: pErr } = await supabase
-        .from('profiles')
-        .select('*');
-
-      if (pErr) {
-        console.error("[CoreCommandCenter] Profiles select error:", pErr);
-      }
-
-      // Fetch subscriptions
-      const { data: subs, error: sErr } = await supabase
-        .from('user_subscriptions')
-        .select('*');
-
-      if (sErr) console.warn("[CoreCommandCenter] Subscriptions warn:", sErr);
-
-      const profilesList = profiles || [];
-      const subsList = subs || [];
-      const joinedUsers: any[] = [];
-
-      if (authUsers && authUsers.length > 0) {
-        authUsers.forEach((au: any) => {
-          const profile = profilesList.find((p: any) => p.id === au.id);
-          const sub = subsList.find((s: any) => s.user_id === au.id);
-          const statusVal = profile?.subscription_status || sub?.subscription_status || sub?.status || 'trial';
-          
-          joinedUsers.push({
-            id: au.id,
-            full_name: au.raw_user_meta_data?.full_name || au.raw_user_meta_data?.user_name || profile?.user_name || profile?.business_name || 'عميل مستودعي جديد',
-            email: au.email || profile?.email || `user_${au.id.slice(0, 4)}@gmail.com`,
-            subscription_status: profile?.role === 'super_admin' ? 'active' : statusVal,
-            role: profile?.role || 'user',
-            expiry_date: sub?.expiry_date || null,
-            created_at: au.created_at || profile?.updated_at || new Date().toISOString()
-          });
-        });
-
-        // Add any profiles that aren't in auth.users (just in case)
-        profilesList.forEach((p: any) => {
-          if (!joinedUsers.some(u => u.id === p.id)) {
-            const sub = subsList.find((s: any) => s.user_id === p.id);
-            const statusVal = p.subscription_status || sub?.subscription_status || sub?.status || 'trial';
-            joinedUsers.push({
-              id: p.id,
-              full_name: p.user_name || p.display_name || 'عميل مستودعي',
-              email: p.email || `user_${p.id.slice(0, 4)}@gmail.com`,
-              subscription_status: p.role === 'super_admin' ? 'active' : statusVal,
-              role: p.role || 'user',
-              expiry_date: sub?.expiry_date || null,
-              created_at: p.updated_at || new Date().toISOString()
-            });
-          }
-        });
-      } else {
-        // Fallback to profiles alone
-        profilesList.forEach((p: any) => {
-          const sub = subsList.find((s: any) => s.user_id === p.id);
-          const statusVal = p.subscription_status || sub?.subscription_status || sub?.status || 'trial';
-          joinedUsers.push({
-            id: p.id,
-            full_name: p.user_name || p.display_name || 'عميل مستودعي',
-            email: p.email || `user_${p.id.slice(0, 4)}@gmail.com`,
-            subscription_status: p.role === 'super_admin' ? 'active' : statusVal,
-            role: p.role || 'user',
-            expiry_date: sub?.expiry_date || null,
-            created_at: p.updated_at || new Date().toISOString()
-          });
-        });
-      }
-
-      // Sort by created_at descending
-      joinedUsers.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-
+      const { subscribers } = await fetchAdminSubscribers();
+      const joinedUsers = (subscribers || []).map((row) => ({
+        id: row.id,
+        full_name: row.businessName || row.displayName || 'عميل مستودعي',
+        email: row.email || 'بدون بريد',
+        subscription_status: row.status,
+        role: row.role || 'user',
+        expiry_date: row.endsAt,
+        days_remaining: row.daysRemaining,
+        created_at: row.trialStart || new Date(0).toISOString(),
+      }));
       setUsers(joinedUsers);
-      
-      // Calculate dashboard metrics
-      const totalCount = joinedUsers.length;
-      const activeCount = joinedUsers.filter(u => u.subscription_status === 'active').length;
-      const trialCount = joinedUsers.filter(u => u.subscription_status === 'trial').length;
-      const expiredCount = joinedUsers.filter(u => u.subscription_status === 'expired').length;
-      
-      setStats({
-        total: totalCount,
-        active: activeCount,
-        trial: trialCount,
-        expired: expiredCount,
-        revenue: activeCount * 100
-      });
-
+      applyStats(joinedUsers);
     } catch (err: any) {
-      console.error("System Error in Command Link:", err.message);
+      toast.error(err?.message || 'تعذر قراءة المشتركين');
     } finally {
       setLoading(false);
     }
@@ -164,50 +81,15 @@ export default function CoreCommandCenter() {
     };
   }, []);
 
-  const recalculateStats = (currUsers: any[]) => {
-    const totalCount = currUsers.length;
-    const activeCount = currUsers.filter(u => u.subscription_status === 'active').length;
-    const trialCount = currUsers.filter(u => u.subscription_status === 'trial').length;
-    const expiredCount = currUsers.filter(u => u.subscription_status === 'expired').length;
-    
-    setStats({
-      total: totalCount,
-      active: activeCount,
-      trial: trialCount,
-      expired: expiredCount,
-      revenue: activeCount * 100
-    });
-  };
-
   const updateStatus = async (userId: string, targetStatus: string) => {
     try {
       setActionLoading(userId);
-      console.log(`[CoreCommandCenter] Updating subscription status for ${userId} to ${targetStatus}`);
-      
-      const { error: subErr } = await supabase
-        .from('user_subscriptions')
-        .upsert({
-          user_id: userId,
-          subscription_status: targetStatus,
-          updated_at: new Date().toISOString()
-        }, { onConflict: 'user_id' });
-
-      if (subErr) throw subErr;
-
-      const { error: profErr } = await supabase
-        .from('profiles')
-        .update({ subscription_status: targetStatus })
-        .eq('id', userId);
-
-      if (profErr) throw profErr;
-
-      const updated = users.map(u => u.id === userId ? { ...u, subscription_status: targetStatus } : u);
-      setUsers(updated);
-      recalculateStats(updated);
-      toast.success('تم تحديث رخصة المشترك بنجاح في المنظومة العلوية! 📡');
+      const op = targetStatus === 'active' ? 'mark_paid' : targetStatus === 'trial' ? 'set_trial' : 'expire';
+      await mutateAdminSubscription({ userId, op });
+      await fetchCoreData();
+      toast.success('تم تحديث الاشتراك');
     } catch (err: any) {
-      console.error(err);
-      toast.error(`تعذر شحن الترخيص: ${err.message || err}`);
+      toast.error(err?.message || 'تعذر تعديل الاشتراك');
     } finally {
       setActionLoading(null);
     }
@@ -216,38 +98,11 @@ export default function CoreCommandCenter() {
   const updateDays = async (userId: string, daysToAdd: number) => {
     try {
       setActionLoading(userId);
-      const user = users.find(u => u.id === userId);
-      if (!user) return;
-
-      let baseDate = new Date();
-      if (user.expiry_date) {
-        const parsed = new Date(user.expiry_date);
-        if (parsed.getTime() > Date.now()) {
-          baseDate = parsed;
-        }
-      }
-
-      baseDate.setDate(baseDate.getDate() + daysToAdd);
-      const targetExpiryStr = baseDate.toISOString();
-
-      const { error: dateErr } = await supabase
-        .from('user_subscriptions')
-        .upsert({
-          user_id: userId,
-          subscription_status: user.subscription_status,
-          expiry_date: targetExpiryStr,
-          updated_at: new Date().toISOString()
-        }, { onConflict: 'user_id' });
-
-      if (dateErr) throw dateErr;
-
-      const updated = users.map(u => u.id === userId ? { ...u, expiry_date: targetExpiryStr } : u);
-      setUsers(updated);
-      recalculateStats(updated);
-      toast.success(`تم تمديد الترخيص بـ ${daysToAdd} يوماً بنجاح فرعي! 📅`);
+      await mutateAdminSubscription({ userId, op: 'extend', days: daysToAdd });
+      await fetchCoreData();
+      toast.success(`تم التمديد ${daysToAdd} يوماً`);
     } catch (err: any) {
-      console.error(err);
-      toast.error('فشل إرسال حزمة التاريخ الهوائية');
+      toast.error(err?.message || 'تعذر التمديد');
     } finally {
       setActionLoading(null);
     }
@@ -257,55 +112,18 @@ export default function CoreCommandCenter() {
     if (!dateVal) return;
     try {
       setActionLoading(userId);
-      const targetExpiryStr = new Date(dateVal).toISOString();
-      const user = users.find(u => u.id === userId);
-      if (!user) return;
-
-      const { error: dateErr } = await supabase
-        .from('user_subscriptions')
-        .upsert({
-          user_id: userId,
-          subscription_status: user.subscription_status,
-          expiry_date: targetExpiryStr,
-          updated_at: new Date().toISOString()
-        }, { onConflict: 'user_id' });
-
-      if (dateErr) throw dateErr;
-
-      const updated = users.map(u => u.id === userId ? { ...u, expiry_date: targetExpiryStr } : u);
-      setUsers(updated);
-      recalculateStats(updated);
-      toast.success('تم ضبط خط النهاية للترخيص بنجاح! ⏱️');
+      await mutateAdminSubscription({ userId, op: 'set_expiry', expiry: dateVal });
+      await fetchCoreData();
+      toast.success('تم ضبط تاريخ الانتهاء');
     } catch (err: any) {
-      console.error(err);
-      toast.error('فشل تعديل قطاع الوقت المخصص');
+      toast.error(err?.message || 'تعذر ضبط التاريخ');
     } finally {
       setActionLoading(null);
     }
   };
 
-  const toggleRole = async (userId: string, currentRole: string) => {
-    try {
-      setActionLoading(userId);
-      const targetRole = currentRole === 'super_admin' ? 'user' : 'super_admin';
-      
-      const { error: roleErr } = await supabase
-        .from('profiles')
-        .update({ role: targetRole })
-        .eq('id', userId);
-
-      if (roleErr) throw roleErr;
-
-      const updated = users.map(u => u.id === userId ? { ...u, role: targetRole } : u);
-      setUsers(updated);
-      recalculateStats(updated);
-      toast.success(`تم تغيير فئة حساب المسؤول تم بنجاح لـ: ${targetRole === 'super_admin' ? 'مطور خارق' : 'مستودع عادي'}`);
-    } catch (err: any) {
-      console.error(err);
-      toast.error('فشل ترقية الصلاحية');
-    } finally {
-      setActionLoading(null);
-    }
+  const toggleRole = async (_userId: string, _currentRole: string) => {
+    toast.error('تغيير رتبة الحساب لا يتم من لوحة الاشتراك');
   };
 
   // Filter subscribers based on search constraints
@@ -360,7 +178,7 @@ export default function CoreCommandCenter() {
       <div style={styles.filterBar}>
         <input 
           type="text" 
-          placeholder="ابحث بالاسم، الإيميل، أو المعرف الفريد للمشترك..."
+          placeholder="ابحث بالاسم، الإيميل، أو المعرف الفريد للمشترك..." aria-label="ابحث بالاسم، الإيميل، أو المعرف الفريد للمشترك..."
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
           style={styles.inputSearch}
@@ -462,14 +280,15 @@ export default function CoreCommandCenter() {
                           </span>
                         </td>
                         <td style={styles.td}>
-                          {user.expiry_date ? (
-                            <span style={{ color: '#cbd5e1', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '13px' }}>
-                              <Clock size={13} style={{ color: '#38bdf8' }} />
-                              {new Date(user.expiry_date).toLocaleDateString('ar-EG')}
-                            </span>
-                          ) : (
-                            <span style={{ color: '#64748b', fontSize: '12px' }}>غير محدد</span>
-                          )}
+                          <span style={{ color: '#e2e8f0', display: 'flex', flexDirection: 'column', gap: '2px', fontSize: '13px' }}>
+                            <strong>{user.days_remaining ?? 0} يوماً</strong>
+                            {user.expiry_date ? (
+                              <span style={{ color: '#94a3b8', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '12px' }}>
+                                <Clock size={13} style={{ color: '#38bdf8' }} />
+                                {new Date(user.expiry_date).toLocaleDateString('ar-EG')}
+                              </span>
+                            ) : null}
+                          </span>
                         </td>
                         <td style={styles.td}>
                           <button

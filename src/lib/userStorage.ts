@@ -100,12 +100,13 @@ export function migrateLegacyUserCache(uid: string): void {
 export function clearUserCache(uid: string | null | undefined): void {
   if (typeof window === 'undefined' || !uid) return;
   const prefix = `mustawdae:${uid}:`;
-  for (const k of Array.from(pendingWrites.keys())) if (k.startsWith(prefix)) pendingWrites.delete(k);
+  for (const k of Array.from(pendingWrites.keys())) if (k.startsWith(prefix) && k !== `${prefix}offline_invoices`) pendingWrites.delete(k);
   try {
     const keys: string[] = [];
     for (let i = 0; i < localStorage.length; i++) {
       const key = localStorage.key(i);
-      if (key && key.startsWith(prefix)) keys.push(key);
+      // Sales taken offline are kept until they are sent, even across a forced sign-out.
+      if (key && key.startsWith(prefix) && key !== `${prefix}offline_invoices`) keys.push(key);
     }
     keys.forEach((key) => localStorage.removeItem(key));
   } catch {

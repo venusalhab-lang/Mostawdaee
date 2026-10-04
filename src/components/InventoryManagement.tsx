@@ -1,3 +1,4 @@
+import { printHtmlDocument } from '../lib/printHtml';
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { 
   Package, 
@@ -40,17 +41,20 @@ import { usePreferredCurrency } from './CurrencyContext';
 import { TactileButton } from './ui/TactileButton';
 import { useSuccessCelebration } from '../hooks/useSuccessCelebration';
 import { sounds } from '../lib/sounds';
+import { matchesQuery } from '../lib/search';
+import { useScreenSearch } from '../lib/screenSearch';
 import BarcodeScannerScanner from './ui/BarcodeScannerScanner';
 import { parseProductRows, ParsedProductRow } from '../lib/productImport';
 import { computeStockStatus, resolveLowStockThreshold, isExpiryCritical, isExpired } from '../lib/stock';
-import { buildUsdUnitRates, convertMoney, formatMoney, readCachedLiveRates, roundMoney, POS_CURRENCY_CODES } from '../lib/exchangeRates';
+import { CURRENCY_SYMBOLS, buildUsdUnitRates, convertMoney, formatMoney, readCachedLiveRates, roundMoney, POS_CURRENCY_CODES } from '../lib/exchangeRates';
+import CurrencyPicker from './CurrencyPicker';
 
 interface Props {
   language: Language;
   products: Product[];
   settings?: AppSettings;
   onAddProduct: (p: Product, options?: { reason?: string }) => void | Promise<void>;
-  onUpdateProduct: (p: Product, options?: { reason?: string }) => void | Promise<void>;
+  onUpdateProduct: (p: Product, options?: { reason?: string; baseQuantity?: number }) => void | Promise<void>;
   onDeleteProduct: (id: string) => void | Promise<void>;
   transactions: Invoice[];
 }
@@ -140,7 +144,7 @@ function ProductRow({
               {product.name}
             </span>
             <div className="flex items-center gap-1.5 mt-1 min-w-0 flex-wrap">
-              <span className="text-[10px] px-2 py-0.5 bg-cyan-500/10 text-cyan-550 dark:text-cyan-400 rounded-md font-mono font-black tracking-wide uppercase truncate">
+              <span className="text-[10px] px-2 py-0.5 bg-cyan-500/10 text-cyan-500 dark:text-cyan-400 rounded-md font-mono font-black tracking-wide uppercase truncate">
                 SKU: {product.sku}
               </span>
               {product.brand && (
@@ -152,7 +156,7 @@ function ProductRow({
                 const wh = warehouses.find(w => w.id === product.warehouseId);
                 if (wh) {
                   return (
-                    <span className="text-[9px] px-1.5 py-0.5 bg-indigo-500/10 text-indigo-600 dark:text-indigo-450 rounded-md font-black tracking-normal truncate">
+                    <span className="text-[9px] px-1.5 py-0.5 bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 rounded-md font-black tracking-normal truncate">
                       📍 {wh.name}
                     </span>
                   );
@@ -166,11 +170,11 @@ function ProductRow({
                   <span className={`text-[9px] px-1.5 py-0.5 rounded-md font-bold flex items-center gap-1 leading-none ${
                     isCritical 
                       ? 'bg-amber-500/15 text-amber-600 dark:text-amber-400 font-black animate-pulse' 
-                      : 'bg-slate-100/60 dark:bg-white/5 text-slate-500 dark:text-slate-450'
+                      : 'bg-slate-100/60 dark:bg-white/5 text-slate-500 dark:text-slate-400'
                   }`}>
                     <Calendar size={10} />
                     {dateStr}
-                    {isCritical && <span className="text-[8px] bg-amber-550 text-white px-1 rounded scale-90">{isExpired(product.expiryDate) ? (isRtl ? 'منتهي!' : 'Expired!') : (isRtl ? 'قريب!' : 'Critical!')}</span>}
+                    {isCritical && <span className="text-[8px] bg-amber-500 text-white px-1 rounded scale-90">{isExpired(product.expiryDate) ? (isRtl ? 'منتهي!' : 'Expired!') : (isRtl ? 'قريب!' : 'Critical!')}</span>}
                   </span>
                 );
               })()}
@@ -181,7 +185,7 @@ function ProductRow({
 
       {/* Category (التصنيف) */}
       <td className="px-6 py-4.5 whitespace-nowrap">
-        <span className="text-xs font-black text-slate-650 dark:text-slate-350">
+        <span className="text-xs font-black text-slate-600 dark:text-slate-300">
           {product.category || (isRtl ? 'عام' : 'General')}
         </span>
       </td>
@@ -207,7 +211,7 @@ function ProductRow({
             onClick={(e) => { e.stopPropagation(); onQuickAdjust(product, -1); }}
             disabled={product.quantity <= 0}
             className="disabled:opacity-30 disabled:cursor-not-allowed w-8 h-8 rounded-lg bg-slate-100 hover:bg-rose-500/15 dark:bg-white/5 dark:hover:bg-rose-500/10 text-slate-500 hover:text-rose-500 border border-slate-200/50 dark:border-white/5 flex items-center justify-center hover:scale-110 active:scale-95 transition-all cursor-pointer"
-            title={t.decrement}
+            title={t.decrement} aria-label={t.decrement}
           >
             <Minus size={13} strokeWidth={2.5} />
           </button>
@@ -225,7 +229,7 @@ function ProductRow({
           <button 
             onClick={(e) => { e.stopPropagation(); onQuickAdjust(product, 1); }}
             className="w-8 h-8 rounded-lg bg-slate-100 hover:bg-emerald-500/15 dark:bg-white/5 dark:hover:bg-emerald-500/10 text-slate-500 hover:text-emerald-500 border border-slate-200/50 dark:border-white/5 flex items-center justify-center hover:scale-110 active:scale-95 transition-all cursor-pointer"
-            title={t.increment}
+            title={t.increment} aria-label={t.increment}
           >
             <Plus size={13} strokeWidth={2.5} />
           </button>
@@ -247,7 +251,7 @@ function ProductRow({
           <button
             onClick={(e) => { e.stopPropagation(); onEdit(product); }}
             className="w-8.5 h-8.5 rounded-lg border border-slate-200/60 dark:border-white/5 hover:border-cyan-500/30 text-slate-400 hover:text-cyan-500 hover:bg-cyan-500/[0.06] flex items-center justify-center transition-all cursor-pointer active:scale-90"
-            title={t.editProduct}
+            title={t.editProduct} aria-label={t.editProduct}
           >
             <Edit2 size={13.5} strokeWidth={2.2} />
           </button>
@@ -256,7 +260,7 @@ function ProductRow({
           <button
             onClick={(e) => { e.stopPropagation(); onDelete(product.id); }}
             className="w-8.5 h-8.5 rounded-lg border border-slate-200/60 dark:border-white/5 hover:border-rose-500/30 text-slate-400 hover:text-rose-500 hover:bg-rose-500/[0.06] flex items-center justify-center transition-all cursor-pointer active:scale-90"
-            title={t.delete}
+            title={t.delete} aria-label={t.delete}
           >
             <Trash2 size={13.5} strokeWidth={2.2} />
           </button>
@@ -265,7 +269,7 @@ function ProductRow({
           <button 
             onClick={(e) => { e.stopPropagation(); onShowContextMenu(product); }}
             className="w-8.5 h-8.5 rounded-lg border border-slate-200/60 dark:border-white/5 hover:border-indigo-500/30 text-slate-400 hover:text-indigo-500 hover:bg-indigo-500/[0.06] flex items-center justify-center transition-all cursor-pointer active:scale-90"
-            title={t.productDetails}
+            title={t.productDetails} aria-label={t.productDetails}
           >
             <MoreVertical size={14} />
           </button>
@@ -339,6 +343,19 @@ export default function InventoryManagement({
   const [maxQty, setMaxQty] = useState<number | ''>('');
   const [warehouseFilter, setWarehouseFilter] = useState<string>('all');
   const [expiryFilter, setExpiryFilter] = useState<string>('all');
+
+  useScreenSearch('inventory', ({ query }) => {
+    setCategoryFilter('all');
+    setStockFilter('all');
+    setSearchMode('all');
+    setMinPrice('');
+    setMaxPrice('');
+    setMinQty('');
+    setMaxQty('');
+    setWarehouseFilter('all');
+    setExpiryFilter('all');
+    setSearchQuery(query);
+  });
 
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isLogOpen, setIsLogOpen] = useState(false);
@@ -453,20 +470,17 @@ export default function InventoryManagement({
   const filteredProducts = useMemo(() => {
     let result = products.filter(p => {
       // 1. Search filter with adjustable modes (All, Name, Barcode/SKU, Category)
-      const q = searchQuery.trim().toLowerCase();
+      const q = searchQuery.trim();
       let matchesSearch = true;
       if (q) {
         if (searchMode === 'all') {
-          matchesSearch = (p.name || '').toLowerCase().includes(q) || 
-                          (p.sku || '').toLowerCase().includes(q) ||
-                          (p.brand && p.brand.toLowerCase().includes(q)) ||
-                          (p.category && p.category.toLowerCase().includes(q));
+          matchesSearch = matchesQuery([p.name, p.sku, p.serialNumber, p.brand, p.category], q);
         } else if (searchMode === 'name') {
-          matchesSearch = (p.name || '').toLowerCase().includes(q);
+          matchesSearch = matchesQuery([p.name], q);
         } else if (searchMode === 'sku') {
-          matchesSearch = (p.sku || '').toLowerCase().includes(q);
+          matchesSearch = matchesQuery([p.sku, p.serialNumber], q);
         } else if (searchMode === 'category') {
-          matchesSearch = (p.category && p.category.toLowerCase().includes(q)) || false;
+          matchesSearch = matchesQuery([p.category], q);
         }
       }
       
@@ -627,20 +641,7 @@ export default function InventoryManagement({
 
   const exportInventoryToPDF = () => {
     try {
-      const iframe = document.createElement('iframe');
-      iframe.style.position = 'absolute';
-      iframe.style.width = '0px';
-      iframe.style.height = '0px';
-      iframe.style.border = 'none';
-      document.body.appendChild(iframe);
-
-      const doc = iframe.contentWindow?.document;
-      if (!doc) {
-        document.body.removeChild(iframe);
-        return;
-      }
       if (filteredProducts.length === 0) {
-        document.body.removeChild(iframe);
         toast.info(isRtl ? 'لا توجد منتجات لتضمينها في التقرير' : 'No products to include in the report');
         return;
       }
@@ -757,17 +758,7 @@ export default function InventoryManagement({
         </html>
       `;
 
-      doc.open();
-      doc.write(reportHtml);
-      doc.close();
-
-      iframe.contentWindow?.focus();
-      setTimeout(() => {
-        iframe.contentWindow?.print();
-        setTimeout(() => {
-          document.body.removeChild(iframe);
-        }, 1000);
-      }, 250);
+      printHtmlDocument(reportHtml);
       
       toast.success(isRtl ? 'تقرير الـ PDF جاهز للطباعة والحفظ! 📄🖨️' : 'PDF stock report prepared for printing or export successfully!');
     } catch (e) {
@@ -811,6 +802,8 @@ export default function InventoryManagement({
       const status: StockStatus = computeStockStatus(quantity, newProduct.lowStockThreshold, lowStockDefault);
 
       const productToSave: Product = {
+        // Keep fields this form does not edit (barcode, images, ...).
+        ...(editingProduct || {}),
         id: editingProduct?.id || crypto.randomUUID(),
         name,
         sku,
@@ -834,7 +827,10 @@ export default function InventoryManagement({
       };
 
       if (editingProduct) {
-        await onUpdateProduct(productToSave, { reason: stockReason || (isRtl ? 'تعديل من نموذج المنتج' : 'Edited from product form') });
+        await onUpdateProduct(productToSave, {
+          reason: stockReason || (isRtl ? 'تعديل من نموذج المنتج' : 'Edited from product form'),
+          baseQuantity: Number(editingProduct.quantity) || 0,
+        });
       } else {
         await onAddProduct(productToSave, { reason: isRtl ? 'رصيد افتتاحي' : 'Opening stock' });
       }
@@ -988,28 +984,16 @@ export default function InventoryManagement({
     }
   };
 
-  const getCurrencySymbolByCode = (code: string) => {
-    switch (code) {
-      case 'JOD': return 'د.أ';
-      case 'USD': return '$';
-      case 'ILS': return '₪';
-      case 'SAR': return 'ر.س';
-      case 'IQD': return 'ع.د';
-      case 'LYD': return 'ل.د';
-      case 'AED': return 'د.إ';
-      case 'EGP': return 'ج.م';
-      default: return code;
-    }
-  };
+  const getCurrencySymbolByCode = (code: string) => CURRENCY_SYMBOLS[code] || code;
 
   // Each product is shown in ITS OWN currency (that is how the POS prices it); never relabelled.
   const formatCurrency = (val: number, currency?: string) =>
     formatMoney(Number(val) || 0, currency || baseCurrency, isRtl ? 'ar' : 'en-US');
 
   const statusStyles = {
-    'In Stock': 'bg-emerald-500/10 border-emerald-500/20 text-emerald-650 dark:text-emerald-400',
-    'Low Stock': 'bg-amber-500/10 border-amber-500/20 text-amber-650 dark:text-amber-400',
-    'Out of Stock': 'bg-rose-500/10 border-rose-500/20 text-rose-650 dark:text-rose-400',
+    'In Stock': 'bg-emerald-500/10 border-emerald-500/20 text-emerald-600 dark:text-emerald-400',
+    'Low Stock': 'bg-amber-500/10 border-amber-500/20 text-amber-600 dark:text-amber-400',
+    'Out of Stock': 'bg-rose-500/10 border-rose-500/20 text-rose-600 dark:text-rose-400',
   };
 
   const statusLabels = {
@@ -1156,7 +1140,7 @@ export default function InventoryManagement({
             <Search size={16} className={`absolute top-1/2 -translate-y-1/2 ${isRtl ? 'right-4' : 'left-4'} text-slate-400`} />
             <input 
               type="text"
-              placeholder={isRtl ? 'ابحث بالاسم، أو الباركود SKU...' : t.searchPlaceholder}
+              placeholder={isRtl ? 'ابحث بالاسم، أو الباركود SKU...' : t.searchPlaceholder} aria-label={isRtl ? 'ابحث بالاسم، أو الباركود SKU...' : t.searchPlaceholder}
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               className={`w-full ${isRtl ? 'pr-11 pl-10' : 'pl-11 pr-10'} py-2.5 bg-slate-100 dark:bg-black/40 border border-slate-200/60 dark:border-white/5 rounded-xl text-sm font-bold dark:text-white outline-none focus:border-cyan-400/60 focus:ring-2 focus:ring-cyan-400/15 transition-all`}
@@ -1166,7 +1150,7 @@ export default function InventoryManagement({
                 type="button"
                 onClick={() => { setSearchQuery(''); sounds.playPop(); }}
                 className={`absolute top-1/2 -translate-y-1/2 ${isRtl ? 'left-3' : 'right-3'} p-1 hover:bg-slate-200/50 dark:hover:bg-white/10 rounded-full text-slate-400 hover:text-rose-500 transition-all cursor-pointer`}
-              >
+               aria-label={isRtl ? 'إغلاق' : 'Close'}>
                 <X size={14} />
               </button>
             )}
@@ -1177,7 +1161,7 @@ export default function InventoryManagement({
             <select
               value={categoryFilter}
               onChange={(e) => setCategoryFilter(e.target.value)}
-              className="w-full py-2.5 px-4 bg-slate-100 dark:bg-black/40 border border-slate-200/60 dark:border-white/5 rounded-xl text-xs font-black text-slate-650 dark:text-slate-350 outline-none cursor-pointer hover:border-cyan-400/35 transition-colors appearance-none"
+              className="w-full py-2.5 px-4 bg-slate-100 dark:bg-black/40 border border-slate-200/60 dark:border-white/5 rounded-xl text-xs font-black text-slate-600 dark:text-slate-300 outline-none cursor-pointer hover:border-cyan-400/35 transition-colors appearance-none"
               style={{ backgroundImage: `url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e")`, backgroundRepeat: 'no-repeat', backgroundPosition: isRtl ? 'left 12px center' : 'right 12px center', backgroundSize: '12px' }}
             >
               <option value="all" className="dark:bg-[#0c1221]">{isRtl ? 'كل التصنيفات' : 'All Categories'}</option>
@@ -1192,7 +1176,7 @@ export default function InventoryManagement({
             <select
               value={stockFilter}
               onChange={(e) => setStockFilter(e.target.value)}
-              className="w-full py-2.5 px-4 bg-slate-100 dark:bg-black/40 border border-slate-200/60 dark:border-white/5 rounded-xl text-xs font-black text-slate-650 dark:text-slate-350 outline-none cursor-pointer hover:border-cyan-400/35 transition-colors appearance-none"
+              className="w-full py-2.5 px-4 bg-slate-100 dark:bg-black/40 border border-slate-200/60 dark:border-white/5 rounded-xl text-xs font-black text-slate-600 dark:text-slate-300 outline-none cursor-pointer hover:border-cyan-400/35 transition-colors appearance-none"
               style={{ backgroundImage: `url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e")`, backgroundRepeat: 'no-repeat', backgroundPosition: isRtl ? 'left 12px center' : 'right 12px center', backgroundSize: '12px' }}
             >
               <option value="all" className="dark:bg-[#0c1221]">{isRtl ? 'حسب الحالة' : 'By Status'}</option>
@@ -1209,9 +1193,9 @@ export default function InventoryManagement({
             className={`px-3.5 py-2.5 rounded-xl border flex items-center justify-center gap-1.5 transition-all text-xs font-black cursor-pointer ${
               showAdvancedFilters 
                 ? 'bg-cyan-500/15 border-cyan-500/40 text-cyan-600 dark:text-cyan-400 font-extrabold' 
-                : 'bg-slate-100 hover:bg-slate-200 dark:bg-white/5 dark:hover:bg-white/10 border-slate-200/60 dark:border-white/5 text-slate-650 dark:text-slate-350'
+                : 'bg-slate-100 hover:bg-slate-200 dark:bg-white/5 dark:hover:bg-white/10 border-slate-200/60 dark:border-white/5 text-slate-600 dark:text-slate-300'
             }`}
-            title={filterT.advancedSettings}
+            title={filterT.advancedSettings} aria-label={filterT.advancedSettings}
           >
             <Filter size={14} className={showAdvancedFilters ? 'animate-pulse' : ''} />
             <span>{isRtl ? 'فلترة متقدمة' : 'Advanced'}</span>
@@ -1229,7 +1213,7 @@ export default function InventoryManagement({
             <button
               type="button"
               onClick={() => { sounds.playClick(); importInputRef.current?.click(); }}
-              title={isRtl ? 'استيراد منتجات من ملف CSV أو Excel (نفس أعمدة ملف التصدير)' : 'Import products from CSV/Excel (same columns as the export)'}
+              title={isRtl ? 'استيراد منتجات من ملف CSV أو Excel (نفس أعمدة ملف التصدير)' : 'Import products from CSV/Excel (same columns as the export)'} aria-label={isRtl ? 'استيراد منتجات من ملف CSV أو Excel (نفس أعمدة ملف التصدير)' : 'Import products from CSV/Excel (same columns as the export)'}
               className="flex-1 md:flex-initial flex items-center justify-center gap-1.5 px-3.5 py-2.5 bg-indigo-600/10 dark:bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border border-indigo-500/20 hover:border-indigo-500/50 rounded-xl text-xs font-black tracking-tight transition-all cursor-pointer"
             >
               <Upload size={14} />
@@ -1238,7 +1222,7 @@ export default function InventoryManagement({
             <button
               type="button"
               onClick={exportInventoryToCSV}
-              title={isRtl ? 'تصدير كميات المخزون لملف Excel/CSV' : 'Export current stock as CSV/Excel'}
+              title={isRtl ? 'تصدير كميات المخزون لملف Excel/CSV' : 'Export current stock as CSV/Excel'} aria-label={isRtl ? 'تصدير كميات المخزون لملف Excel/CSV' : 'Export current stock as CSV/Excel'}
               className="flex-1 md:flex-initial flex items-center justify-center gap-1.5 px-3.5 py-2.5 bg-emerald-600/10 dark:bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 hover:border-emerald-500/50 rounded-xl text-xs font-black tracking-tight transition-all cursor-pointer"
             >
               <Download size={14} />
@@ -1247,7 +1231,7 @@ export default function InventoryManagement({
             <button
               type="button"
               onClick={exportInventoryToPDF}
-              title={isRtl ? 'طباعة وتصدير تقرير الجرد بصيغة PDF' : 'Download compiled audit PDF'}
+              title={isRtl ? 'طباعة وتصدير تقرير الجرد بصيغة PDF' : 'Download compiled audit PDF'} aria-label={isRtl ? 'طباعة وتصدير تقرير الجرد بصيغة PDF' : 'Download compiled audit PDF'}
               className="flex-1 md:flex-initial flex items-center justify-center gap-1.5 px-3.5 py-2.5 bg-cyan-600/10 dark:bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 border border-cyan-500/20 hover:border-cyan-500/50 rounded-xl text-xs font-black tracking-tight transition-all cursor-pointer"
             >
               <FileText size={14} />
@@ -1282,7 +1266,7 @@ export default function InventoryManagement({
                         className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition-all cursor-pointer ${
                           searchMode === mode 
                             ? 'bg-cyan-500/15 border-cyan-500/35 text-cyan-600 dark:text-cyan-400 font-extrabold shadow-inner' 
-                            : 'bg-white dark:bg-white/5 border-slate-200/60 dark:border-white/10 text-slate-655 dark:text-slate-355 hover:bg-slate-50 dark:hover:bg-white/10'
+                            : 'bg-white dark:bg-white/5 border-slate-200/60 dark:border-white/10 text-slate-700 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-white/10'
                         }`}
                       >
                         {mode === 'all' && filterT.allFields}
@@ -1302,7 +1286,7 @@ export default function InventoryManagement({
                   <div className="flex items-center gap-2">
                     <input
                       type="number"
-                      placeholder={filterT.min}
+                      placeholder={filterT.min} aria-label={filterT.min}
                       value={minPrice}
                       onChange={e => setMinPrice(e.target.value === '' ? '' : Number(e.target.value))}
                       className="w-full px-3 py-1.5 bg-white dark:bg-white/5 border border-slate-200/60 dark:border-white/10 rounded-xl text-xs font-bold text-slate-800 dark:text-white outline-none focus:border-cyan-400/40"
@@ -1310,7 +1294,7 @@ export default function InventoryManagement({
                     <span className="text-slate-400 text-xs font-bold leading-none">-</span>
                     <input
                       type="number"
-                      placeholder={filterT.max}
+                      placeholder={filterT.max} aria-label={filterT.max}
                       value={maxPrice}
                       onChange={e => setMaxPrice(e.target.value === '' ? '' : Number(e.target.value))}
                       className="w-full px-3 py-1.5 bg-white dark:bg-white/5 border border-slate-200/60 dark:border-white/10 rounded-xl text-xs font-bold text-slate-800 dark:text-white outline-none focus:border-cyan-400/40"
@@ -1326,7 +1310,7 @@ export default function InventoryManagement({
                   <div className="flex items-center gap-2">
                     <input
                       type="number"
-                      placeholder={filterT.min}
+                      placeholder={filterT.min} aria-label={filterT.min}
                       value={minQty}
                       onChange={e => setMinQty(e.target.value === '' ? '' : Number(e.target.value))}
                       className="w-full px-3 py-1.5 bg-white dark:bg-white/5 border border-slate-200/60 dark:border-white/10 rounded-xl text-xs font-bold text-slate-800 dark:text-white outline-none focus:border-cyan-400/40"
@@ -1334,7 +1318,7 @@ export default function InventoryManagement({
                     <span className="text-slate-400 text-xs font-bold leading-none">-</span>
                     <input
                       type="number"
-                      placeholder={filterT.max}
+                      placeholder={filterT.max} aria-label={filterT.max}
                       value={maxQty}
                       onChange={e => setMaxQty(e.target.value === '' ? '' : Number(e.target.value))}
                       className="w-full px-3 py-1.5 bg-white dark:bg-white/5 border border-slate-200/60 dark:border-white/10 rounded-xl text-xs font-bold text-slate-800 dark:text-white outline-none focus:border-cyan-400/40"
@@ -1523,7 +1507,7 @@ export default function InventoryManagement({
                   <h3 className="font-black text-base text-slate-900 dark:text-white">{isRtl ? 'معاينة الاستيراد' : 'Import preview'}</h3>
                   <p className="text-[11px] text-slate-400 font-mono mt-0.5 truncate max-w-[300px]">{importPlan.fileName}</p>
                 </div>
-                <button type="button" disabled={isImporting} onClick={() => setImportPlan(null)} className="p-1.5 text-slate-400 hover:text-rose-500 cursor-pointer disabled:opacity-40">
+                <button type="button" disabled={isImporting} onClick={() => setImportPlan(null)} className="p-1.5 text-slate-400 hover:text-rose-500 cursor-pointer disabled:opacity-40" aria-label={isRtl ? 'إغلاق' : 'Close'}>
                   <X size={18} />
                 </button>
               </div>
@@ -1624,8 +1608,8 @@ export default function InventoryManagement({
                   <button 
                     type="button"
                     onClick={() => setIsModalOpen(false)}
-                    className="p-1.5 text-slate-450 hover:text-white hover:bg-white/10 rounded-lg transition-colors cursor-pointer"
-                  >
+                    className="p-1.5 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors cursor-pointer"
+                   aria-label={isRtl ? 'إغلاق' : 'Close'}>
                     <X size={20} />
                   </button>
                 </div>
@@ -1643,7 +1627,7 @@ export default function InventoryManagement({
                     type="button"
                     onClick={() => setIsModalOpen(false)} 
                     className="p-2 text-slate-400 hover:text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-500/10 rounded-xl transition-colors cursor-pointer"
-                  >
+                   aria-label={isRtl ? 'إغلاق' : 'Close'}>
                     <X size={18} />
                   </button>
                 </div>
@@ -1679,7 +1663,7 @@ export default function InventoryManagement({
                       maxLength={64}
                       value={newProduct.sku || ''}
                       onChange={e => setNewProduct({...newProduct, sku: e.target.value})}
-                      placeholder={isRtl ? 'قم بمسح الباركود أو إدخاله يدوياً' : 'Scan barcode or enter manually'}
+                      placeholder={isRtl ? 'قم بمسح الباركود أو إدخاله يدوياً' : 'Scan barcode or enter manually'} aria-label={isRtl ? 'قم بمسح الباركود أو إدخاله يدوياً' : 'Scan barcode or enter manually'}
                       className="w-full pl-4 pr-11 py-3 font-mono text-lg bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-xl focus:border-emerald-500 dark:focus:border-emerald-500 outline-none transition-all dark:text-white font-bold"
                     />
                     <svg className={`w-6 h-6 absolute ${isRtl ? 'right-3' : 'left-3'} top-1/2 -translate-y-1/2 text-slate-400`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1717,7 +1701,7 @@ export default function InventoryManagement({
                       maxLength={200}
                       value={newProduct.name || ''}
                       onChange={e => setNewProduct({...newProduct, name: e.target.value})}
-                      placeholder={isRtl ? 'مثال: قهوة اسبريسو 1 كجم' : 'e.g. Espresso Coffee 1kg'}
+                      placeholder={isRtl ? 'مثال: قهوة اسبريسو 1 كجم' : 'e.g. Espresso Coffee 1kg'} aria-label={isRtl ? 'مثال: قهوة اسبريسو 1 كجم' : 'e.g. Espresso Coffee 1kg'}
                       className="w-full px-4 py-3 bg-white dark:bg-white/[0.02] border border-slate-200 dark:border-white/10 rounded-xl focus:border-blue-500 outline-none transition-all dark:text-white font-bold"
                     />
                   </div>
@@ -1727,7 +1711,7 @@ export default function InventoryManagement({
                       type="text" 
                       value={newProduct.brand || ''}
                       onChange={e => setNewProduct({...newProduct, brand: e.target.value})}
-                      placeholder={isRtl ? 'العلامة التجارية (اختياري)...' : 'Brand name (optional)...'}
+                      placeholder={isRtl ? 'العلامة التجارية (اختياري)...' : 'Brand name (optional)...'} aria-label={isRtl ? 'العلامة التجارية (اختياري)...' : 'Brand name (optional)...'}
                       className="w-full px-4 py-3 bg-white dark:bg-white/[0.02] border border-slate-200 dark:border-white/10 rounded-xl focus:border-blue-500 outline-none transition-all dark:text-white font-bold"
                     />
                   </div>
@@ -1743,7 +1727,7 @@ export default function InventoryManagement({
                       list="categories-list"
                       value={newProduct.category || ''}
                       onChange={e => setNewProduct({...newProduct, category: e.target.value})}
-                      placeholder={isRtl ? 'اختر أو اكتب تصنيف...' : 'Select or type...'}
+                      placeholder={isRtl ? 'اختر أو اكتب تصنيف...' : 'Select or type...'} aria-label={isRtl ? 'اختر أو اكتب تصنيف...' : 'Select or type...'}
                       className="w-full px-4 py-3 bg-white dark:bg-white/[0.02] border border-slate-200 dark:border-white/10 rounded-xl focus:border-blue-500 outline-none transition-all dark:text-white font-bold"
                     />
                     <datalist id="categories-list">
@@ -1758,7 +1742,7 @@ export default function InventoryManagement({
                       type="text" 
                       value={newProduct.serialNumber || ''}
                       onChange={e => setNewProduct({...newProduct, serialNumber: e.target.value})}
-                      placeholder={isRtl ? 'الرقم التسلسلي...' : 'Serial number...'}
+                      placeholder={isRtl ? 'الرقم التسلسلي...' : 'Serial number...'} aria-label={isRtl ? 'الرقم التسلسلي...' : 'Serial number...'}
                       className="w-full px-4 py-3 bg-white dark:bg-white/[0.02] border border-slate-200 dark:border-white/10 rounded-xl focus:border-blue-500 outline-none transition-all dark:text-white font-bold"
                     />
                   </div>
@@ -1801,10 +1785,10 @@ export default function InventoryManagement({
                       <input 
                         type="number" 
                         min={0}
-                        placeholder={String(resolveLowStockThreshold(undefined, lowStockDefault))}
+                        placeholder={String(resolveLowStockThreshold(undefined, lowStockDefault))} aria-label={String(resolveLowStockThreshold(undefined, lowStockDefault))}
                         value={newProduct.lowStockThreshold !== undefined ? newProduct.lowStockThreshold : ''}
                         onChange={e => setNewProduct({...newProduct, lowStockThreshold: e.target.value ? Number(e.target.value) : undefined})}
-                        className="w-full px-4 py-3 bg-rose-500/[0.02] dark:bg-rose-500/[0.01] border border-rose-500/10 rounded-xl focus:border-rose-450 focus:ring-1 focus:ring-rose-500/15 outline-none dark:text-white font-bold text-sm"
+                        className="w-full px-4 py-3 bg-rose-500/[0.02] dark:bg-rose-500/[0.01] border border-rose-500/10 rounded-xl focus:border-rose-400 focus:ring-1 focus:ring-rose-500/15 outline-none dark:text-white font-bold text-sm"
                       />
                       <ShieldAlert className={`absolute top-1/2 -translate-y-1/2 ${isRtl ? 'left-4' : 'right-4'} text-rose-400/70`} size={16} />
                     </div>
@@ -1824,7 +1808,7 @@ export default function InventoryManagement({
                       maxLength={300}
                       value={stockReason}
                       onChange={e => setStockReason(e.target.value)}
-                      placeholder={isRtl ? 'مثال: جرد، تالف، هدية، تصحيح خطأ إدخال...' : 'e.g. stocktake, damaged, correction...'}
+                      placeholder={isRtl ? 'مثال: جرد، تالف، هدية، تصحيح خطأ إدخال...' : 'e.g. stocktake, damaged, correction...'} aria-label={isRtl ? 'مثال: جرد، تالف، هدية، تصحيح خطأ إدخال...' : 'e.g. stocktake, damaged, correction...'}
                       className="w-full px-4 py-2.5 bg-white dark:bg-white/[0.02] border border-amber-500/30 rounded-xl outline-none text-sm font-bold dark:text-white"
                     />
                   </div>
@@ -1836,15 +1820,12 @@ export default function InventoryManagement({
                     <label className="text-sm font-bold text-slate-700 dark:text-slate-300">
                       {isRtl ? 'عملة الصنف' : 'Product Currency'}
                     </label>
-                    <select
+                    <CurrencyPicker
                       value={newProduct.currency || settings?.currency || 'JOD'}
-                      onChange={e => setNewProduct({...newProduct, currency: e.target.value})}
-                      className="w-full px-4 py-3 bg-white dark:bg-slate-900/60 border border-slate-200 dark:border-white/10 rounded-xl focus:border-blue-500 outline-none dark:text-white font-bold text-base"
-                    >
-                      {POS_CURRENCY_CODES.map(code => (
-                        <option key={code} value={code}>{code} — {getCurrencySymbolByCode(code)}</option>
-                      ))}
-                    </select>
+                      onChange={(code) => setNewProduct({ ...newProduct, currency: code })}
+                      isRtl={isRtl}
+                      label={isRtl ? 'عملة الصنف' : 'Product currency'}
+                    />
                   </div>
                   <div className="space-y-1.5">
                     <label className="text-sm font-bold text-slate-700 dark:text-slate-300">
@@ -1911,7 +1892,7 @@ export default function InventoryManagement({
                       <input 
                         type="number" 
                         step="0.1" 
-                        placeholder={String(settings?.defaultVatRate ?? 0)}
+                        placeholder={String(settings?.defaultVatRate ?? 0)} aria-label={String(settings?.defaultVatRate ?? 0)}
                         value={newProduct.taxRate !== undefined ? newProduct.taxRate : ''}
                         onChange={e => setNewProduct({...newProduct, taxRate: e.target.value ? Number(e.target.value) : undefined})}
                         className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-white/10 rounded-xl focus:border-blue-500 outline-none font-mono font-bold text-sm dark:text-white"
@@ -2018,7 +1999,7 @@ export default function InventoryManagement({
                             {profitAmount > 0 ? '+' : ''}{roundMoney(profitAmount, newProduct.currency || baseCurrency)} {curSym}
                           </span>
                           {!isZero && (
-                            <span className={`text-xs font-bold font-mono px-2 py-0.5 rounded-md mt-1.5 ${isLoss ? 'bg-rose-100 text-rose-700 dark:bg-rose-500/20 dark:text-rose-400' : 'bg-emerald-100 text-emerald-750 dark:bg-emerald-500/20 dark:text-emerald-400'}`}>
+                            <span className={`text-xs font-bold font-mono px-2 py-0.5 rounded-md mt-1.5 ${isLoss ? 'bg-rose-100 text-rose-700 dark:bg-rose-500/20 dark:text-rose-400' : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-400'}`}>
                               {isRtl ? 'الربح الـهامشي' : 'Margin'}: {profitMargin.toFixed(1)}%
                             </span>
                           )}
@@ -2135,12 +2116,12 @@ export default function InventoryManagement({
                     <h3 className="text-sm font-black uppercase tracking-tight">
                       {isRtl ? `تدقيق ومراجعة: ${logTarget?.name}` : `Audit & Verify: ${logTarget?.name}`}
                     </h3>
-                    <p className="text-[10px] text-slate-450 dark:text-slate-500 font-mono">
+                    <p className="text-[10px] text-slate-400 dark:text-slate-500 font-mono">
                       SKU: {logTarget?.sku} • {isRtl ? 'العملة الإفتراضية' : 'Default Currency'}: {logTarget?.currency || settings?.currency || 'JOD'}
                     </p>
                   </div>
                 </div>
-                <button onClick={() => setIsLogOpen(false)} className="p-2 hover:bg-slate-200 dark:hover:bg-white/5 rounded-xl transition-all cursor-pointer">
+                <button onClick={() => setIsLogOpen(false)} className="p-2 hover:bg-slate-200 dark:hover:bg-white/5 rounded-xl transition-all cursor-pointer" aria-label={isRtl ? 'إغلاق' : 'Close'}>
                   <X size={20} />
                 </button>
               </div>
@@ -2153,7 +2134,7 @@ export default function InventoryManagement({
                   className={`flex-1 py-3 text-xs font-black uppercase tracking-tight flex items-center justify-center gap-2 border-b-2 transition-all cursor-pointer ${
                     activeAuditTab === 'costs'
                       ? 'border-indigo-500 text-indigo-600 dark:text-cyan-400 font-extrabold bg-indigo-500/[0.02]'
-                      : 'border-transparent text-slate-400 hover:text-slate-650 dark:hover:text-slate-200 hover:bg-slate-500/[0.01]'
+                      : 'border-transparent text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-500/[0.01]'
                   }`}
                 >
                   <span>📊</span>
@@ -2165,7 +2146,7 @@ export default function InventoryManagement({
                   className={`flex-1 py-3 text-xs font-black uppercase tracking-tight flex items-center justify-center gap-2 border-b-2 transition-all cursor-pointer ${
                     activeAuditTab === 'movements'
                       ? 'border-indigo-500 text-indigo-600 dark:text-cyan-400 font-extrabold bg-indigo-500/[0.02]'
-                      : 'border-transparent text-slate-400 hover:text-slate-650 dark:hover:text-slate-200 hover:bg-slate-500/[0.01]'
+                      : 'border-transparent text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-500/[0.01]'
                   }`}
                 >
                   <span>🕒</span>
@@ -2203,13 +2184,8 @@ export default function InventoryManagement({
                     const getConvertedPrice = (value: number, from: string, to: string) =>
                       Number(convertMoney(value, from, to, usdRates)) || 0;
 
-                    const costJOD = getConvertedPrice(registeredLanded, baseCurrency, 'JOD');
-                    const costILS = getConvertedPrice(registeredLanded, baseCurrency, 'ILS');
-                    const costUSD = getConvertedPrice(registeredLanded, baseCurrency, 'USD');
-
-                    const saleJOD = getConvertedPrice(consumerPrice, baseCurrency, 'JOD');
-                    const saleILS = getConvertedPrice(consumerPrice, baseCurrency, 'ILS');
-                    const saleUSD = getConvertedPrice(consumerPrice, baseCurrency, 'USD');
+                    const moneyHere = (amount: number, code = baseCurrency) =>
+                      formatMoney(amount, code, isRtl ? 'ar' : 'en-US');
 
                     const showIsEstimatedWarning = rawBase === undefined;
 
@@ -2232,7 +2208,7 @@ export default function InventoryManagement({
                             <div className="flex justify-between items-center py-2">
                               <span className="text-slate-400 font-bold">{isRtl ? 'السعر الأصلي المستورد/الأساسي:' : 'Factory / Original Base Price:'}</span>
                               <span className="font-mono font-extrabold text-slate-800 dark:text-slate-200">
-                                {parsedBase.toFixed(3)} {getCurrencySymbolByCode(baseCurrency)}
+                                {moneyHere(parsedBase)}
                               </span>
                             </div>
 
@@ -2241,28 +2217,28 @@ export default function InventoryManagement({
                                 {isRtl ? `الجمارك والضرائب المتكبدة (${parsedTaxRate}%):` : `Customs & Taxes Spent (${parsedTaxRate}%):`}
                               </span>
                               <span className="font-mono font-extrabold text-slate-800 dark:text-slate-200">
-                                + {parsedTaxAmount.toFixed(3)} {getCurrencySymbolByCode(baseCurrency)}
+                                + {moneyHere(parsedTaxAmount)}
                               </span>
                             </div>
 
                             <div className="flex justify-between items-center py-2.5">
                               <span className="text-slate-400 font-bold">{isRtl ? 'تكاليف إضافية (شحن ولوجستيات):' : 'Additional Overheads (Logistics/Shipping):'}</span>
                               <span className="font-mono font-extrabold text-slate-800 dark:text-slate-200">
-                                + {parsedOverhead.toFixed(3)} {getCurrencySymbolByCode(baseCurrency)}
+                                + {moneyHere(parsedOverhead)}
                               </span>
                             </div>
 
-                            <div className="flex justify-between items-center py-3 bg-indigo-500/[0.02] dark:bg-indigo-550/[0.01] px-2 rounded-xl border border-indigo-500/10">
+                            <div className="flex justify-between items-center py-3 bg-indigo-500/[0.02] dark:bg-indigo-500/[0.01] px-2 rounded-xl border border-indigo-500/10">
                               <span className="text-indigo-600 dark:text-cyan-400 font-black">{isRtl ? 'تكلفة التخزين / سعر الشراء النهائي:' : 'Registered Landed Unit Cost:'}</span>
                               <span className="font-mono font-black text-indigo-600 dark:text-cyan-400 text-sm">
-                                {registeredLanded.toFixed(3)} {getCurrencySymbolByCode(baseCurrency)}
+                                {moneyHere(registeredLanded)}
                               </span>
                             </div>
 
                             <div className="flex justify-between items-center py-3">
                               <span className="text-slate-700 dark:text-slate-300 font-black">{isRtl ? 'سعر البيع المعروض للمستهلك:' : 'Consumer Selling Price:'}</span>
                               <span className="font-mono font-black text-emerald-500 text-sm">
-                                {consumerPrice.toFixed(3)} {getCurrencySymbolByCode(baseCurrency)}
+                                {moneyHere(consumerPrice)}
                               </span>
                             </div>
                           </div>
@@ -2284,7 +2260,7 @@ export default function InventoryManagement({
                           </div>
                           <div className="text-left">
                             <span className="text-lg font-mono font-black block">
-                              {isProfitLoss ? '' : '+'}{profitMargin.toFixed(2)} {getCurrencySymbolByCode(baseCurrency)}
+                              {isProfitLoss ? '' : '+'}{moneyHere(profitMargin)}
                             </span>
                             <span className="text-[10px] font-bold block">
                               ({profitPercentage.toFixed(1)}%) {isRtl ? 'هامش ربح' : 'Margin markup'}
@@ -2310,26 +2286,18 @@ export default function InventoryManagement({
 
                         {/* Live POS Conversion Matrix */}
                         <div className="space-y-2">
-                          <span className="text-xs font-black uppercase text-slate-450 dark:text-slate-400 block px-1">
+                          <span className="text-xs font-black uppercase text-slate-400 dark:text-slate-400 block px-1">
                             🌐 {isRtl ? 'محاكاة الأسعار عبر العملات المختلفة في نقاط البيع' : 'Live POS Currency Simulation Matrix'}
                           </span>
 
-                          <div className="grid grid-cols-3 gap-3">
-                            <div className="p-3 bg-slate-50 dark:bg-black/20 rounded-xl border border-slate-200/50 dark:border-white/5 text-center">
-                              <span className="text-[10px] text-slate-400 font-bold block">🇯🇴 JOD (الأردني)</span>
-                              <p className="font-mono font-black text-xs text-slate-800 dark:text-slate-200 mt-1">{costJOD.toFixed(2)} د.أ</p>
-                              <p className="font-mono text-[9px] text-emerald-500 font-black mt-0.5">{saleJOD.toFixed(2)} د.أ</p>
-                            </div>
-                            <div className="p-3 bg-indigo-500/5 rounded-xl border border-indigo-500/15 text-center">
-                              <span className="text-[10px] text-indigo-400 font-bold block">🇮🇱 ILS (الشيكل)</span>
-                              <p className="font-mono font-black text-xs text-indigo-500 dark:text-cyan-400 mt-1">{costILS.toFixed(2)} ₪</p>
-                              <p className="font-mono text-[9px] text-emerald-500 font-black mt-0.5">{saleILS.toFixed(2)} ₪</p>
-                            </div>
-                            <div className="p-3 bg-slate-50 dark:bg-black/20 rounded-xl border border-slate-200/50 dark:border-white/5 text-center">
-                              <span className="text-[10px] text-slate-400 font-bold block">🇺🇸 USD (الدولار)</span>
-                              <p className="font-mono font-black text-xs text-slate-800 dark:text-slate-200 mt-1">{costUSD.toFixed(2)} $</p>
-                              <p className="font-mono text-[9px] text-emerald-500 font-black mt-0.5">{saleUSD.toFixed(2)} $</p>
-                            </div>
+                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                            {POS_CURRENCY_CODES.map((code) => (
+                              <div key={code} className="p-3 bg-slate-50 dark:bg-black/20 rounded-xl border border-slate-200/50 dark:border-white/5 text-center">
+                                <span className="text-[10px] text-slate-400 font-bold block font-mono">{code}</span>
+                                <p className="font-mono font-black text-xs text-slate-800 dark:text-slate-200 mt-1">{moneyHere(getConvertedPrice(registeredLanded, baseCurrency, code), code)}</p>
+                                <p className="font-mono text-[9px] text-emerald-500 font-black mt-0.5">{moneyHere(getConvertedPrice(consumerPrice, baseCurrency, code), code)}</p>
+                              </div>
+                            ))}
                           </div>
                           <span className="text-[9px] text-slate-400 font-bold text-center block mt-1">
                             {isRtl ? '* السطر الأول: تكلفة الشراء • السطر الثاني: سعر البيع النهائي للمستهلك.' : '* First row is the cost price, second row is the final selling price.'}
@@ -2368,7 +2336,7 @@ export default function InventoryManagement({
                               </p>
                             )}
                             <p className="text-[10px] text-slate-400 mt-2 flex items-center gap-1 font-bold">
-                              <Tag size={10} /> {t.user}: <span className="font-bold text-slate-600 dark:text-slate-350">{log.userName}</span>
+                              <Tag size={10} /> {t.user}: <span className="font-bold text-slate-600 dark:text-slate-300">{log.userName}</span>
                             </p>
                           </div>
                         </div>

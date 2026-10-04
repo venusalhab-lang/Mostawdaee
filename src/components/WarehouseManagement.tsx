@@ -20,6 +20,9 @@ import { motion, AnimatePresence } from 'motion/react';
 import { useFirebase } from './FirebaseProvider';
 import { TactileButton } from './ui/TactileButton';
 import { toast } from 'sonner';
+import { matchesQuery } from '../lib/search';
+import { stockValueByCurrency } from '../lib/profits';
+import { formatCurrencyTotals } from '../lib/invoiceDocument';
 
 interface Props {
   language: Language;
@@ -33,7 +36,8 @@ export default function WarehouseManagement({ language, settings }: Props) {
     products = [], 
     saveWarehouse, 
     deleteWarehouse,
-    saveProduct 
+    saveProduct,
+    transferStock,
   } = useFirebase();
 
   // Dialog and Form State
@@ -57,18 +61,6 @@ export default function WarehouseManagement({ language, settings }: Props) {
   const [transferQty, setTransferQty] = useState<number>(0);
   const [transferFromWarehouseId, setTransferFromWarehouseId] = useState('');
   const [transferToWarehouseId, setTransferToWarehouseId] = useState('');
-
-  // Arabic Text Normalizer
-  function normalizeText(text: string): string {
-    if (!text) return '';
-    return text
-      .toLowerCase()
-      .trim()
-      .replace(/[أإآا]/g, 'ا')
-      .replace(/ة/g, 'ه')
-      .replace(/ى/g, 'ي')
-      .replace(/[َُِّّْ]/g, '');
-  }
 
   // Bilingual translation map
   const t = {
@@ -135,7 +127,7 @@ export default function WarehouseManagement({ language, settings }: Props) {
       return;
     }
 
-    const id = editingWarehouse ? editingWarehouse.id : `WH_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
+    const id = editingWarehouse ? editingWarehouse.id : `WH_${crypto.randomUUID()}`;
     const newWarehouse: Warehouse = {
       id,
       name: formData.name.trim(),
@@ -221,54 +213,14 @@ export default function WarehouseManagement({ language, settings }: Props) {
     }
 
     try {
-      // Since a product is a simple entity assigning its warehouseId,
-      // moving a portion splits the product or completely re-assigns its warehouse.
-      // If moving all quantity, we can simply re-assign warehouseId.
-      // If moving a part, we can adjust the source product's quantity, and create/update
-      // a product duplicate marked for the new warehouse. This is realistic!
-      const remainingQty = targetProduct.quantity - transferQty;
-      
-      // Update original product quantity
-      if (remainingQty === 0) {
-        // Just change the warehouse destination for the product
-        await saveProduct({
-          ...targetProduct,
-          warehouseId: transferToWarehouseId
-        });
-      } else {
-        // Adjust original item down
-        await saveProduct({
-          ...targetProduct,
-          quantity: remainingQty
-        });
-
-        // Add or merge into the destination warehouse
-        const matchingDupe = products.find(p => p.sku === targetProduct.sku && p.warehouseId === transferToWarehouseId);
-        if (matchingDupe) {
-          await saveProduct({
-            ...matchingDupe,
-            quantity: matchingDupe.quantity + transferQty
-          });
-        } else {
-          // Create new split item record
-          const splitId = `PROD_SPLIT_${Date.now()}_${Math.floor(100 + Math.random() * 900)}`;
-          await saveProduct({
-            ...targetProduct,
-            id: splitId,
-            quantity: transferQty,
-            warehouseId: transferToWarehouseId,
-            dateAdded: Date.now()
-          });
-        }
-      }
-
+      await transferStock(targetProduct.id, transferToWarehouseId, transferQty);
       toast.success(t.transferSuccess);
       setIsTransferModalOpen(false);
       setTransferProductId('');
       setTransferQty(0);
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
-      toast.error(isRtl ? 'حدث خطأ غير متوقع أثناء نقل المخزون' : 'Internal error executing stock split');
+      toast.error(err?.message || (isRtl ? 'تعذّر نقل المخزون' : 'Could not transfer stock'));
     }
   };
 
@@ -277,7 +229,7 @@ export default function WarehouseManagement({ language, settings }: Props) {
     const attachedProds = products.filter(p => p.warehouseId === warehouseId);
     const uniqueItemsCount = attachedProds.length;
     const totalCount = attachedProds.reduce((sum, p) => sum + p.quantity, 0);
-    const estimatedValue = attachedProds.reduce((sum, p) => sum + (p.quantity * p.unitCost), 0);
+    const estimatedValue = stockValueByCurrency(attachedProds, settings.currency || 'JOD');
 
     return {
       uniqueItemsCount,
@@ -288,13 +240,12 @@ export default function WarehouseManagement({ language, settings }: Props) {
 
   // Normalized search filtration
   const filteredWarehouses = warehouses.filter(wh => {
-    const term = normalizeText(searchQuery);
-    const matchesQuery = normalizeText(wh.name).includes(term) || normalizeText(wh.location || '').includes(term);
-    
+    const matchesSearch = matchesQuery([wh.name, wh.location], searchQuery);
+
     const isMain = !wh.parentId;
-    if (typeFilter === 'MAIN') return matchesQuery && isMain;
-    if (typeFilter === 'SUB') return matchesQuery && !isMain;
-    return matchesQuery;
+    if (typeFilter === 'MAIN') return matchesSearch && isMain;
+    if (typeFilter === 'SUB') return matchesSearch && !isMain;
+    return matchesSearch;
   });
 
   // Top level Main Warehouses listing for hierarchy drawing
@@ -306,7 +257,7 @@ export default function WarehouseManagement({ language, settings }: Props) {
   return (
     <div className="space-y-8 animate-fade-in">
       {/* Header section with sleek bento layout dashboard styling */}
-      <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 bg-gradient-to-br from-indigo-500/5 via-indigo-500/0 to-transparent p-6 rounded-[2.5rem] border border-slate-200/40 dark:border-slate-800/40 dark:from-slate-8 w-full">
+      <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 bg-gradient-to-br from-indigo-500/5 via-indigo-500/0 to-transparent p-6 rounded-[2.5rem] border border-slate-200/40 dark:border-slate-800/40 w-full">
         <div>
           <div className="flex items-center gap-3">
             <div className="p-3 bg-indigo-50 dark:bg-indigo-950/40 rounded-2xl text-indigo-600 dark:text-indigo-400">
@@ -379,7 +330,7 @@ export default function WarehouseManagement({ language, settings }: Props) {
           <Search className="absolute right-3.5 top-3.5 h-4 w-4 text-slate-400" />
           <input 
             type="text" 
-            placeholder={t.searchPlaceholder}
+            placeholder={t.searchPlaceholder} aria-label={t.searchPlaceholder}
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             className="w-full bg-slate-50 dark:bg-slate-800/40 hover:bg-slate-100/50 dark:hover:bg-slate-800/60 transition focus:bg-white dark:focus:bg-slate-950 outline-none border border-slate-200/30 dark:border-slate-700/30 focus:border-indigo-500 rounded-2xl py-2.5 pr-10 pl-4 text-sm font-medium"
@@ -444,13 +395,13 @@ export default function WarehouseManagement({ language, settings }: Props) {
                       <button
                         onClick={() => handleOpenModal(wh)}
                         className="p-2 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl text-slate-500 hover:text-indigo-600 dark:text-slate-400 transition"
-                      >
+                       aria-label={isRtl ? 'تعديل' : 'Edit'}>
                         <Edit2 size={15} />
                       </button>
                       <button
                         onClick={() => handleDelete(wh.id)}
                         className="p-2 hover:bg-red-50 dark:hover:bg-red-950/30 rounded-xl text-slate-400 hover:text-red-600 transition"
-                      >
+                       aria-label={isRtl ? 'حذف' : 'Delete'}>
                         <Trash2 size={15} />
                       </button>
                     </div>
@@ -483,7 +434,7 @@ export default function WarehouseManagement({ language, settings }: Props) {
                     <div className="space-y-0.5 text-center">
                       <Coins className="h-4 w-4 text-slate-400 mx-auto" />
                       <div className="text-xs font-bold text-slate-900 dark:text-white mt-1">
-                        {stats.estimatedValue.toLocaleString()} {settings.currency || 'ILS'}
+                        {formatCurrencyTotals(stats.estimatedValue, '—')}
                       </div>
                       <div className="text-[9px] font-medium text-slate-400">{isRtl ? 'ملخص القيمة' : 'stored valuation'}</div>
                     </div>
@@ -529,7 +480,7 @@ export default function WarehouseManagement({ language, settings }: Props) {
                 <button 
                   onClick={() => setIsModalOpen(false)}
                   className="p-2 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-400 hover:text-slate-600 rounded-full transition"
-                >
+                 aria-label={isRtl ? 'إغلاق' : 'Close'}>
                   <X size={18} />
                 </button>
               </div>
@@ -544,7 +495,7 @@ export default function WarehouseManagement({ language, settings }: Props) {
                     required
                     value={formData.name || ''}
                     onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                    placeholder={isRtl ? 'أدخل اسم المستودع (مثال: مخزن رقم 1)' : 'e.g. Primary Storage Depot'}
+                    placeholder={isRtl ? 'أدخل اسم المستودع (مثال: مخزن رقم 1)' : 'e.g. Primary Storage Depot'} aria-label={isRtl ? 'أدخل اسم المستودع (مثال: مخزن رقم 1)' : 'e.g. Primary Storage Depot'}
                     className="w-full bg-slate-50 dark:bg-slate-800/50 hover:bg-slate-100/60 dark:hover:bg-slate-800/70 border border-slate-200/50 dark:border-slate-700/50 focus:border-indigo-500 focus:bg-white dark:focus:bg-slate-950 outline-none rounded-2xl px-4 py-3 placeholder:text-slate-400 dark:placeholder:text-slate-500 transition font-bold"
                   />
                 </div>
@@ -557,7 +508,7 @@ export default function WarehouseManagement({ language, settings }: Props) {
                     type="text"
                     value={formData.location || ''}
                     onChange={(e) => setFormData({ ...formData, location: e.target.value })}
-                    placeholder={isRtl ? 'المنطقة الصناعية، نابلس' : 'e.g. Industrial District, Zone 7'}
+                    placeholder={isRtl ? 'المنطقة الصناعية، نابلس' : 'e.g. Industrial District, Zone 7'} aria-label={isRtl ? 'المنطقة الصناعية، نابلس' : 'e.g. Industrial District, Zone 7'}
                     className="w-full bg-slate-50 dark:bg-slate-800/50 hover:bg-slate-100/60 dark:hover:bg-slate-800/70 border border-slate-200/50 dark:border-slate-700/50 focus:border-indigo-500 focus:bg-white dark:focus:bg-slate-950 outline-none rounded-2xl px-4 py-3 placeholder:text-slate-400 dark:placeholder:text-slate-500 transition font-medium"
                   />
                 </div>
@@ -675,7 +626,7 @@ export default function WarehouseManagement({ language, settings }: Props) {
                 <button 
                   onClick={() => setIsTransferModalOpen(false)}
                   className="p-2 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-400 hover:text-slate-600 rounded-full transition"
-                >
+                 aria-label={isRtl ? 'إغلاق' : 'Close'}>
                   <X size={18} />
                 </button>
               </div>
@@ -775,7 +726,7 @@ export default function WarehouseManagement({ language, settings }: Props) {
                     value={transferQty || ''}
                     name="qty"
                     onChange={(e) => setTransferQty(parseInt(e.target.value) || 0)}
-                    placeholder="e.g. 100"
+                    placeholder="e.g. 100" aria-label="e.g. 100"
                     className="w-full bg-slate-50 dark:bg-slate-800/50 border border-slate-200/50 dark:border-slate-700/50 focus:border-indigo-500 focus:bg-white dark:focus:bg-slate-950 outline-none rounded-2xl px-4 py-3 placeholder:text-slate-400 dark:placeholder:text-slate-500 transition font-bold"
                   />
                 </div>

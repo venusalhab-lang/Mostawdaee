@@ -1,686 +1,565 @@
-import React, { useState, useRef, useEffect } from 'react';
-import { Sparkles, Send, User, MessageSquare, Loader2, HelpCircle, X } from 'lucide-react';
-import { Language, Product, AppSettings, Customer, CustomerTransaction, Invoice } from '../types';
-import { useFirebase } from './FirebaseProvider';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Send, User, Loader2, X, Trash2, Check, AlertTriangle, MessageSquare } from 'lucide-react';
 import { motion } from 'motion/react';
-import { toast } from 'sonner';
+import { Language, Product, AppSettings, Customer, Currency } from '../types';
+import { useFirebase } from './FirebaseProvider';
 import { computeStockStatus } from '../lib/stock';
-import { readVaultBalances } from '../lib/vaultMath';
-import { POS_CURRENCY_CODES } from '../lib/exchangeRates';
 import { apiUrl } from '../lib/apiBase';
 import { authHeaders } from '../lib/apiAuth';
+import { CURRENCY_SYMBOLS } from '../lib/exchangeRates';
+import { digitsOnly } from '../lib/search';
+import { ASSISTANT_CURRENCIES, ASSISTANT_LIMITS, type AssistantAction } from '../lib/assistantContext';
+import { answerLocally, buildAssistantContext, type AssistantData } from '../lib/assistantLocal';
 
 interface Props {
   language: Language;
   products: Product[];
   settings: AppSettings | null;
   verbosity?: 'concise' | 'detailed';
-  onAddProduct?: (product: Product) => Promise<void>;
+  onAddProduct?: (product: Product, options?: { reason?: string }) => Promise<void>;
   onDeleteProduct?: (id: string) => Promise<void>;
-  onAddInvoice?: (invoice: Invoice) => Promise<void>;
   onAddCustomer?: (customer: Customer) => Promise<void>;
   onClose?: () => void;
 }
 
+type ActionState = 'pending' | 'done' | 'cancelled';
+
 interface Message {
+  id: string;
   role: 'user' | 'assistant';
   content: string;
+  source?: 'ai' | 'local';
+  notice?: string;
+  action?: AssistantAction;
+  actionState?: ActionState;
+  actionResult?: string;
 }
 
-// Custom inline Markdown/Markdown list parser for AI responses to convert raw markdown to elegant tags
-function parseCustomMessage(rawText: string) {
-  const lines = rawText.split('\n');
-  return lines.map((line, idx) => {
-    if (!line.trim()) {
-      return <div key={idx} className="h-2.5" />;
-    }
+type AiStatus = 'checking' | 'configured' | 'missing';
 
-    const isBullet = line.trim().startsWith('-') || line.trim().startsWith('*');
-    let lineContent = line.trim();
-    if (isBullet) {
-      lineContent = lineContent.replace(/^[\s-*]+/, '');
-    }
+const HISTORY_LIMIT = 40;
+const REQUEST_TIMEOUT_MS = 30_000;
+const LEGACY_CHAT_KEY = 'mostawdae_ai_chat';
+const chatKey = (owner: string) => `mostawdaee:ai_chat:${owner}`;
 
-    const parts = lineContent.split(/(\*\*[^*]+\*\*)/g);
-    const parsedLine = parts.map((part, pIdx) => {
-      if (part.startsWith('**') && part.endsWith('**')) {
-        const cleanText = part.slice(2, -2);
-        return (
-          <strong 
-            key={pIdx} 
-            className="font-black text-cyan-400 bg-cyan-950/40 px-1.5 py-0.5 rounded border border-cyan-900/40 font-mono text-xs md:text-sm inline-block"
-          >
-            {cleanText}
-          </strong>
-        );
-      }
-      return <span key={pIdx}>{part}</span>;
-    });
+function loadChat(owner: string): Message[] {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(chatKey(owner)) || '[]');
+    return Array.isArray(saved) ? saved.filter((m) => m && typeof m.content === 'string' && m.id) : [];
+  } catch {
+    return [];
+  }
+}
 
-    if (isBullet) {
-      return (
-        <div 
-          key={idx} 
-          className="flex items-start gap-2.5 my-2 pl-1 pr-1 transition-all duration-200 animate-fade-in"
-        >
-          <div className="w-2 h-2 rounded-full bg-cyan-500 mt-2 flex-shrink-0 shadow-sm shadow-cyan-500/50" />
-          <div className="text-slate-100 leading-relaxed text-sm md:text-base flex-1">
-            {parsedLine}
-          </div>
-        </div>
-      );
-    }
+const NOTICES: Record<string, [string, string]> = {
+  ai_not_configured: ['المساعد الذكي غير مفعّل على الخادم.', 'The smart assistant is not enabled on the server.'],
+  sign_in_required: ['سجّل الدخول لاستخدام المساعد الذكي.', 'Sign in to use the smart assistant.'],
+  subscription_required: ['المساعد الذكي يتطلب اشتراكاً فعّالاً.', 'The smart assistant needs an active subscription.'],
+  subscription_check_unavailable: ['تعذّر التحقق من الاشتراك على الخادم.', 'The server could not check the subscription.'],
+  rate_limited: ['طلبات كثيرة، انتظر دقيقة ثم أعد المحاولة.', 'Too many requests, wait a minute.'],
+  unavailable: ['تعذّر الوصول إلى المساعد الذكي.', 'Could not reach the smart assistant.'],
+};
 
-    return (
-      <p key={idx} className="text-slate-200 leading-relaxed text-sm md:text-base my-1">
-        {parsedLine}
-      </p>
-    );
+function renderInline(line: string): React.ReactNode[] {
+  return line.split(/(\*\*[^*]+\*\*|`[^`]+`|\*[^*\s][^*]*\*)/g).filter(Boolean).map((part, i) => {
+    if (part.startsWith('**') && part.endsWith('**')) return <strong key={i} className="font-bold text-white">{part.slice(2, -2)}</strong>;
+    if (part.startsWith('`') && part.endsWith('`')) return <code key={i} className="font-mono text-cyan-300 text-[0.85em]">{part.slice(1, -1)}</code>;
+    if (part.length > 2 && part.startsWith('*') && part.endsWith('*')) return <em key={i}>{part.slice(1, -1)}</em>;
+    return <span key={i}>{part}</span>;
   });
 }
 
-// Word-by-word typewriter reveal animation to simulate live thinking (speed-optimized)
-function TypingText({ text, onComplete }: { text: string; onComplete?: () => void }) {
-  const [displayedText, setDisplayedText] = useState('');
+function MessageBody({ text }: { text: string }) {
+  return (
+    <>
+      {text.split('\n').map((raw, idx) => {
+        const line = raw.trim();
+        if (!line) return <div key={idx} className="h-2" />;
+        const bullet = line.match(/^(?:[-*•]|\d+[.)])\s+(.*)$/);
+        if (bullet) {
+          return (
+            <div key={idx} className="flex items-start gap-2 my-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 mt-2 shrink-0" />
+              <div className="leading-relaxed flex-1">{renderInline(bullet[1])}</div>
+            </div>
+          );
+        }
+        return <p key={idx} className="leading-relaxed my-0.5">{renderInline(line)}</p>;
+      })}
+    </>
+  );
+}
 
+function TypingText({ text, onDone }: { text: string; onDone: () => void }) {
+  const [shown, setShown] = useState('');
   useEffect(() => {
-    if (!text) return;
     const words = text.split(/(\s+)/);
+    const step = words.length > 200 ? 6 : words.length > 80 ? 4 : 2;
     let index = 0;
-    setDisplayedText('');
-
-    const totalWords = words.length;
-    let delay = 15;
-    let wordsPerTick = 2; // Default 2 words at a time for high responsiveness
-
-    if (totalWords > 100) {
-      delay = 10;
-      wordsPerTick = 3;
-    }
-    if (totalWords > 200) {
-      delay = 5;
-      wordsPerTick = 5;
-    }
-
-    const interval = setInterval(() => {
-      if (index < words.length) {
-        setDisplayedText(prev => {
-          let next = prev;
-          for (let i = 0; i < wordsPerTick; i++) {
-            if (index + i < words.length) {
-              next += words[index + i];
-            }
-          }
-          return next;
-        });
-        index += wordsPerTick;
-      } else {
-        clearInterval(interval);
-        onComplete?.();
+    setShown('');
+    const timer = setInterval(() => {
+      index += step;
+      setShown(words.slice(0, index).join(''));
+      if (index >= words.length) {
+        clearInterval(timer);
+        onDone();
       }
-    }, delay);
-
-    return () => clearInterval(interval);
+    }, 16);
+    return () => clearInterval(timer);
   }, [text]);
+  return <MessageBody text={shown} />;
+}
+
+const fieldClass = 'w-full !p-2 !text-xs !rounded-lg font-semibold';
+const labelClass = 'text-[10px] font-bold text-teal-300/80 mb-1 block';
+
+function AddProductCard({ action, isRtl, products, defaultCurrency, onConfirm }: {
+  action: Extract<AssistantAction, { type: 'add_product' }>;
+  isRtl: boolean;
+  products: Product[];
+  defaultCurrency: Currency;
+  onConfirm: (draft: { name: string; sku: string; quantity: number; unitCost: number; sellingPrice: number; currency: Currency }) => Promise<void>;
+}) {
+  const p = action.product;
+  const [name, setName] = useState(p.name);
+  const [sku, setSku] = useState(p.sku || '');
+  const [quantity, setQuantity] = useState(p.quantity !== undefined ? String(p.quantity) : '');
+  const [unitCost, setUnitCost] = useState(p.unitCost !== undefined ? String(p.unitCost) : '');
+  const [sellingPrice, setSellingPrice] = useState(p.sellingPrice !== undefined ? String(p.sellingPrice) : '');
+  const [currency, setCurrency] = useState<Currency>(defaultCurrency);
+  const [error, setError] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const submit = async () => {
+    const t = (ar: string, en: string) => (isRtl ? ar : en);
+    const cleanName = name.trim();
+    const cleanSku = sku.trim();
+    if (!cleanName || !cleanSku) return setError(t('الاسم والباركود مطلوبان.', 'Name and barcode are required.'));
+    if (cleanName.length > 200 || cleanSku.length > 64) return setError(t('الاسم أو الباركود طويل جداً.', 'Name or barcode is too long.'));
+    if ([quantity, unitCost, sellingPrice].some((v) => v.trim() === '')) {
+      return setError(t('حدد الكمية والتكلفة وسعر البيع (اكتب 0 إن لم يوجد).', 'Enter quantity, cost and price (0 if none).'));
+    }
+    const numbers = [quantity, unitCost, sellingPrice].map(Number);
+    if (!numbers.every((n) => Number.isFinite(n) && n >= 0)) return setError(t('القيم يجب أن تكون أرقاماً غير سالبة.', 'Values must be non-negative numbers.'));
+    const duplicate = products.find((x) => (x.sku || '').trim().toLowerCase() === cleanSku.toLowerCase());
+    if (duplicate) return setError(t(`الباركود مستخدم للصنف: ${duplicate.name}`, `Barcode already used by: ${duplicate.name}`));
+    setError('');
+    setSaving(true);
+    try {
+      await onConfirm({ name: cleanName, sku: cleanSku, quantity: numbers[0], unitCost: numbers[1], sellingPrice: numbers[2], currency });
+    } catch (e) {
+      setError(t('تعذّر الحفظ. حاول مرة أخرى.', 'Could not save. Try again.'));
+    } finally {
+      setSaving(false);
+    }
+  };
 
   return (
-    <div className="transition-opacity duration-300">
-      {parseCustomMessage(displayedText)}
+    <CardShell title={isRtl ? 'إضافة صنف — راجع البيانات ثم أكّد' : 'Add product — review, then confirm'} error={error}
+      confirmLabel={isRtl ? 'إضافة الصنف' : 'Add product'} saving={saving} onConfirm={submit}>
+      <div className="grid grid-cols-2 gap-2">
+        <label className="col-span-2"><span className={labelClass}>{isRtl ? 'الاسم' : 'Name'}</span>
+          <input className={fieldClass} value={name} onChange={(e) => setName(e.target.value)} /></label>
+        <label className="col-span-2"><span className={labelClass}>{isRtl ? 'الباركود / SKU' : 'Barcode / SKU'}</span>
+          <input className={fieldClass} value={sku} onChange={(e) => setSku(e.target.value)} dir="ltr" /></label>
+        <label><span className={labelClass}>{isRtl ? 'الكمية' : 'Quantity'}</span>
+          <input className={fieldClass} inputMode="decimal" value={quantity} onChange={(e) => setQuantity(e.target.value)} dir="ltr" /></label>
+        <label><span className={labelClass}>{isRtl ? 'العملة' : 'Currency'}</span>
+          <select className={fieldClass} value={currency} onChange={(e) => setCurrency(e.target.value as Currency)}>
+            {ASSISTANT_CURRENCIES.map((c) => <option key={c} value={c}>{c} ({CURRENCY_SYMBOLS[c]})</option>)}
+          </select></label>
+        <label><span className={labelClass}>{isRtl ? 'تكلفة الوحدة' : 'Unit cost'}</span>
+          <input className={fieldClass} inputMode="decimal" value={unitCost} onChange={(e) => setUnitCost(e.target.value)} dir="ltr" /></label>
+        <label><span className={labelClass}>{isRtl ? 'سعر البيع' : 'Selling price'}</span>
+          <input className={fieldClass} inputMode="decimal" value={sellingPrice} onChange={(e) => setSellingPrice(e.target.value)} dir="ltr" /></label>
+      </div>
+    </CardShell>
+  );
+}
+
+function DeleteProductCard({ product, isRtl, onConfirm }: { product: Product | undefined; isRtl: boolean; onConfirm: () => Promise<void> }) {
+  const [error, setError] = useState('');
+  const [saving, setSaving] = useState(false);
+  if (!product) {
+    return <CardShell title={isRtl ? 'حذف صنف' : 'Delete product'} error={isRtl ? 'هذا الصنف لم يعد موجوداً.' : 'This product no longer exists.'} />;
+  }
+  const submit = async () => {
+    setSaving(true);
+    try {
+      await onConfirm();
+    } catch {
+      setError(isRtl ? 'تعذّر الحذف. حاول مرة أخرى.' : 'Could not delete. Try again.');
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <CardShell title={isRtl ? 'حذف صنف — هذا الإجراء لا يمكن التراجع عنه' : 'Delete product — this cannot be undone'} error={error}
+      confirmLabel={isRtl ? 'حذف الصنف' : 'Delete product'} danger saving={saving} onConfirm={submit}>
+      <div className="text-sm text-white font-bold">{product.name}</div>
+      <div className="text-xs text-slate-400 font-mono" dir="ltr">{product.sku}</div>
+      {product.quantity > 0 && (
+        <div className="mt-2 text-xs text-amber-300 flex items-start gap-1.5">
+          <AlertTriangle size={14} className="shrink-0 mt-0.5" />
+          {isRtl ? `في المخزون ${product.quantity} وحدة من هذا الصنف.` : `${product.quantity} units of this product are in stock.`}
+        </div>
+      )}
+    </CardShell>
+  );
+}
+
+function AddCustomerCard({ action, isRtl, customers, defaultCurrency, signedIn, onConfirm }: {
+  action: Extract<AssistantAction, { type: 'add_customer' }>;
+  isRtl: boolean;
+  customers: Customer[];
+  defaultCurrency: Currency;
+  signedIn: boolean;
+  onConfirm: (draft: { name: string; phone: string; currency: Currency }) => Promise<void>;
+}) {
+  const [name, setName] = useState(action.customer.name);
+  const [phone, setPhone] = useState(action.customer.phone || '');
+  const [currency, setCurrency] = useState<Currency>(action.customer.currency || defaultCurrency);
+  const [error, setError] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const submit = async () => {
+    const t = (ar: string, en: string) => (isRtl ? ar : en);
+    if (!name.trim() || !phone.trim()) return setError(t('الاسم ورقم الهاتف مطلوبان.', 'Name and phone are required.'));
+    const digits = digitsOnly(phone);
+    const duplicate = digits && customers.find((c) => digitsOnly(c.phone) === digits);
+    if (duplicate) return setError(t(`الرقم مسجل للزبون: ${duplicate.name}`, `Phone already belongs to: ${duplicate.name}`));
+    setError('');
+    setSaving(true);
+    try {
+      await onConfirm({ name: name.trim(), phone: phone.trim(), currency });
+    } catch {
+      setError(t('تعذّر الحفظ. حاول مرة أخرى.', 'Could not save. Try again.'));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <CardShell title={isRtl ? 'إضافة زبون — راجع البيانات ثم أكّد' : 'Add customer — review, then confirm'}
+      error={error || (!signedIn ? (isRtl ? 'إضافة الزبائن تتطلب حساباً مسجلاً؛ وضع التجربة لا يحفظ الزبائن.' : 'Adding customers needs a signed-in account; trial mode does not save customers.') : '')}
+      confirmLabel={isRtl ? 'إضافة الزبون' : 'Add customer'} saving={saving} onConfirm={signedIn ? submit : undefined}>
+      <div className="grid grid-cols-2 gap-2">
+        <label className="col-span-2"><span className={labelClass}>{isRtl ? 'الاسم' : 'Name'}</span>
+          <input className={fieldClass} value={name} onChange={(e) => setName(e.target.value)} /></label>
+        <label><span className={labelClass}>{isRtl ? 'الهاتف' : 'Phone'}</span>
+          <input className={fieldClass} inputMode="tel" value={phone} onChange={(e) => setPhone(e.target.value)} dir="ltr" /></label>
+        <label><span className={labelClass}>{isRtl ? 'عملة الحساب' : 'Account currency'}</span>
+          <select className={fieldClass} value={currency} onChange={(e) => setCurrency(e.target.value as Currency)}>
+            {ASSISTANT_CURRENCIES.map((c) => <option key={c} value={c}>{c} ({CURRENCY_SYMBOLS[c]})</option>)}
+          </select></label>
+      </div>
+    </CardShell>
+  );
+}
+
+const CardContext = React.createContext<{ isRtl: boolean; onCancel: () => void }>({ isRtl: true, onCancel: () => {} });
+
+function CardShell({ title, error, confirmLabel, danger, saving, onConfirm, children }: {
+  title: string;
+  error?: string;
+  confirmLabel?: string;
+  danger?: boolean;
+  saving?: boolean;
+  onConfirm?: () => void;
+  children?: React.ReactNode;
+}) {
+  const { isRtl, onCancel } = React.useContext(CardContext);
+  return (
+    <div className="mt-3 rounded-2xl border border-cyan-900/50 bg-[#0b181c]/80 p-3 space-y-2">
+      <div className="text-xs font-black text-cyan-300">{title}</div>
+      {children}
+      {error && <div className="text-xs text-rose-300 font-bold">{error}</div>}
+      <div className="flex gap-2 pt-1">
+        {onConfirm && confirmLabel && (
+          <button type="button" onClick={onConfirm} disabled={saving}
+            className={`flex-1 h-9 rounded-xl text-xs font-black flex items-center justify-center gap-1.5 disabled:opacity-50 ${danger ? 'bg-rose-500/90 hover:bg-rose-500 text-white' : 'bg-cyan-500/90 hover:bg-cyan-500 text-slate-950'}`}>
+            {saving ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
+            {confirmLabel}
+          </button>
+        )}
+        <button type="button" onClick={onCancel} disabled={saving}
+          className="flex-1 h-9 rounded-xl text-xs font-bold bg-white/5 hover:bg-white/10 text-slate-300 disabled:opacity-50">
+          {isRtl ? 'إلغاء' : 'Cancel'}
+        </button>
+      </div>
     </div>
   );
 }
 
-// Highly analytical client-side smart fallback engine to guarantee zero downtime
-function generateOfflineAssistantResponse(
-  query: string, 
-  data: { products: Product[], customers: Customer[], vault: any, recentTransactions?: CustomerTransaction[] }, 
-  lang: 'ar' | 'en',
-  userCurrency: string
-): string {
-  const isAr = lang === 'ar';
-  const text = query.toLowerCase();
-
-  const fmtMoney = (val: number, cur?: string) => {
-    const c = cur || userCurrency || 'JOD';
-    const num = (val || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    if (c === 'JOD') return isAr ? `${num} دينار أردني` : `${num} JOD`;
-    if (c === 'USD') return isAr ? `${num} دولار أمريكي` : `$${num}`;
-    return isAr ? `${num} شيكل` : `₪${num}`;
-  };
-
-  // 1. DEBTS / CUSTOMERS ANALYSIS
-  const isDebtQuery = text.includes('دين') || text.includes('ديون') || text.includes('عملا') || text.includes('مديوني') || text.includes('مدان') ||
-                      text.includes('debt') || text.includes('customer') || text.includes('owe') || text.includes('collect');
-
-  if (isDebtQuery) {
-    const debtors = (data.customers || []).filter(c => (c.totalDebt || 0) > 0);
-    debtors.sort((a, b) => b.totalDebt - a.totalDebt);
-    
-    const currencyTotals: Record<string, number> = {};
-    debtors.forEach(d => {
-      const cur = d.currency || userCurrency || 'JOD';
-      currencyTotals[cur] = (currencyTotals[cur] || 0) + d.totalDebt;
-    });
-
-    const sumSummary = Object.entries(currencyTotals)
-      .map(([cur, sum]) => `**${fmtMoney(sum, cur)}**`)
-      .join(isAr ? ' و ' : ' and ');
-
-    if (debtors.length === 0) {
-      return isAr 
-        ? `*(تحليل ذكي فوري ومباشر)*\n\n**لا وجود لأي مديونيات معلقة حالياً على العملاء!**\n\nتم مراجعة سجلات حسابات العملاء وتبين أن جميع الذمم المالية مصفرة والتحصيل مكتمل 100%. هذا مؤشر صحي ممتاز للسيولة النقدية في مستودعك.`
-        : `*(Real-time Intelligent Audit)*\n\n**No active customer debts outstanding!**\n\nAll client accounts have been reviewed, and all balances are fully settled (0.00). This indicates exceptional liquidity and credit collection efficiency in your warehouse.`;
-    }
-
-    let report = isAr
-      ? `*(تحليل ذكي فوري بالاعتماد على بياناتك المباشرة)*\n\n**تقرير الذمم والديون المستحقة للعملاء:**\n\nبلغ إجمالي المستحقات والديون المتراكمة على العملاء ما قيمته: ${sumSummary || '**0.00**'} موزعة على **${debtors.length} عملاء مدينين**:\n\n`
-      : `*(Real-time Intelligent Audit)*\n\n**Client Outstanding Debt Audit Report:**\n\nTotal customer accounts receivable stands at: ${sumSummary || '**0.00**'} across **${debtors.length} active debtors**:\n\n`;
-
-    debtors.slice(0, 10).forEach((d) => {
-      report += isAr
-        ? `- **${d.name}**: مدين بمبلغ **${fmtMoney(d.totalDebt, d.currency)}**\n  *هاتف:* ${d.phone || 'غير مسجل'}\n\n`
-        : `- **${d.name}**: owes **${fmtMoney(d.totalDebt, d.currency)}**\n  *Phone:* ${d.phone || 'N/A'}\n\n`;
-    });
-
-    if (debtors.length > 10) {
-      report += isAr 
-        ? `* وهناك **${debtors.length - 10} عملاء آخرين** مسجلين بمديونيات أقل.\n\n`
-        : `* Plus **${debtors.length - 10} other clients** with minor outstanding balances.\n\n`;
-    }
-
-    report += isAr
-      ? `**توصية المستشار المالي:** يُوصى بالتحرك الفوري لتحصيل المبالغ الكبرى المذكورة أعلاه لزيادة السيولة بصندوق المخزون وتعليق التجديد التلقائي للعميل **${debtors[0]?.name || ''}** لحين السداد المالي.`
-      : `**Advisory Action Plan:** Initiate immediate communication with **${debtors[0]?.name || 'top debtors'}** to finalize collection. Secure cash reserves before issuing further credit.`;
-
-    return report;
-  }
-
-  // 2. STOCK / LOW STOCK / INVENTORY
-  const isStockQuery = text.includes('جرد') || text.includes('مخزون') || text.includes('نواقص') || text.includes('نفاد') || text.includes('ناقص') || text.includes('بضاع') ||
-                       text.includes('stock') || text.includes('low') || text.includes('out') || text.includes('inventory') || text.includes('product') || text.includes('item');
-
-  if (isStockQuery) {
-    const lowStock = (data.products || []).filter(p => {
-      const threshold = p.lowStockThreshold || 5;
-      return p.quantity <= threshold || p.status === 'Low Stock' || p.status === 'Out of Stock';
-    });
-
-    if (lowStock.length === 0) {
-      return isAr
-        ? `*(تحليل ذكي فوري ومباشر)*\n\n**حالة المخزون ممتازة!**\n\nتم فحص جميع المستلزمات والبنود في المستودع. لا توجد أي نواقص أو أصناف كميتها مهددة بالنفاد حالياً. يتوفر لديك إمداد كاف من السلع لتلبية طلبات التوزيع للعملاء مئة بالمئة.`
-        : `*(Real-time Intelligent Audit)*\n\n**Stock health is exceptional!**\n\nAll catalog lines and products are fully supplied. No items are currently at risk of exhaustion or below critical threshold. Your warehouse holds healthy margin levels across your inventory.`;
-    }
-
-    let report = isAr
-      ? `*(تحليل ذكي فوري بالاعتماد على بياناتك المباشرة)*\n\n**تقرير الأصناف منخفضة المخزون والنواقص بالمستودع:**\n\nتم رصد **${lowStock.length} أصناف** تقترب كميتها من النفاد أو نفدت كلياً وتحتاج للتجديد الفوري:\n\n`
-      : `*(Real-time Intelligent Audit)*\n\n**Low Stock and Inventory Depletion Report:**\n\nDetected **${lowStock.length} items** close to exhaustion or completely out of stock:\n\n`;
-
-    lowStock.slice(0, 10).forEach((p) => {
-      const isOut = p.quantity === 0 || p.status === 'Out of Stock';
-      const qtyLabel = isOut 
-        ? (isAr ? `**منتهية تماماً (0 وحدة)**` : `**OUT OF STOCK (0 units)**`)
-        : (isAr ? `**شبه نافدة (فقط ${p.quantity} قطع)**` : `**LOW STOCK (${p.quantity} units left)**`);
-
-      report += isAr
-        ? `- **${p.name}** [رمز:${p.sku || 'N/A'}]: ${qtyLabel}\n  *تكلفة الشراء:* ${fmtMoney(p.unitCost)}\n\n`
-        : `- **${p.name}** [SKU:${p.sku || 'N/A'}]: ${qtyLabel}\n  *Cost price:* ${fmtMoney(p.unitCost)}\n\n`;
-    });
-
-    if (lowStock.length > 10) {
-      report += isAr
-        ? `* وهناك **${lowStock.length - 10} منتجات أخرى** في حالة نقص.\n\n`
-        : `* Plus **${lowStock.length - 10} other product lines** currently flagged as critical.\n\n`;
-    }
-
-    report += isAr
-      ? `**توصية جرد المستودع:** يرجى مراجعة المورد لإعادة تزويد المستودع بصنف **${lowStock[0]?.name || ''}** تفادياً لوقف الاستدعاء والطلب من الموزعين وسد النقص فوراً.`
-      : `**Actionable Logistics Advice:** Contact suppliers immediately to replenish **${lowStock[0]?.name || 'critical items'}** to maintain shipment continuity and bypass client service interruptions.`;
-
-    return report;
-  }
-
-  // 3. VAULT / CASH ANALYSIS
-  const isVaultQuery = text.includes('خزنة') || text.includes('خزينة') || text.includes('نقد') || text.includes('كاش') || text.includes('صندوق') || text.includes('فلوس') ||
-                       text.includes('vault') || text.includes('cash') || text.includes('safe') || text.includes('money') || text.includes('balance');
-
-  if (isVaultQuery) {
-    // Real per-currency balances (all 6 vault currencies). No cross-currency "estimate": rates are not guaranteed.
-    const balances = readVaultBalances(data.vault || {});
-    const names: Record<string, [string, string]> = {
-      JOD: ['الدينار الأردني', 'Jordanian Dinar'],
-      ILS: ['الشيكل', 'Israeli Shekel'],
-      USD: ['الدولار الأمريكي', 'US Dollar'],
-      IQD: ['الدينار العراقي', 'Iraqi Dinar'],
-      SAR: ['الريال السعودي', 'Saudi Riyal'],
-      LYD: ['الدينار الليبي', 'Libyan Dinar'],
-    };
-    const lines = POS_CURRENCY_CODES
-      .map(code => `- **${names[code][isAr ? 0 : 1]} (${code}):** ${fmtMoney(balances[code], code)}${balances[code] < 0 ? (isAr ? ' ⚠️ رصيد سالب' : ' ⚠️ negative balance') : ''}`)
-      .join('\n\n');
-    const allZero = POS_CURRENCY_CODES.every(code => balances[code] === 0);
-
-    return isAr
-      ? `*(تحليل ذكي فوري لصالح الصندوق والخزينة)*\n\n**أرصدة الخزنة الحالية لكل عملة على حدة:**\n\n${lines}\n\n${allZero ? 'لا توجد أرصدة مسجلة بعد. أضف إيداعاً أو سجّل مبيعات لتظهر الأرصدة.' : 'كل عملة محسوبة بشكل مستقل ولا يتم خلطها أو تحويلها.'}`
-      : `*(Real-time Intelligent Audit)*\n\n**Current vault balance per currency (kept separate):**\n\n${lines}\n\n${allZero ? 'No balances recorded yet. Make a deposit or record sales to see balances.' : 'Each currency is tracked independently and never mixed or converted.'}`;
-  }
-
-  // 4. PROFITS / BOOST MARGINS
-  const isProfitQuery = text.includes('ربح') || text.includes('أرباح') || text.includes('زيادة') || text.includes('هوامش') || text.includes('توصية') ||
-                        text.includes('margin') || text.includes('profit') || text.includes('boost') || text.includes('advice') || text.includes('optimize');
-
-  if (isProfitQuery) {
-    return isAr
-      ? `*(توصيات استشارية ذكية لترقية الأداء)*\n\n**توصيات تعظيم هوامش أرباح المستودع لعام 2026:**\n\n- **تحسين شروط الموردين:** استغل النقدية المتوفرة بالخزنة للحصول على خصومات شراء كمية (Bulk discounts) للأصناف سريعة النفاد.\n\n- **تعديل استراتيجية التسعير:** قم بمراجعة المنتجات ذات الهوامش الأقل من 15% وزد سعر مبيعات التجزئة تدريجياً تماشياً مع كلفة الأرض الواصلة (Landed Cost).\n\n- **معالجة مديونية العملاء:** لا تقدم تسهيلات ائتمانية جديدة للعملاء الذين يتجاوز دينهم 1,000 دينار دون جدول سداد نقدي لتسريع معدل تدوير كلف الشراء.\n\n- **دمج أصناف مكملة:** وفر صفقات وعروض ترويجية لحزم السلع لزيادة متوسط الفاتورة الصادرة للعملاء الاستراتيجيين وبقاء المستودع ريادياً.`
-      : `*(Real-time Advisory Recommendation)*\n\n**Core strategies to maximize warehouse profitability:**\n\n- **Negotiate supplier terms:** Leverage available vault cash to pay in advance, securing better volume discount terms on popular lines.\n\n- **Landed Cost Optimization:** Review margin ratios. Increase retail values on items having profit metrics lower than 15% to cushion freight and duties cost additions.\n\n- **Recalibrate Debt Collection:** Avoid extending terms for clients with outstanding tabs until at least 50% of outstanding receivables are cleared.\n\n- **Cross-selling Bundles:** Pair slow-moving assets with quick-consuming supply stock to push overall customer ticket sizes up.`;
-  }
-
-  // 5. GREETING FALLBACK
-  const userGreeting = data.customers && data.customers.length > 0 
-    ? (isAr ? 'مديرنا العزيز' : 'Boss') 
-    : '';
-
-  return isAr
-    ? `*(مساعد مستودعي الذكي الاستشاري)*\n\nأهلاً بك يا ${userGreeting || 'كبير'} مرحباً بك في المستودع.\n\nلقد قمت بتحليل قاعدة بيانات النظام المحلي الخاص بك بنجاح، وأنا جاهز لإجابتك عن أي استفسار:\n\n- **جرد المخزون:** اسألني عن "الأصناف الناقصة" أو كميات المنتجات.\n- **الحسابات والديون:** اطلب مني تحليل "ديون العملاء" وكشف المدانين.\n- **السيولة الفورية:** ناقش معي "أرصدة الخزنة والصندوق" وعملات الشركاء.\n\nأي كشف حسابي أو مالي ترغب فيه الآن؟`
-    : `*(Mostawdaee Smart Assistant - Audit Engine)*\n\nHello ${userGreeting || 'sir'}! Welcome back to your dashboard.\n\nI have successfully scanned your active database and am synchronized to deliver fast analytical answers directly:\n\n- **Inventory & Stock Analysis:** Ask me about "depleted items" or "low products".\n- **Finances & Receivables:** Ask for a comprehensive "debt checklist" on active customers.\n- **Cash and Liquidity:** Discuss "vault allocations" across JOD, ILS, and USD.\n\nHow can I help you manage your business right now?`;
-}
-
-export default function AIAssistant({ 
-  language, 
-  products, 
-  settings, 
+export default function AIAssistant({
+  language,
+  products,
+  settings,
   verbosity = 'detailed',
   onAddProduct,
   onDeleteProduct,
-  onAddInvoice,
   onAddCustomer,
-  onClose
+  onClose,
 }: Props) {
   const isRtl = language === 'ar';
+  const lang: 'ar' | 'en' = isRtl ? 'ar' : 'en';
+  const { customers, invoices, vault, user } = useFirebase();
+  const owner = user?.uid || 'guest';
+  const defaultCurrency: Currency = settings?.currency || 'JOD';
   const chatEndRef = useRef<HTMLDivElement>(null);
-  
-  // Connect extra database states from Firebase safely for richer context
-  const { customers, customerTransactions, vault } = useFirebase();
 
-  const welcomeMessage = isRtl
-    ? 'مرحباً يا كبير! أنا مساعدك الذكي في *مستودعي*. كيف يمكنني مساعدتك في جرد الحسابات أو تحليل مبيعاتك اليوم؟'
-    : 'Hello big boss! I am your intelligent assistant in *Mostawdaee*. How can I help you audit accounts or analyze your sales today?';
-
-  const [messages, setMessages] = useState<Message[]>(() => {
-    try {
-      const saved = sessionStorage.getItem('mostawdae_ai_chat');
-      if (saved) {
-        return JSON.parse(saved);
-      }
-    } catch (e) {
-      console.warn('Failed to load chat history from sessionStorage', e);
-    }
-    return [{ role: 'assistant', content: welcomeMessage }];
-  });
-
-  // Save conversation automatically to sessionStorage whenever it changes
-  useEffect(() => {
-    try {
-      sessionStorage.setItem('mostawdae_ai_chat', JSON.stringify(messages));
-    } catch (e) {
-      console.warn('Failed to save chat history to sessionStorage', e);
-    }
-  }, [messages]);
+  const [chat, setChat] = useState(() => ({ owner, messages: loadChat(owner) }));
+  if (chat.owner !== owner) setChat({ owner, messages: loadChat(owner) });
+  const messages = chat.owner === owner ? chat.messages : [];
+  const updateMessages = (fn: (prev: Message[]) => Message[]) =>
+    setChat((c) => ({ owner: c.owner, messages: fn(c.messages).slice(-HISTORY_LIMIT) }));
 
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-
-  const scrollToBottom = () => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  };
+  const [animateId, setAnimateId] = useState<string | null>(null);
+  const [aiStatus, setAiStatus] = useState<AiStatus>('checking');
+  const [lastNotice, setLastNotice] = useState('');
 
   useEffect(() => {
-    scrollToBottom();
-  }, [messages]);
+    sessionStorage.removeItem(LEGACY_CHAT_KEY);
+  }, []);
 
-  const handleSend = async (customText?: string) => {
-    const textToSend = customText || input;
-    if (!textToSend.trim() || isLoading) return;
+  useEffect(() => {
+    if (chat.owner !== owner) return;
+    try {
+      sessionStorage.setItem(chatKey(owner), JSON.stringify(chat.messages));
+    } catch {
+      // Storage full or disabled: the chat simply isn't kept across reloads.
+    }
+  }, [chat, owner]);
 
-    const userMessage: Message = { role: 'user', content: textToSend };
-    const fullHistory = [...messages, userMessage];
-    setMessages(prev => [...prev, userMessage]);
+  useEffect(() => {
+    let cancelled = false;
+    fetch(apiUrl('/api/ai-status'))
+      .then((r) => (r.ok ? r.json() : null))
+      .then((s) => { if (!cancelled) setAiStatus(s?.status === 'configured' ? 'configured' : 'missing'); })
+      .catch(() => { if (!cancelled) setAiStatus('missing'); });
+    return () => { cancelled = true; };
+  }, []);
+
+  const scrollToBottom = () => chatEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  useEffect(scrollToBottom, [messages.length, isLoading]);
+
+  const data: AssistantData = useMemo(() => ({
+    products: products || [],
+    customers: customers || [],
+    invoices: invoices || [],
+    vault,
+    defaultCurrency,
+    lowStockThreshold: settings?.lowStockThreshold,
+  }), [products, customers, invoices, vault, defaultCurrency, settings?.lowStockThreshold]);
+
+  const noticeFor = (code?: string) => (NOTICES[code || ''] || NOTICES.unavailable)[isRtl ? 0 : 1];
+
+  const pushAssistant = (message: Omit<Message, 'id' | 'role'>) => {
+    const id = crypto.randomUUID();
+    updateMessages((prev) => [...prev, { id, role: 'assistant', ...message }]);
+    if (settings?.enableAnimations !== false) setAnimateId(id);
+  };
+
+  const handleSend = async (preset?: string) => {
+    const text = (preset ?? input).trim().slice(0, ASSISTANT_LIMITS.messageChars);
+    if (!text || isLoading) return;
+    const userMessage: Message = { id: crypto.randomUUID(), role: 'user', content: text };
+    const history = [...messages, userMessage];
+    updateMessages(() => history);
     setInput('');
     setIsLoading(true);
 
+    const answerFromDevice = (code?: string) => {
+      const notice = noticeFor(code);
+      setLastNotice(notice);
+      pushAssistant({ content: answerLocally(text, data, lang), source: 'local', notice });
+    };
+
     try {
-      // Build an ultimate financial summary of products, customers and debts as contextual helper
-      const productContext = products ? products.map(p => ({
-        name: p.name,
-        quantity: p.quantity,
-        cost: p.unitCost,
-        status: p.status
-      })) : [];
-
-      const customerContext = customers ? customers.map(c => ({
-        name: c.name,
-        totalDebt: c.totalDebt,
-        phone: c.phone,
-        currency: c.currency
-      })) : [];
-
-      const transactionContext = customerTransactions ? customerTransactions.slice(0, 10).map(t => ({
-        type: t.type,
-        amount: t.amount,
-        currency: t.currency,
-        date: t.date,
-        notes: t.notes
-      })) : [];
-
-      // Self-healing fetch client with automatic retry on server startup or HTML response
-      const fetchWithRetry = async (url: string, options: RequestInit, retries = 3, delay = 1500): Promise<Response> => {
-        try {
-          const res = await fetch(url, options);
-          const contentType = res.headers.get('content-type') || '';
-          const isHtml = contentType.includes('text/html');
-          const isStartupStatus = [502, 503, 504].includes(res.status);
-          
-          if (isStartupStatus && retries > 0) {
-            console.warn(`Server returned status ${res.status}. Retrying in ${delay}ms... (${retries} attempts left)`);
-            await new Promise(resolve => setTimeout(resolve, delay));
-            return fetchWithRetry(url, options, retries - 1, delay * 1.5);
-          }
-          
-          if (res.ok && isHtml && retries > 0) {
-            const clonedRes = res.clone();
-            const textCheck = await clonedRes.text();
-            if (textCheck.trim().startsWith('<!DOCTYPE html>') || textCheck.includes('<html')) {
-              console.warn(`Server returned an HTML page instead of JSON. Retrying in ${delay}ms... (${retries} attempts left)`);
-              await new Promise(resolve => setTimeout(resolve, delay));
-              return fetchWithRetry(url, options, retries - 1, delay * 1.5);
-            }
-          }
-          
-          return res;
-        } catch (err) {
-          if (retries > 0) {
-            console.warn(`Network error fetching from server: ${err}. Retrying in ${delay}ms... (${retries} attempts left)`);
-            await new Promise(resolve => setTimeout(resolve, delay));
-            return fetchWithRetry(url, options, retries - 1, delay * 1.5);
-          }
-          throw err;
-        }
-      };
-
-      const response = await fetchWithRetry(apiUrl(`/api/chat?t=${Date.now()}`), {
-        method: 'POST',
-        headers: { 
-          ...(await authHeaders()),
-          'Content-Type': 'application/json',
-          'Cache-Control': 'no-cache, no-store, must-revalidate',
-          'Pragma': 'no-cache',
-          'Expires': '0'
-        },
-        body: JSON.stringify({
-          message: textToSend,
-          history: fullHistory,
-          verbosity,
-          currency: settings?.currency || 'JOD',
-          context: {
-            products: productContext,
-            customers: customerContext,
-            recentLedgerTransactions: transactionContext,
-            vault: vault || {}
-          }
-        })
+      if (aiStatus === 'missing') return answerFromDevice('ai_not_configured');
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+      let response: Response;
+      try {
+        response = await fetch(apiUrl('/api/chat'), {
+          method: 'POST',
+          headers: { ...(await authHeaders()), 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            message: text,
+            history: history.filter((m) => m.role === 'user' || m.source === 'ai').map(({ role, content }) => ({ role, content })),
+            verbosity,
+            language: lang,
+            context: buildAssistantContext(data),
+          }),
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(timer);
+      }
+      const body = await response.json().catch(() => null);
+      if (!response.ok || typeof body?.text !== 'string' || !body.text.trim()) return answerFromDevice(body?.code);
+      setLastNotice('');
+      pushAssistant({
+        content: body.text,
+        source: 'ai',
+        ...(body.action ? { action: body.action as AssistantAction, actionState: 'pending' as const } : {}),
       });
-
-      if (!response.ok) {
-        let errMsg = `Server responded with ${response.status}`;
-        try {
-          const contentType = response.headers.get('content-type');
-          if (contentType && contentType.includes('application/json')) {
-            const errData = await response.json();
-            errMsg = errData.message || errData.error || errMsg;
-          } else {
-            const errText = await response.text();
-            if (errText && errText.length < 150) {
-              errMsg = errText;
-            }
-          }
-        } catch (_) {
-          // Fallback to generic error message
-        }
-        throw new Error(errMsg);
-      }
-
-      let data;
-      const rawText = await response.text();
-      try {
-        data = JSON.parse(rawText);
-      } catch (jsonErr) {
-        console.warn('Failed to parse AI response as JSON. Content received:', rawText);
-        if (rawText.trim().startsWith('<!DOCTYPE html>') || rawText.includes('<html')) {
-          throw new Error('The server is currently starting up or returned a temporary HTML page. Please try again.');
-        }
-        throw new Error('Received unparseable response from the server.');
-      }
-
-      if (data && data.text) {
-        setMessages(prev => [...prev, { role: 'assistant', content: data.text }]);
-        
-        // Execute real database actions parsed from the AI assistant response
-        if (data.action && data.action.type) {
-          const action = data.action;
-          const isAr = language === 'ar';
-          
-          try {
-            if (action.type === 'add_product' && action.product) {
-              const prod = action.product;
-              const threshold = prod.lowStockThreshold || 10;
-              const status = computeStockStatus(prod.quantity, prod.lowStockThreshold);
-              const productId = Math.random().toString(36).substr(2, 9);
-              
-              const productToSave: Product = {
-                id: productId,
-                name: prod.name,
-                sku: prod.sku || `SKU-${Math.random().toString(36).substr(2, 5).toUpperCase()}`,
-                category: prod.category || 'General',
-                brand: prod.brand || 'Generic',
-                quantity: prod.quantity || 0,
-                unitCost: prod.unitCost || 0,
-                sellingPrice: prod.sellingPrice || 0,
-                status: status as any,
-                lowStockThreshold: threshold,
-                dateAdded: Date.now()
-              };
-              
-              if (onAddProduct) {
-                await onAddProduct(productToSave);
-                toast.success(isAr ? `تمت إضافة الصنف: ${prod.name} بنجاح ✅` : `Added product: ${prod.name} successfully ✅`);
-              }
-            } else if (action.type === 'delete_product' && action.productId) {
-              if (onDeleteProduct) {
-                await onDeleteProduct(action.productId);
-                toast.success(isAr ? `تم حذف الصنف بنجاح ✅` : `Deleted product successfully ✅`);
-              }
-            } else if (action.type === 'add_customer' && action.customer) {
-              const cust = action.customer;
-              const newCust: Customer = {
-                id: Math.random().toString(36).substr(2, 9),
-                customerId: `C-${Math.random().toString(36).substr(2, 5).toUpperCase()}`,
-                name: cust.name,
-                phone: cust.phone || '',
-                createdAt: new Date().toISOString(),
-                totalDebt: 0,
-                currency: (cust.currency || settings?.currency || 'JOD') as any
-              };
-              if (onAddCustomer) {
-                await onAddCustomer(newCust);
-                toast.success(isAr ? `تمت إضافة العميل: ${cust.name} بنجاح ✅` : `Added customer: ${cust.name} successfully ✅`);
-              }
-            } else if (action.type === 'add_invoice' && action.invoice) {
-              const inv = action.invoice;
-              const invoiceItems = inv.items.map((item: any) => ({
-                productId: item.productId,
-                description: item.description,
-                quantity: item.quantity,
-                unitPrice: item.unitPrice,
-                total: item.total
-              }));
-              const newInvoice: Invoice = {
-                id: Math.random().toString(36).substr(2, 9),
-                invoiceNumber: inv.invoiceNumber,
-                date: Date.now(),
-                items: invoiceItems,
-                subtotal: inv.subtotal || inv.totalAmount,
-                taxAmount: inv.taxAmount || 0,
-                totalAmount: inv.totalAmount,
-                type: inv.type,
-                currency: (settings?.currency || 'JOD') as any
-              };
-              if (onAddInvoice) {
-                await onAddInvoice(newInvoice);
-                toast.success(isAr ? `تم تسجيل فاتورة جديدة بنجاح ✅` : `Registered invoice successfully ✅`);
-              }
-            }
-          } catch (execErr) {
-            console.error("Action execution failed:", execErr);
-            toast.error(isAr ? `فشل تنفيذ الإجراء: ${execErr}` : `Failed to execute action: ${execErr}`);
-          }
-        }
-      } else if (data && data.error) {
-        throw new Error(data.message || data.error);
-      } else {
-        throw new Error('Empty response from AI');
-      }
-    } catch (error) {
-      console.warn('AI Assistant backend call failed, falling back to real-time client-side analytical model:', error);
-      try {
-        const fallbackText = generateOfflineAssistantResponse(
-          textToSend,
-          { products, customers, vault, recentTransactions: customerTransactions },
-          isRtl ? 'ar' : 'en',
-          settings?.currency || 'JOD'
-        );
-        setMessages(prev => [...prev, { role: 'assistant', content: fallbackText }]);
-      } catch (fallbackErr) {
-        console.error('Fallback generation also failed:', fallbackErr);
-        const errMsg = error instanceof Error ? error.message : String(error);
-        const errText = isRtl 
-          ? `عذراً يا كبير! واجهنا مشكلة في التواصل مع خوادم الذكاء الاصطناعي.\n\n**السبب:** ${errMsg}`
-          : `Oops! We encountered an error communicating with the AI servers.\n\n**Reason:** ${errMsg}`;
-        setMessages(prev => [...prev, { role: 'assistant', content: errText }]);
-      }
+    } catch {
+      answerFromDevice('unavailable');
     } finally {
       setIsLoading(false);
     }
   };
 
-  // Quick replies contextually relevant to the items matching the mock
-  const quickReplies = [
-    { 
-      label: isRtl ? 'تحليل الديون والعملاء' : 'Analysis of Debts', 
-      prompt: isRtl ? 'أعطني ملخصاً عن الديون المتراكمة على العملاء مع بيان بأسماء المدانين؟' : 'Give me a summary of total customer debts outstanding with debtor client details.' 
-    },
-    { 
-      label: isRtl ? 'جرد أصناف المخزون' : 'Active Stock Audit', 
-      prompt: isRtl ? 'ما هي الأصناف الحالية الموجودة في المستودع والتي تقترب كميتها من النفاد؟' : 'Which active items in the inventory are close to running out or low?' 
-    },
-    { 
-      label: isRtl ? 'حركات الصندوق والخزينة' : 'Safe cashflows status', 
-      prompt: isRtl ? 'ما هو تقرير النقد الحالي المسجل بالصندوق والخزينة؟' : 'What is the current cash and vault status recorded in the safe?' 
-    },
-    { 
-      label: isRtl ? 'زيادة هوامش الربح' : 'Boost Trade Profits', 
-      prompt: isRtl ? 'أعطني نصائح سريعة لزيادة الهوامش وتحسين مبيعات المستودع.' : 'Give me prompt tips to boost gross margins and optimize warehouse sales.' 
+  const resolveAction = (id: string, actionState: ActionState, actionResult?: string) =>
+    updateMessages((prev) => prev.map((m) => (m.id === id ? { ...m, actionState, actionResult } : m)));
+
+  const renderAction = (message: Message) => {
+    const action = message.action;
+    if (!action) return null;
+    if (message.actionState === 'done' || message.actionState === 'cancelled') {
+      return (
+        <div className={`mt-3 text-xs font-bold flex items-center gap-1.5 ${message.actionState === 'done' ? 'text-emerald-300' : 'text-slate-400'}`}>
+          {message.actionState === 'done' ? <Check size={14} /> : <X size={14} />}
+          {message.actionResult || (isRtl ? 'أُلغي الإجراء.' : 'Action cancelled.')}
+        </div>
+      );
     }
-  ];
+    const cancel = () => resolveAction(message.id, 'cancelled');
+    let card: React.ReactNode = null;
+    if (action.type === 'add_product') {
+      card = (
+        <AddProductCard action={action} isRtl={isRtl} products={products} defaultCurrency={defaultCurrency}
+          onConfirm={async (draft) => {
+            if (!onAddProduct) throw new Error('unavailable');
+            const product: Product = {
+              id: crypto.randomUUID(),
+              name: draft.name,
+              sku: draft.sku,
+              category: '',
+              brand: '',
+              quantity: draft.quantity,
+              unitCost: draft.unitCost,
+              costPrice: draft.unitCost,
+              sellingPrice: draft.sellingPrice,
+              currency: draft.currency,
+              status: computeStockStatus(draft.quantity, undefined, settings?.lowStockThreshold),
+              dateAdded: Date.now(),
+              warehouseId: '',
+            };
+            await onAddProduct(product, { reason: isRtl ? 'رصيد افتتاحي (من المساعد)' : 'Opening stock (assistant)' });
+            resolveAction(message.id, 'done', isRtl ? `أُضيف الصنف «${draft.name}».` : `Added “${draft.name}”.`);
+          }} />
+      );
+    } else if (action.type === 'delete_product') {
+      const product = products.find((p) => p.id === action.productId);
+      card = (
+        <DeleteProductCard product={product} isRtl={isRtl}
+          onConfirm={async () => {
+            if (!onDeleteProduct || !product) throw new Error('unavailable');
+            await onDeleteProduct(product.id);
+            resolveAction(message.id, 'done', isRtl ? `حُذف الصنف «${product.name}».` : `Deleted “${product.name}”.`);
+          }} />
+      );
+    } else if (action.type === 'add_customer') {
+      card = (
+        <AddCustomerCard action={action} isRtl={isRtl} customers={customers || []} defaultCurrency={defaultCurrency} signedIn={!!user}
+          onConfirm={async (draft) => {
+            if (!onAddCustomer || !user) throw new Error('unavailable');
+            const id = crypto.randomUUID();
+            await onAddCustomer({ id, customerId: id, name: draft.name, phone: draft.phone, currency: draft.currency, totalDebt: 0, createdAt: new Date().toISOString() });
+            resolveAction(message.id, 'done', isRtl ? `أُضيف الزبون «${draft.name}».` : `Added customer “${draft.name}”.`);
+          }} />
+      );
+    }
+    return <CardContext.Provider value={{ isRtl, onCancel: cancel }}>{card}</CardContext.Provider>;
+  };
+
+  const quickReplies = isRtl
+    ? [
+        ['النواقص', 'ما الأصناف النافدة أو التي تحت حد التنبيه؟'],
+        ['ديون الزبائن', 'كم مجموع ديون الزبائن ومن الأعلى ديناً؟'],
+        ['رصيد الخزنة', 'ما رصيد الخزنة لكل عملة؟'],
+        ['مبيعات اليوم', 'كم مبيعات اليوم وهذا الشهر؟'],
+        ['هوامش الربح', 'ما الأصناف ذات هامش الربح المنخفض؟'],
+      ]
+    : [
+        ['Low stock', 'Which products are out of stock or below their alert level?'],
+        ['Customer debts', 'What do customers owe in total and who owes the most?'],
+        ['Vault', 'What is the vault balance per currency?'],
+        ['Sales today', 'What are sales today and this month?'],
+        ['Margins', 'Which products have a low profit margin?'],
+      ];
+
+  const modeLabel = aiStatus === 'configured' && !lastNotice
+    ? (isRtl ? 'ذكاء اصطناعي · لا يُحفظ أي تعديل قبل تأكيدك' : 'AI · nothing is saved until you confirm')
+    : aiStatus === 'checking'
+      ? (isRtl ? 'جارٍ التحقق…' : 'Checking…')
+      : (isRtl ? 'تحليل محلي من بياناتك، دون ذكاء اصطناعي' : 'Local analysis of your data, no AI');
 
   return (
-    <div className="max-w-4xl mx-auto h-[calc(100vh-10rem)] flex flex-col rounded-[2.5rem] overflow-hidden border border-teal-900/40 shadow-2xl bg-[#0F2027]" dir={isRtl ? 'rtl' : 'ltr'}>
-      {/* 1. Header with glowing orb status */}
-      <div className="bg-[#0b181c]/90 border-b border-teal-950/70 p-5 flex items-center justify-between animate-fade-in">
-        <div className="flex items-center gap-4">
-          <div className="relative">
-            {/* Glowing active AI logo */}
-            <div className="w-10 h-10 rounded-xl bg-transparent flex items-center justify-center relative overflow-hidden shadow-[0_0_15px_rgba(79,70,229,0.3)] animate-pulse">
-              <img 
-                src="/icon.svg" 
-                alt="Mostawdaee AI" 
-                className="w-8 h-8 object-contain" 
-                referrerPolicy="no-referrer"
-              />
-            </div>
-            {/* Outer spinning ring decoration */}
-            <div className="absolute -inset-1 border border-cyan-500/20 rounded-2xl animate-spin-slow pointer-events-none" />
+    <div className="max-w-4xl mx-auto h-[calc(100vh-10rem)] flex flex-col rounded-[2rem] overflow-hidden border border-teal-900/40 shadow-2xl bg-[#0F2027]" dir={isRtl ? 'rtl' : 'ltr'}>
+      <div className="bg-[#0b181c]/90 border-b border-teal-950/70 px-5 py-4 flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="w-10 h-10 rounded-xl bg-white/5 border border-white/10 flex items-center justify-center shrink-0">
+            <img src="/icon.svg" alt="" className="w-7 h-7 object-contain" />
           </div>
-          <div>
-            <div className="flex items-center gap-2">
-              {/* Pulsing indicator light */}
-              <div className="relative flex h-2.5 w-2.5">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#00D2FF] opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-[#00D2FF]" style={{ boxShadow: '0 0 10px #00D2FF' }}></span>
-              </div>
-              <h1 className="text-base font-black text-white leading-tight">
-                {isRtl ? 'مساعد مستودعي الذكي' : 'Mostawdaee Smart Assistant'}
-              </h1>
-            </div>
-            <p className="text-[10px] text-teal-400 font-bold uppercase tracking-widest font-mono mt-0.5">
-              💡 {isRtl ? 'التدبيج والتحصيل اللحظي' : 'Realtime intelligent collector'}
-            </p>
+          <div className="min-w-0">
+            <h1 className="text-base font-black text-white leading-tight">{isRtl ? 'مساعد مستودعي' : 'Mostawdaee Assistant'}</h1>
+            <p className="text-[11px] text-teal-300/80 font-bold mt-0.5 truncate">{modeLabel}</p>
           </div>
         </div>
-        <div className="flex items-center gap-3">
-          <div className="hidden sm:block">
-            <span className="px-3 py-1 bg-[#1a343e] text-teal-300 rounded-full text-[10px] font-black uppercase tracking-wider border border-teal-900/30">
-              GPT-4o & Gemini Grounded
-            </span>
-          </div>
+        <div className="flex items-center gap-2">
+          {messages.length > 0 && (
+            <button type="button" onClick={() => { updateMessages(() => []); setLastNotice(''); }}
+              className="w-10 h-10 rounded-xl bg-white/5 hover:bg-white/10 text-slate-300 flex items-center justify-center border border-white/10"
+              aria-label={isRtl ? 'مسح المحادثة' : 'Clear chat'} title={isRtl ? 'مسح المحادثة' : 'Clear chat'}>
+              <Trash2 size={17} />
+            </button>
+          )}
           {onClose && (
-            <button
-              onClick={onClose}
-              type="button"
-              className="w-10 h-10 rounded-xl bg-red-400/10 hover:bg-red-400/20 text-red-400 hover:text-red-300 flex items-center justify-center transition-all active:scale-95 border border-red-500/20 cursor-pointer"
-              aria-label="Close Assistant"
-              id="close_ai_assistant_btn"
-            >
-              <X size={20} className="stroke-[2.5]" />
+            <button type="button" onClick={onClose} id="close_ai_assistant_btn"
+              className="w-10 h-10 rounded-xl bg-white/5 hover:bg-white/10 text-slate-300 flex items-center justify-center border border-white/10"
+              aria-label={isRtl ? 'إغلاق المساعد' : 'Close assistant'}>
+              <X size={19} />
             </button>
           )}
         </div>
       </div>
 
-      {/* 2. Messages lists with custom styles matching the requested screen */}
-      <div className="flex-1 overflow-y-auto bg-gradient-to-b from-[#0F2027] to-[#152a32] p-6 space-y-5 custom-scrollbar">
-        {messages.map((msg, idx) => {
+      <div className="flex-1 overflow-y-auto bg-gradient-to-b from-[#0F2027] to-[#152a32] p-5 space-y-4 custom-scrollbar" aria-live="polite">
+        <div className="flex justify-end">
+          <div className="max-w-[85%] p-4 rounded-2xl rounded-tl-none bg-white/5 border border-white/5 text-sm text-slate-100">
+            <MessageBody text={isRtl
+              ? 'أهلاً. اسألني عن **النواقص** و**ديون الزبائن** و**رصيد الخزنة** و**المبيعات** و**هوامش الربح**، أو اكتب اسم صنف أو باركوده.\n\nأجيب من بيانات متجرك فقط، ولا أعدّل شيئاً قبل أن تؤكد.'
+              : 'Hi. Ask me about **low stock**, **customer debts**, the **vault**, **sales** or **margins**, or type a product name or barcode.\n\nI answer from your store data only and change nothing until you confirm.'} />
+          </div>
+        </div>
+
+        {messages.map((msg) => {
           const isUser = msg.role === 'user';
-          const isLastAssistantMsg = msg.role === 'assistant' && idx === messages.length - 1;
-
           return (
-            <motion.div
-              key={idx}
-              initial={{ opacity: 0, y: 15 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.25 }}
-              className={`flex ${isUser ? 'justify-start' : 'justify-end'}`} // User aligns to Left (isUser in Dart is Alignment.centerLeft), Bot to Right (Alignment.centerRight)
-            >
-              <div className={`flex gap-3 max-w-[80%] ${isUser ? 'flex-row' : 'flex-row-reverse'}`}>
-                {/* User/Bot Avatars */}
-                <div className={`w-8 h-8 rounded-lg shrink-0 flex items-center justify-center font-bold text-xs ${
-                  isUser 
-                    ? 'bg-[#2c5364]/20 border border-[#2c5364]/30 text-teal-300' 
-                    : 'bg-white/5 border border-white/5'
-                }`}>
-                  {isUser ? <User size={14} /> : <img src="/icon.svg" alt="Mostawdaee AI" className="w-5.5 h-5.5 object-contain" referrerPolicy="no-referrer" />}
+            <motion.div key={msg.id} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.2 }}
+              className={`flex ${isUser ? 'justify-start' : 'justify-end'}`}>
+              <div className={`flex gap-2.5 max-w-[88%] ${isUser ? 'flex-row' : 'flex-row-reverse'}`}>
+                <div className={`w-8 h-8 rounded-lg shrink-0 flex items-center justify-center ${isUser ? 'bg-[#2c5364]/30 border border-[#2c5364]/40 text-teal-300' : 'bg-white/5 border border-white/5'}`}>
+                  {isUser ? <User size={14} /> : <img src="/icon.svg" alt="" className="w-5 h-5 object-contain" />}
                 </div>
-
-                {/* Bubble Container */}
-                <div className={`p-4 rounded-2.5xl leading-relaxed text-sm shadow-md transition-all ${
-                  isUser 
-                    ? 'bg-[#2C5364] text-white rounded-tr-none rounded-tl-2.5xl rounded-br-2.5xl rounded-bl-2.5xl border border-[#305e71]' 
-                    : 'bg-white/5 text-slate-100 rounded-tl-none rounded-tr-2.5xl rounded-br-2.5xl rounded-bl-2.5xl border border-white/5'
-                }`}>
-                  {isLastAssistantMsg && idx > 0 ? (
-                    <TypingText text={msg.content} onComplete={scrollToBottom} />
-                  ) : (
-                    <div className="transition-opacity duration-300">
-                      {parseCustomMessage(msg.content)}
-                    </div>
+                <div className="min-w-0">
+                  <div className={`p-4 text-sm shadow-md ${isUser
+                    ? 'bg-[#2C5364] text-white rounded-2xl rounded-tr-none border border-[#305e71]'
+                    : 'bg-white/5 text-slate-100 rounded-2xl rounded-tl-none border border-white/5'}`}>
+                    {msg.id === animateId
+                      ? <TypingText text={msg.content} onDone={() => { setAnimateId(null); scrollToBottom(); }} />
+                      : <MessageBody text={msg.content} />}
+                    {msg.id !== animateId && renderAction(msg)}
+                  </div>
+                  {msg.notice && (
+                    <p className="text-[10px] text-slate-400 font-semibold mt-1 px-1">
+                      {isRtl ? 'إجابة محسوبة من بياناتك على هذا الجهاز. ' : 'Computed from your data on this device. '}{msg.notice}
+                    </p>
                   )}
                 </div>
               </div>
@@ -689,75 +568,40 @@ export default function AIAssistant({
         })}
 
         {isLoading && (
-          <motion.div 
-            initial={{ opacity: 0, y: 10 }} 
-            animate={{ opacity: 1, y: 0 }} 
-            className="flex justify-end"
-          >
-            <div className="flex gap-3 max-w-[80%] flex-row-reverse">
-              <div className="w-8 h-8 bg-white/5 border border-white/5 rounded-lg flex items-center justify-center shrink-0">
-                <Loader2 size={14} className="animate-spin text-cyan-400" />
-              </div>
-              <div className="flex flex-col gap-1.5">
-                <div className="flex items-center gap-1.5 p-4 bg-white/5 border border-white/5 rounded-2.5xl rounded-tr-none">
-                  <span className="w-2 h-2 rounded-full bg-cyan-500 animate-pulse" />
-                  <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse delay-75" />
-                  <span className="w-2 h-2 rounded-full bg-cyan-300 animate-pulse delay-150" />
-                </div>
-                <span className="text-[10px] text-teal-500 font-bold px-1">
-                  {isRtl ? 'جاري تحليل الأرقام والبيانات الصندوقية...' : 'Calculating ledger statistics...'}
-                </span>
-              </div>
+          <div className="flex justify-end">
+            <div className="flex items-center gap-2 px-4 py-3 bg-white/5 border border-white/5 rounded-2xl rounded-tl-none text-xs text-teal-300 font-bold">
+              <Loader2 size={14} className="animate-spin" />
+              {isRtl ? 'جارٍ التحليل…' : 'Analyzing…'}
             </div>
-          </motion.div>
+          </div>
         )}
         <div ref={chatEndRef} />
       </div>
 
-      {/* 3. Input & Shortcut rows */}
-      <div className="bg-[#15262C] p-5 border-t border-teal-950/70 flex flex-col gap-4">
-        {/* Shortcut Quick replies */}
-        <div className="flex flex-col gap-1.5 animate-fade-in">
-          <div className="flex items-center gap-2 opacity-80 pl-1 pr-1">
-            <HelpCircle size={11} className="text-teal-400" />
-            <span className="text-[10px] text-teal-400 font-bold uppercase tracking-wider">
-              {isRtl ? 'تعليمات سريعة لمدير المستودع' : 'System Quick Audits'}
-            </span>
-          </div>
-          <div className="flex gap-2 overflow-x-auto pb-1.5 custom-scrollbar scrollbar-thin scrollbar-thumb-teal-900 scrollbar-track-transparent">
-            {quickReplies.map((qr, idx) => (
-              <button
-                key={idx}
-                type="button"
-                onClick={() => handleSend(qr.prompt)}
-                disabled={isLoading}
-                className="px-3 py-1.5 bg-[#0b181c]/60 hover:bg-[#203a43]/50 border border-teal-900/25 hover:border-cyan-500/30 rounded-xl text-xs font-bold text-slate-300 hover:text-cyan-400 transition-all active:scale-95 whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                <MessageSquare size={12} className="text-cyan-500" />
-                {qr.label}
-              </button>
-            ))}
-          </div>
+      <div className="bg-[#15262C] p-4 border-t border-teal-950/70 flex flex-col gap-3">
+        <div className="flex gap-2 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+          {quickReplies.map(([label, prompt]) => (
+            <button key={label} type="button" onClick={() => handleSend(prompt)} disabled={isLoading}
+              className="px-3 py-1.5 bg-[#0b181c]/60 hover:bg-[#203a43]/50 border border-teal-900/30 rounded-xl text-xs font-bold text-slate-300 hover:text-cyan-300 whitespace-nowrap shrink-0 flex items-center gap-1.5 disabled:opacity-40">
+              <MessageSquare size={12} className="text-cyan-500" />
+              {label}
+            </button>
+          ))}
         </div>
-
-        {/* Input form */}
-        <form 
-          onSubmit={(e) => { e.preventDefault(); handleSend(); }}
-          className="relative flex items-center"
-        >
+        <form onSubmit={(e) => { e.preventDefault(); handleSend(); }} className="relative flex items-center">
           <input
             type="text"
             value={input}
+            maxLength={ASSISTANT_LIMITS.messageChars}
             onChange={(e) => setInput(e.target.value)}
-            placeholder={isRtl ? 'اسأل عن المبيعات، الديون، أو جرد صنف...' : 'Ask about sales, debts, or track an item...'}
-            className="w-full h-12 bg-[#0b181c] border border-teal-900/35 rounded-2xl pl-12 pr-12 text-slate-200 placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-cyan-500/80 focus:border-cyan-500/80 transition-all text-sm font-semibold"
+            enterKeyHint="send"
+            aria-label={isRtl ? 'سؤالك للمساعد' : 'Your question'}
+            placeholder={isRtl ? 'اسأل عن صنف، النواقص، الديون، الخزنة…' : 'Ask about a product, stock, debts, the vault…'}
+            className={`w-full h-12 !rounded-2xl ${isRtl ? '!pl-12 !pr-4' : '!pr-12 !pl-4'} text-sm font-semibold placeholder-slate-500 focus:outline-none`}
           />
-          
-          <button
-            type="submit"
-            disabled={!input.trim() || isLoading}
-            className={`absolute ${isRtl ? 'left-2.5' : 'right-2.5'} w-8 h-8 rounded-xl bg-[#00D2FF]/10 text-[#00D2FF] hover:bg-[#00D2FF]/20 flex items-center justify-center transition-all active:scale-90 disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer`}
-          >
+          <button type="submit" disabled={!input.trim() || isLoading}
+            aria-label={isRtl ? 'إرسال' : 'Send'}
+            className={`absolute ${isRtl ? 'left-2.5' : 'right-2.5'} w-8 h-8 rounded-xl bg-[#00D2FF]/10 text-[#00D2FF] hover:bg-[#00D2FF]/20 flex items-center justify-center disabled:opacity-30`}>
             {isLoading ? <Loader2 size={15} className="animate-spin" /> : <Send size={15} className={isRtl ? 'scale-x-[-1]' : ''} />}
           </button>
         </form>

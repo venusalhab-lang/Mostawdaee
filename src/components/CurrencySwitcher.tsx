@@ -54,11 +54,11 @@ export default function CurrencySwitcher({ isExpanded = true, isRtl = false }: C
         onClick={() => setIsOpen(!isOpen)}
         dir={isRtl ? 'rtl' : 'ltr'}
         className={`w-full flex items-center justify-between rounded-xl transition-all duration-300 cursor-pointer 
-          text-slate-705 dark:text-slate-300 hover:bg-slate-100/60 dark:hover:bg-white/5 hover:text-slate-950 hover:dark:text-white p-2.5 
+          text-slate-700 dark:text-slate-300 hover:bg-slate-100/60 dark:hover:bg-white/5 hover:text-slate-950 hover:dark:text-white p-2.5 
           ${isRtl ? 'flex-row-reverse text-right' : 'flex-row text-left'}
           ${isOpen ? 'bg-slate-100/70 dark:bg-white/5 ring-1 ring-indigo-500/30' : ''}
           ${isExpanded ? 'px-3.5' : 'justify-center px-2'}`}
-        title={isRtl ? 'تغيير العملة المفضلة' : 'Select preferred currency'}
+        title={isRtl ? 'تغيير العملة المفضلة' : 'Select preferred currency'} aria-label={isRtl ? 'تغيير العملة المفضلة' : 'Select preferred currency'}
       >
         <div className={`flex items-center gap-4 min-w-0 ${isRtl ? 'flex-row-reverse' : 'flex-row'}`}>
           <div className="relative">
@@ -112,8 +112,8 @@ export default function CurrencySwitcher({ isExpanded = true, isRtl = false }: C
                   className={`w-full flex items-center justify-between px-2 py-1.5 rounded-lg text-[10px] font-semibold transition-all duration-200 cursor-pointer
                     ${isRtl ? 'text-right flex-row-reverse' : 'text-left flex-row'}
                     ${isActive 
-                      ? 'bg-indigo-650 text-white shadow-xs' 
-                      : 'text-slate-705 dark:text-slate-200 hover:bg-slate-100/70 dark:hover:bg-white/5'}`}
+                      ? 'bg-indigo-600 text-white shadow-xs' 
+                      : 'text-slate-700 dark:text-slate-200 hover:bg-slate-100/70 dark:hover:bg-white/5'}`}
                 >
                   <div className={`flex items-center gap-1.5 min-w-0 ${isRtl ? 'flex-row-reverse' : 'flex-row'}`}>
                     {currency.code !== 'DEFAULT' && (

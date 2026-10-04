@@ -107,7 +107,7 @@ export default function SubscriptionSettings({ language }: Props) {
             type="button"
             onClick={dismissNotice}
             className="p-1 rounded-lg text-amber-700 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/40 cursor-pointer"
-            title={isRtl ? 'إخفاء' : 'Dismiss'}
+            title={isRtl ? 'إخفاء' : 'Dismiss'} aria-label={isRtl ? 'إخفاء' : 'Dismiss'}
           >
             <X size={16} />
           </button>

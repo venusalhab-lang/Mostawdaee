@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useState } from 'react';
 import { CURRENCY_SYMBOLS, formatMoney } from '../lib/exchangeRates';
 
-export type UserPreferredCurrency = 'DEFAULT' | 'ILS' | 'USD' | 'JOD' | 'SAR' | 'IQD' | 'LYD';
+export type UserPreferredCurrency = 'DEFAULT' | 'ILS' | 'USD' | 'JOD' | 'SAR' | 'IQD' | 'LYD' | 'EGP';
 
 export interface CurrencyConfig {
   code: UserPreferredCurrency;
@@ -19,6 +19,7 @@ export const AVAILABLE_PRESCNT_CURRENCIES: CurrencyConfig[] = [
   { code: 'SAR', symbol: 'ر.س', nameEn: 'Saudi Riyal', nameAr: 'ريال سعودي', intCode: 'SAR' },
   { code: 'IQD', symbol: 'د.ع', nameEn: 'Iraqi Dinar', nameAr: 'دينار عراقي', intCode: 'IQD' },
   { code: 'LYD', symbol: 'د.ل', nameEn: 'Libyan Dinar', nameAr: 'دينار ليبي', intCode: 'LYD' },
+  { code: 'EGP', symbol: 'ج.م', nameEn: 'Egyptian Pound', nameAr: 'جنيه مصري', intCode: 'EGP' },
 ];
 
 interface CurrencyContextType {
@@ -36,7 +37,7 @@ export const CurrencyProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [preferredCurrency, setPreferredCurrencyState] = useState<UserPreferredCurrency>(() => {
     try {
       const saved = localStorage.getItem('mustawdae_preferred_currency');
-      const validCodes = ['DEFAULT', 'ILS', 'USD', 'JOD', 'SAR', 'IQD', 'LYD'];
+      const validCodes = ['DEFAULT', 'ILS', 'USD', 'JOD', 'SAR', 'IQD', 'LYD', 'EGP'];
       if (saved && validCodes.includes(saved)) {
         return saved as UserPreferredCurrency;
       }

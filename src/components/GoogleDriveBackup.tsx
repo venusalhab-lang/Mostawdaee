@@ -17,7 +17,8 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { toast } from 'sonner';
 import { sounds } from '../lib/sounds';
-import { GoogleAuthProvider, signInWithPopup, auth, googleProvider, db, doc, setDoc } from '../services/firebase';
+import { GoogleAuthProvider, signInWithPopup, auth, googleProvider, db } from '../services/firebase';
+import { doc, setDoc } from '../lib/supabaseDocs';
 
 interface Props {
   language: Language;
@@ -221,7 +222,7 @@ export default function GoogleDriveBackup({ language }: Props) {
       // 7. Restore Customers
       if (Array.isArray(backupData.customers)) {
         for (const cust of backupData.customers) {
-          await saveCustomer(cust);
+          await saveCustomer(cust, { restore: true });
         }
       }
 
@@ -502,7 +503,7 @@ export default function GoogleDriveBackup({ language }: Props) {
                       <button
                         onClick={() => setSelectedBackupForRestore(file)}
                         className="px-4 py-2 font-black text-[10px] bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 rounded-xl transition duration-300 flex items-center gap-1.5 active:scale-95 cursor-pointer"
-                        title={isRtl ? "استعادة من هذه النسخة البديلة" : "Apply Restore State"}
+                        title={isRtl ? "استعادة من هذه النسخة البديلة" : "Apply Restore State"} aria-label={isRtl ? "استعادة من هذه النسخة البديلة" : "Apply Restore State"}
                       >
                         <RefreshCw size={12} />
                         {isRtl ? "استعادة البيانات" : "Restore Data"}
@@ -511,7 +512,7 @@ export default function GoogleDriveBackup({ language }: Props) {
                       <button
                         onClick={() => setSelectedBackupForDelete(file)}
                         className="p-2 text-rose-500 hover:text-rose-600 hover:bg-rose-500/10 rounded-xl transition cursor-pointer"
-                        title={isRtl ? "حذف قيد النسخة نهائياً" : "Discard from cloud"}
+                        title={isRtl ? "حذف قيد النسخة نهائياً" : "Discard from cloud"} aria-label={isRtl ? "حذف قيد النسخة نهائياً" : "Discard from cloud"}
                       >
                         <Trash2 size={14} />
                       </button>

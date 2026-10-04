@@ -91,7 +91,7 @@ export default function ContextMenu3D({
               <button 
                 onClick={onClose}
                 className="p-3 bg-gray-50 dark:bg-gray-900 hover:bg-gray-100 dark:hover:bg-gray-700/50 rounded-2xl text-gray-400 dark:text-gray-500 transition-all active:scale-90"
-              >
+               aria-label={isRtl ? 'إغلاق' : 'Close'}>
                 <X size={20} />
               </button>
             </div>

@@ -17,8 +17,4 @@ export const supabase: SupabaseClient<Database, 'public', any> = (client as any)
 export default supabase;
 
 // Explicitly re-export commonly used helper functions with `any` typing to avoid TS churn
-export const updateSubscription: any = (_client as any).updateSubscription;
 export const updateProfile: any = (_client as any).updateProfile;
-export const createCompletedInvoice: any = (_client as any).createCompletedInvoice;
-export const createCompletedExpense: any = (_client as any).createCompletedExpense;
-export const createCompletedPurchase: any = (_client as any).createCompletedPurchase;

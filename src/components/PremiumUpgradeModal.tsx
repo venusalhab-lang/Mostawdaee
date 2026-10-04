@@ -5,7 +5,7 @@ import { toast } from 'sonner';
 import { Capacitor } from '@capacitor/core';
 import { sounds } from '../lib/sounds';
 import { initializeBilling, makePurchase } from '../services/billing';
-import { activatePaidSubscription } from '../lib/activateSubscription';
+import { activatePaidSubscription, restoreOwnedPurchases } from '../lib/activateSubscription';
 
 interface PremiumUpgradeModalProps {
   isOpen: boolean;
@@ -41,8 +41,8 @@ const premiumFeatures = [
   {
     titleAr: 'دعم متعدد العملات',
     titleEn: 'Multi-Currency Support',
-    descAr: 'خزنة وديون ومبيعات منفصلة لكل عملة: JOD وILS وUSD وIQD وSAR وLYD.',
-    descEn: 'Separate vault, debts and sales per currency: JOD, ILS, USD, IQD, SAR and LYD.',
+    descAr: 'خزنة وديون ومبيعات منفصلة لكل عملة: JOD وILS وUSD وIQD وSAR وLYD وEGP.',
+    descEn: 'Separate vault, debts and sales per currency: JOD, ILS, USD, IQD, SAR, LYD and EGP.',
     color: 'from-emerald-500 to-teal-400',
   },
   {
@@ -64,6 +64,27 @@ export default function PremiumUpgradeModal({
   const isRtl = language === 'ar';
   const isNative = Capacitor.isNativePlatform();
   const [processing, setProcessing] = useState(false);
+
+  const handleRestore = async () => {
+    sounds?.playClick();
+    setProcessing(true);
+    try {
+      const result = await restoreOwnedPurchases();
+      onUpgradeSuccess();
+      if (result.found === 0) {
+        toast.info(isRtl ? 'لا توجد مشتريات لهذا التطبيق على حساب Google في هذا الهاتف.' : 'No purchases for this app were found on this phone\'s Google account.');
+      } else if (result.linked === 0) {
+        toast.error(result.errors[0] || (isRtl ? 'تعذّرت استعادة الاشتراك.' : 'Could not restore the subscription.'));
+      } else {
+        toast.success(isRtl ? 'تمت استعادة الاشتراك.' : 'Subscription restored.');
+        onClose();
+      }
+    } catch (err: any) {
+      toast.error(err?.message || (isRtl ? 'تعذّرت استعادة المشتريات.' : 'Could not restore purchases.'));
+    } finally {
+      setProcessing(false);
+    }
+  };
 
   // The only supported payment method is Google Play Billing (verified server-side).
   // The old card form / browser "Google Pay" could never activate a license, so they were removed.
@@ -146,7 +167,7 @@ export default function PremiumUpgradeModal({
                 onClick={onClose}
                 disabled={processing}
                 className="w-9 h-9 rounded-xl bg-slate-950 border border-slate-800 hover:bg-slate-800 text-slate-400 hover:text-white flex items-center justify-center transition cursor-pointer"
-                title={isRtl ? 'إغلاق' : 'Close'}
+                title={isRtl ? 'إغلاق' : 'Close'} aria-label={isRtl ? 'إغلاق' : 'Close'}
               >
                 <X className="w-5 h-5" />
               </button>
@@ -180,7 +201,7 @@ export default function PremiumUpgradeModal({
                   </span>
                 </div>
                 <div className="flex items-baseline gap-1">
-                  <span className="text-3xl font-black text-white">$100.00</span>
+                  <span className="text-3xl font-black text-white">$100</span>
                   <span className="text-xs text-slate-400 font-bold">/{isRtl ? 'سنوياً' : 'yr'}</span>
                 </div>
               </div>
@@ -207,6 +228,17 @@ export default function PremiumUpgradeModal({
                       </span>
                     </>
                   )}
+                </button>
+              ) : null}
+              {isNative ? (
+                <button
+                  type="button"
+                  onClick={handleRestore}
+                  disabled={processing}
+                  className="w-full py-3 rounded-2xl bg-slate-950 border border-slate-800 hover:bg-slate-800 disabled:opacity-60 text-slate-200 font-bold text-xs transition flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  <RotateCw className="w-4 h-4" />
+                  <span>{isRtl ? 'استعادة مشترياتي' : 'Restore purchases'}</span>
                 </button>
               ) : (
                 <div className="p-4 rounded-2xl bg-slate-950 border border-amber-500/20 flex items-start gap-3">

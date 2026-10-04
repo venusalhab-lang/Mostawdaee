@@ -126,7 +126,8 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
     }
   }
 
-  throw new Error(JSON.stringify(errInfo));
+  // Rethrow the original error: callers branch on its code, and the diagnostic JSON (with the email) must not reach the screen.
+  throw error instanceof Error ? error : new Error(errorMessage);
 }
 
 export async function testConnection() {

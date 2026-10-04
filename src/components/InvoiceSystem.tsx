@@ -1,4 +1,5 @@
 import { consumeInvoiceNumber } from '../lib/invoiceNumber';
+import { computeInvoiceTotals, resolveVatRate } from '../lib/invoiceTotals';
 import React, { useState, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { translations } from '../translations';
@@ -6,25 +7,45 @@ import { Language, Invoice, InvoiceItem, Product, Currency } from '../types';
 import { useFirebase } from './FirebaseProvider';
 import { usePreferredCurrency } from './CurrencyContext';
 import { toast } from 'sonner';
-import { 
-  FileText, 
-  Plus, 
-  Printer, 
-  Search, 
-  ChevronRight, 
-  PlusCircle, 
+import {
+  FileText,
+  Plus,
+  Printer,
+  Search,
+  PlusCircle,
   Trash2,
   Download,
   Building,
   User,
-  Calendar,
   CheckCircle2,
   Share2,
-  QrCode,
   TrendingUp
 } from 'lucide-react';
-import { useReactToPrint } from 'react-to-print';
-import Logo from './Logo';
+import { appName } from '../lib/brand';
+import { matchesQuery } from '../lib/search';
+import { useScreenSearch } from '../lib/screenSearch';
+import {
+  POS_CURRENCY_CODES,
+  CURRENCY_SYMBOLS,
+  formatMoney,
+  roundMoney,
+  currencyDecimals,
+  convertMoney,
+  buildUsdUnitRates,
+  readCachedLiveRates,
+} from '../lib/exchangeRates';
+import CurrencyPicker from './CurrencyPicker';
+import {
+  buildInvoicePrintHtml,
+  escapeHtml,
+  formatCurrencyTotals,
+  invoiceDocumentTitle,
+  invoiceItemSku,
+  invoiceVatRate,
+  paymentMethodLabel,
+  sumInvoicesByCurrency,
+} from '../lib/invoiceDocument';
+import { printHtmlDocument } from '../lib/printHtml';
 
 interface InvoiceSystemProps {
   language: Language;
@@ -34,16 +55,15 @@ interface InvoiceSystemProps {
 export default function InvoiceSystem({ language, initialView = 'list' }: InvoiceSystemProps) {
   const t = translations[language];
   const isRtl = language === 'ar';
-  const { products, invoices, saveInvoice, settings, user } = useFirebase();
-  const { formatPrice: globalFormatPrice, preferredCurrency } = usePreferredCurrency();
+  const { products, invoices, saveInvoice, settings, user, customers } = useFirebase();
+  const { preferredCurrency } = usePreferredCurrency();
   const activeCurrency = preferredCurrency === 'DEFAULT' ? (settings?.currency || 'JOD') : preferredCurrency;
 
   const formatCurrency = (val: number, customCurrency?: string) => {
-    const cur = customCurrency || settings?.currency || 'JOD';
-    const symbol = cur === 'JOD' ? 'د.أ' : cur === 'USD' ? '$' : '₪';
-    return globalFormatPrice(val, symbol);
+    return formatMoney(Number(val) || 0, customCurrency || settings?.currency || 'JOD');
   };
   const printRef = useRef<HTMLDivElement>(null);
+  const [listCurrency, setListCurrency] = useState<'ALL' | Currency>('ALL');
   
   const [view, setView] = useState<'list' | 'create' | 'view'>(initialView);
   const [invoiceType, setInvoiceType] = useState<'sale' | 'purchase'>('sale');
@@ -51,6 +71,14 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
   const [searchTerm, setSearchTerm] = useState('');
   const [invSearchTerm, setInvSearchTerm] = useState('');
   const [sortConfig, setSortConfig] = useState<{ key: keyof Invoice; direction: 'desc' | 'asc' }>({ key: 'date', direction: 'desc' });
+
+  useScreenSearch('invoices', ({ query, recordId }) => {
+    setListCurrency('ALL');
+    setInvSearchTerm(query);
+    const record = recordId ? invoices.find((inv) => inv.id === recordId) : undefined;
+    setSelectedInvoice(record || null);
+    setView(record ? 'view' : 'list');
+  });
   
   const handleSort = (key: keyof Invoice) => {
     setSortConfig(prev => ({
@@ -61,15 +89,9 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
 
   const sortedInvoices = React.useMemo(() => {
     let result = invoices.filter(inv => {
-      // Direct dynamic currency match
-      if (inv.currency !== activeCurrency) return false;
+      if (listCurrency !== 'ALL' && inv.currency !== listCurrency) return false;
 
-      const search = invSearchTerm.toLowerCase();
-      return (
-        inv.invoiceNumber.toLowerCase().includes(search) ||
-        (inv.customerName && inv.customerName.toLowerCase().includes(search)) ||
-        (inv.supplierName && inv.supplierName.toLowerCase().includes(search))
-      );
+      return matchesQuery([inv.invoiceNumber, inv.customerName, inv.supplierName], invSearchTerm);
     });
     
     result.sort((a, b) => {
@@ -80,7 +102,7 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
       return 0;
     });
     return result;
-  }, [invoices, invSearchTerm, sortConfig, activeCurrency]);
+  }, [invoices, invSearchTerm, sortConfig, listCurrency]);
 
   // Create Invoice State
   const [customerName, setCustomerName] = useState('');
@@ -89,32 +111,44 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
   const [newInvoiceSuccess, setNewInvoiceSuccess] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [invoiceCurrency, setInvoiceCurrency] = useState<Currency>(settings?.currency || 'JOD');
+  const [selectedCustomerId, setSelectedCustomerId] = useState('');
+  const [paymentMethod, setPaymentMethod] = useState<'cash' | 'card' | 'credit'>('cash');
 
-  const handlePrint = useReactToPrint({
-    contentRef: printRef,
-  });
+  const resetDraft = () => {
+    setCustomerName('');
+    setSupplierName('');
+    setInvoiceItems([]);
+    setSelectedCustomerId('');
+    setPaymentMethod('cash');
+  };
+
+  const printDocument = (html: string) => {
+    printHtmlDocument(html);
+  };
 
   // Dynamic Export Helpers for Accounting Use
   const exportInvoicesToCSV = () => {
     try {
       const headers = isRtl
-        ? ['رقم الفاتورة', 'النوع', 'العميل / المورد', 'التاريخ والوقت', 'المجموع الكلي', 'العملة']
-        : ['Invoice Number', 'Type', 'Client / Supplier', 'Date & Time', 'Grand Total', 'Currency'];
+        ? ['رقم الفاتورة', 'النوع', 'العميل / المورد', 'طريقة الدفع', 'التاريخ', 'المجموع', 'العملة']
+        : ['Invoice Number', 'Type', 'Client / Supplier', 'Payment', 'Date', 'Total', 'Currency'];
 
       const rows = sortedInvoices.map(inv => {
-        const typeStr = inv.type === 'sale' 
-          ? (isRtl ? 'مبيعات' : 'Sale') 
+        const typeStr = inv.type === 'sale'
+          ? (isRtl ? 'مبيعات' : 'Sale')
           : (isRtl ? 'مشتريات' : 'Purchase');
-        const entityName = inv.customerName || inv.supplierName || (isRtl ? 'زبون عام' : 'General Customer');
-        const formattedDate = new Date(inv.date).toLocaleDateString(isRtl ? 'ar-JO' : 'en-US');
+        const entityName = inv.customerName || inv.supplierName || (isRtl ? 'زبون نقدي' : 'Walk-in');
+        const formattedDate = new Date(inv.date).toLocaleDateString(isRtl ? 'ar' : 'en');
+        const code = inv.currency || activeCurrency;
 
         return [
           inv.invoiceNumber,
           typeStr,
           entityName,
+          paymentMethodLabel(inv.paymentMethod, isRtl),
           formattedDate,
-          inv.totalAmount.toFixed(2),
-          inv.currency || activeCurrency
+          (Number(inv.totalAmount) || 0).toFixed(currencyDecimals(code)),
+          code
         ];
       });
 
@@ -146,40 +180,25 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
 
   const exportInvoicesToPDF = () => {
     try {
-      const iframe = document.createElement('iframe');
-      iframe.style.position = 'absolute';
-      iframe.style.width = '0px';
-      iframe.style.height = '0px';
-      iframe.style.border = 'none';
-      document.body.appendChild(iframe);
-
-      const doc = iframe.contentWindow?.document;
-      if (!doc) return;
-
       let rowsHtml = '';
-      let totalSalesSum = 0;
-      let totalPurchasesSum = 0;
+      const salesByCurrency = sumInvoicesByCurrency(sortedInvoices, 'sale');
+      const purchasesByCurrency = sumInvoicesByCurrency(sortedInvoices, 'purchase');
+      const emptyTotal = isRtl ? 'لا يوجد' : 'None';
 
       sortedInvoices.forEach((inv, idx) => {
-        const typeStr = inv.type === 'sale' 
-          ? (isRtl ? 'مبيعات' : 'Sale') 
+        const typeStr = inv.type === 'sale'
+          ? (isRtl ? 'مبيعات' : 'Sale')
           : (isRtl ? 'مشتريات' : 'Purchase');
-        
-        if (inv.type === 'sale') {
-          totalSalesSum += inv.totalAmount;
-        } else {
-          totalPurchasesSum += inv.totalAmount;
-        }
-
         const typeColor = inv.type === 'sale' ? 'color: #4f46e5; font-weight: bold;' : 'color: #10b981; font-weight: bold;';
-        const entityName = inv.customerName || inv.supplierName || (isRtl ? 'زبون نقدي عام' : 'Direct Customer');
-        const formattedDate = new Date(inv.date).toLocaleDateString(isRtl ? 'ar-JO' : 'en-US');
+        const entityName = inv.customerName || inv.supplierName || (isRtl ? 'زبون نقدي' : 'Walk-in');
+        const formattedDate = new Date(inv.date).toLocaleDateString(isRtl ? 'ar' : 'en');
 
         rowsHtml += `
           <tr style="background-color: ${idx % 2 === 0 ? '#f8fafc' : '#ffffff'};">
-            <td style="padding: 10px 8px; border-bottom: 1px solid #e2e8f0; text-align: center; font-weight: bold; font-family: monospace;">#${inv.invoiceNumber}</td>
+            <td style="padding: 10px 8px; border-bottom: 1px solid #e2e8f0; text-align: center; font-weight: bold; font-family: monospace;">#${escapeHtml(inv.invoiceNumber)}</td>
             <td style="padding: 10px 8px; border-bottom: 1px solid #e2e8f0; text-align: center; ${typeColor}">${typeStr}</td>
-            <td style="padding: 10px 8px; border-bottom: 1px solid #e2e8f0; text-align: ${isRtl ? 'right' : 'left'}; font-weight: bold;">${entityName}</td>
+            <td style="padding: 10px 8px; border-bottom: 1px solid #e2e8f0; text-align: ${isRtl ? 'right' : 'left'}; font-weight: bold;">${escapeHtml(entityName)}</td>
+            <td style="padding: 10px 8px; border-bottom: 1px solid #e2e8f0; text-align: center;">${paymentMethodLabel(inv.paymentMethod, isRtl)}</td>
             <td style="padding: 10px 8px; border-bottom: 1px solid #e2e8f0; text-align: center; font-family: monospace;">${formattedDate}</td>
             <td style="padding: 10px 8px; border-bottom: 1px solid #e2e8f0; text-align: center; font-family: monospace; font-weight: bold;">${formatCurrency(inv.totalAmount, inv.currency)}</td>
           </tr>
@@ -219,28 +238,27 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
         <body>
           <div class="header-container">
             <div class="header-left">
-              <span class="company-name">${settings?.businessName || (isRtl ? 'مستودعي الذكي' : 'Mostawdaee')}</span>
-              <span class="report-title">${isRtl ? 'تقرير وكشف الفواتير والحسابات المقارن' : 'Invoices Ledger Accounting Report'}</span>
+              <span class="company-name">${settings?.businessName || appName(isRtl)}</span>
+              <span class="report-title">${isRtl ? 'كشف الفواتير' : 'Invoice list'}</span>
             </div>
             <div style="text-align: ${isRtl ? 'left' : 'right'};">
               <div class="meta-item">${isRtl ? 'تاريخ التقرير' : 'Report Date'}: ${currentDate}</div>
-              <div class="meta-item">${isRtl ? 'المستخدم المسؤول' : 'Responsible Operator'}: venusalhab@gmail.com</div>
-              <div class="meta-item">${isRtl ? 'العملة الأساسية' : 'Base Currency'}: ${activeCurrency}</div>
+              ${listCurrency !== 'ALL' ? `<div class="meta-item">${isRtl ? 'العملة' : 'Currency'}: ${listCurrency}</div>` : ''}
             </div>
           </div>
 
           <div class="summary-cards">
             <div class="card">
-              <div class="card-label">${isRtl ? 'مبيعات الكاش / الفواتير الصادرة' : 'Total Sales Book'}</div>
-              <div class="card-value" style="color: #4f46e5;">${formatCurrency(totalSalesSum, activeCurrency)}</div>
+              <div class="card-label">${isRtl ? 'المبيعات' : 'Sales'}</div>
+              <div class="card-value" style="color: #4f46e5; font-size: 14px;">${formatCurrencyTotals(salesByCurrency, emptyTotal)}</div>
             </div>
             <div class="card">
-              <div class="card-label">${isRtl ? 'مشتريات التوريد / الفواتير الواردة' : 'Total Purchases Book'}</div>
-              <div class="card-value" style="color: #10b981;">${formatCurrency(totalPurchasesSum, activeCurrency)}</div>
+              <div class="card-label">${isRtl ? 'المشتريات' : 'Purchases'}</div>
+              <div class="card-value" style="color: #10b981; font-size: 14px;">${formatCurrencyTotals(purchasesByCurrency, emptyTotal)}</div>
             </div>
             <div class="card">
-              <div class="card-label">${isRtl ? 'كشف الرصيد الحالي الصافي' : 'Net Sales Revenue'}</div>
-              <div class="card-value" style="color: #e11d48;">${formatCurrency(totalSalesSum - totalPurchasesSum, activeCurrency)}</div>
+              <div class="card-label">${isRtl ? 'عدد الفواتير' : 'Invoices'}</div>
+              <div class="card-value">${sortedInvoices.length}</div>
             </div>
           </div>
 
@@ -249,9 +267,10 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
               <tr>
                 <th style="border-top-left-radius: 8px; border-bottom-left-radius: 8px;">${isRtl ? 'رقم الفاتورة' : 'Invoice Number'}</th>
                 <th>${isRtl ? 'النوع' : 'Type'}</th>
-                <th style="text-align: ${isRtl ? 'right' : 'left'};">${isRtl ? 'اسم الجهة (العميل / المورد)' : 'Dealing Party'}</th>
+                <th style="text-align: ${isRtl ? 'right' : 'left'};">${isRtl ? 'العميل / المورد' : 'Party'}</th>
+                <th>${isRtl ? 'الدفع' : 'Payment'}</th>
                 <th>${isRtl ? 'التاريخ' : 'Date'}</th>
-                <th style="border-top-right-radius: 8px; border-bottom-right-radius: 8px;">${isRtl ? 'القيمة النهائية الكلية' : 'Grand Total'}</th>
+                <th style="border-top-right-radius: 8px; border-bottom-right-radius: 8px;">${isRtl ? 'الإجمالي' : 'Total'}</th>
               </tr>
             </thead>
             <tbody>
@@ -260,521 +279,61 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
           </table>
 
           <div class="footer">
-            ${isRtl ? 'مستند محاسبي مؤتمت تم توليده عبر بوابة مستودعي للمخازن ونقاط البيع' : 'Automated Accountant Statement - Generated via Mostawdaee ERP Ledger Services'}
+            ${appName(isRtl)}
           </div>
         </body>
         </html>
       `;
 
-      doc.open();
-      doc.write(reportHtml);
-      doc.close();
+      printHtmlDocument(reportHtml);
 
-      iframe.contentWindow?.focus();
-      setTimeout(() => {
-        iframe.contentWindow?.print();
-       setTimeout(() => {
-          document.body.removeChild(iframe);
-        }, 1000);
-      }, 250);
-
-      toast.success(isRtl ? 'كشف الحساب موجه وجاهز للطباعة وتنزيل الـ PDF! 📄🖨️' : 'Invoices accounting ledger PDF prepared for download successfully!');
+      toast.success(isRtl ? 'جاهز للطباعة' : 'Ready to print');
     } catch (e) {
       console.error(e);
-      toast.error(isRtl ? 'فشل تصدير فواتير كـ PDF' : 'Failed to export invoices to PDF');
+      toast.error(isRtl ? 'تعذرت طباعة الكشف' : 'Could not print the list');
     }
   };
 
   const exportSingleInvoiceToPDF = (inv: Invoice) => {
     try {
-      const iframe = document.createElement('iframe');
-      iframe.style.position = 'absolute';
-      iframe.style.width = '0px';
-      iframe.style.height = '0px';
-      iframe.style.border = 'none';
-      document.body.appendChild(iframe);
-
-      const doc = iframe.contentWindow?.document;
-      if (!doc) return;
-
-      const currencyStr = inv.currency || activeCurrency;
-      const symbolMap: Record<string, string> = {
-        JOD: 'د.أ',
-        ILS: '₪',
-        USD: '$'
-      };
-      const symbol = symbolMap[currencyStr] || currencyStr;
-      
-      const formatLocalCurrency = (val: number) => {
-        return globalFormatPrice(val, symbol);
-      };
-
-      let itemsHtml = '';
-      inv.items.forEach((item, idx) => {
-        itemsHtml += `
-          <tr style="background-color: ${idx % 2 === 0 ? '#ffffff' : '#f8fafc'}; transition: background-color 0.2s;">
-            <td style="padding: 12px 16px; border-bottom: 1px solid #e2e8f0; text-align: ${isRtl ? 'right' : 'left'}; font-weight: 600; color: #1e293b;">
-              ${item.description}
-              <div style="font-size: 9px; color: #64748b; font-weight: normal; margin-top: 2px;">ID: ${item.productId.slice(0, 8)}</div>
-            </td>
-            <td style="padding: 12px 16px; border-bottom: 1px solid #e2e8f0; text-align: center; font-weight: 700; color: #334155;">${item.quantity}</td>
-            <td style="padding: 12px 16px; border-bottom: 1px solid #e2e8f0; text-align: center; font-family: monospace; font-weight: 650; color: #475569;">${formatLocalCurrency(item.unitPrice)}</td>
-            <td style="padding: 12px 16px; border-bottom: 1px solid #e2e8f0; text-align: ${isRtl ? 'left' : 'right'}; font-family: monospace; font-weight: 800; color: #4f46e5;">${formatLocalCurrency(item.total)}</td>
-          </tr>
-        `;
-      });
-
-      const currentDate = new Date(inv.date).toLocaleDateString(isRtl ? 'ar-JO' : 'en-US', { day: 'numeric', month: 'long', year: 'numeric' });
-      const currentTime = new Date(inv.date).toLocaleTimeString(isRtl ? 'ar-JO' : 'en-US', { hour: '2-digit', minute: '2-digit' });
-      const documentTypeTitle = inv.type === 'sale' 
-        ? (isRtl ? 'فاتورة ضريبية رسمية' : 'OFFICIAL TAX SALES INVOICE') 
-        : (isRtl ? 'فاتورة شراء مستودعية' : 'WAREHOUSE PURCHASE INVOICE');
-
-      const logoHtml = settings?.companyLogoUrl 
-        ? `<img src="${settings.companyLogoUrl}" alt="Logo" style="max-height: 70px; max-width: 140px; object-fit: contain; display: block;" referrerPolicy="no-referrer" />`
-        : `<div style="width: 48px; height: 48px; background-color: #4f46e5; border-radius: 12px; display: flex; align-items: center; justify-content: center; color: #ffffff; font-weight: 900; font-size: 20px; font-family: sans-serif;">M</div>`;
-
-      const singleInvoiceHtml = `
-        <html>
-        <head>
-          <style>
-            @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;900&family=Inter:wght@400;600;700;800&display=swap');
-            @page {
-              size: A4;
-              margin: 15mm 15mm 20mm 15mm;
-            }
-            body { 
-              font-family: ${isRtl ? "'Cairo', serif" : "'Inter', sans-serif"}; 
-              direction: ${isRtl ? 'rtl' : 'ltr'}; 
-              padding: 0; 
-              color: #1e293b; 
-              background: #fff;
-              font-size: 11px;
-              line-height: 1.5;
-            }
-            /* Printable frame optimization */
-            .invoice-wrapper {
-              max-width: 800px;
-              margin: 0 auto;
-              position: relative;
-            }
-            .accent-top-bar {
-              height: 4px;
-              background: linear-gradient(90deg, #22d3ee, #3b82f6, #6366f1);
-              margin-bottom: 25px;
-              border-radius: 2px;
-            }
-            .letterhead-container {
-              display: flex;
-              justify-content: space-between;
-              align-items: flex-start;
-              border-bottom: 2px solid #f1f5f9;
-              padding-bottom: 25px;
-              margin-bottom: 25px;
-            }
-            .logo-title-group {
-              display: flex;
-              align-items: center;
-              gap: 15px;
-            }
-            .business-name {
-              font-size: 20px;
-              font-weight: 900;
-              color: #0f172a;
-              letter-spacing: -0.5px;
-            }
-            .business-tagline {
-              font-size: 9px;
-              text-transform: uppercase;
-              color: #6366f1;
-              font-weight: 800;
-              letter-spacing: 0.5px;
-              display: block;
-              margin-top: 1px;
-            }
-            .doc-heading-box {
-              text-align: center;
-              margin-bottom: 25px;
-            }
-            .doc-heading-title {
-              font-size: 14px;
-              font-weight: 900;
-              background-color: #f8fafc;
-              border: 1px solid #e2e8f0;
-              color: #4f46e5;
-              padding: 8px 18px;
-              border-radius: 12px;
-              display: inline-block;
-              letter-spacing: 0.25px;
-            }
-            .metadata-grid {
-              display: grid;
-              grid-template-columns: 1fr 1fr;
-              gap: 20px;
-              background-color: #f8fafc;
-              border: 1px solid #e2e8f0;
-              border-radius: 16px;
-              padding: 20px;
-              margin-bottom: 25px;
-            }
-            .meta-column {
-              display: flex;
-              flex-direction: column;
-              gap: 10px;
-            }
-            .meta-row {
-              display: flex;
-              justify-content: space-between;
-              align-items: center;
-            }
-            .meta-label {
-              font-weight: 700;
-              color: #64748b;
-              font-size: 10px;
-            }
-            .meta-value {
-              font-weight: 800;
-              color: #1e293b;
-            }
-            .meta-value-highlight {
-              font-weight: 900;
-              color: #4f46e5;
-              font-family: monospace;
-              font-size: 13px;
-            }
-            table {
-              width: 100%;
-              border-collapse: collapse;
-              margin-bottom: 25px;
-            }
-            th {
-              background-color: #0f172a;
-              color: #ffffff;
-              padding: 12px 16px;
-              font-weight: 700;
-              font-size: 10px;
-              text-transform: uppercase;
-              letter-spacing: 0.5px;
-            }
-            .summary-block-grid {
-              display: grid;
-              grid-template-columns: 1.2fr 0.8fr;
-              gap: 25px;
-              margin-bottom: 30px;
-            }
-            .notes-card {
-              background-color: #f8fafc;
-              border: 1px solid #e2e8f0;
-              border-radius: 16px;
-              padding: 15px;
-            }
-            .notes-title {
-              font-size: 9px;
-              font-weight: 800;
-              text-transform: uppercase;
-              color: #64748b;
-              letter-spacing: 0.5px;
-              margin-bottom: 8px;
-              display: block;
-            }
-            .notes-content {
-              font-size: 10px;
-              color: #475569;
-              line-height: 1.6;
-              margin: 0;
-            }
-            .math-card {
-              display: flex;
-              flex-direction: column;
-              gap: 8px;
-            }
-            .math-row {
-              display: flex;
-              justify-content: space-between;
-              align-items: center;
-              font-size: 11px;
-              padding: 0 5px;
-            }
-            .math-label {
-              font-weight: 750;
-              color: #64748b;
-            }
-            .math-value {
-              font-weight: 800;
-              color: #1e293b;
-              font-family: monospace;
-            }
-            .grand-total-container {
-              background-color: #0f172a;
-              color: #ffffff;
-              border-radius: 12px;
-              padding: 15px 20px;
-              margin-top: 5px;
-              display: flex;
-              justify-content: space-between;
-              align-items: center;
-              box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);
-            }
-            .grand-total-label {
-              font-weight: 900;
-              font-size: 11px;
-              letter-spacing: 1px;
-            }
-            .grand-total-value {
-              font-size: 20px;
-              font-weight: 900;
-              font-family: monospace;
-            }
-            .signature-grid {
-              display: grid;
-              grid-template-columns: 1fr 1fr;
-              gap: 40px;
-              text-align: center;
-              margin-top: 35px;
-              padding-top: 25px;
-              border-top: 1px dashed #cbd5e1;
-            }
-            .sign-leader {
-              font-size: 10px;
-              font-weight: 800;
-              color: #64748b;
-              text-transform: uppercase;
-              letter-spacing: 0.5px;
-              margin-bottom: 12px;
-              display: block;
-            }
-            .sign-line {
-              height: 44px;
-              border: 1px dashed #cbd5e1;
-              background-color: #fafafa;
-              border-radius: 10px;
-              display: flex;
-              align-items: center;
-              justify-content: center;
-              color: #94a3b8;
-              font-size: 9px;
-              font-style: italic;
-            }
-            .footer {
-              text-align: center;
-              border-top: 2px solid #f1f5f9;
-              padding-top: 20px;
-              margin-top: 35px;
-            }
-            .footer-thankyou {
-              font-size: 13px;
-              font-weight: 900;
-              color: #0f172a;
-              margin: 0 0 5px 0;
-            }
-            .footer-rights {
-              font-size: 9px;
-              font-weight: 700;
-              color: #94a3b8;
-              letter-spacing: 0.5px;
-              margin: 0;
-              text-transform: uppercase;
-            }
-            /* Media Queries for printing */
-            @media print {
-              body {
-                padding: 0;
-                background-color: #fff;
-              }
-              .accent-top-bar {
-                -webkit-print-color-adjust: exact;
-                print-color-adjust: exact;
-              }
-              .grand-total-container {
-                background-color: #0f172a !important;
-                color: #ffffff !important;
-                -webkit-print-color-adjust: exact;
-                print-color-adjust: exact;
-              }
-              th {
-                background-color: #0f172a !important;
-                color: #ffffff !important;
-                -webkit-print-color-adjust: exact;
-                print-color-adjust: exact;
-              }
-              .doc-heading-title {
-                background-color: #f8fafc !important;
-                color: #4f46e5 !important;
-                -webkit-print-color-adjust: exact;
-                print-color-adjust: exact;
-              }
-              .metadata-grid {
-                background-color: #f8fafc !important;
-                -webkit-print-color-adjust: exact;
-                print-color-adjust: exact;
-              }
-            }
-          </style>
-        </head>
-        <body>
-          <div class="invoice-wrapper">
-            <div class="accent-top-bar"></div>
-            
-            <div class="letterhead-container">
-              <!-- Right Side: Business Identity -->
-              <div style="display: flex; flex-direction: column; gap: 8px; width: 60%;">
-                <div class="logo-title-group">
-                  ${logoHtml}
-                  <div style="text-align: ${isRtl ? 'right' : 'left'};">
-                    <span class="business-name">${settings?.businessName || (isRtl ? 'شركة مستودعي التجارية' : 'Mostawdaee Trading Company')}</span>
-                    <span class="business-tagline">${isRtl ? 'النظام المتكامل لإدارة المخازن والمبيعات' : 'Smart Solutions for Inventory & Commerce'}</span>
-                  </div>
-                </div>
-                
-                <div style="font-size: 10px; color: #475569; font-weight: 600; margin-top: 8px; text-align: ${isRtl ? 'right' : 'left'}; display: flex; flex-direction: column; gap: 3px;">
-                  ${settings?.businessAddress ? `<div>📍 ${settings.businessAddress}</div>` : ''}
-                  ${settings?.businessPhone ? `<div>📞 <span style="font-family: monospace;">${settings.businessPhone}</span></div>` : ''}
-                  ${settings?.businessEmail ? `<div>✉️ ${settings.businessEmail}</div>` : ''}
-                  ${settings?.taxRegistrationNumber ? `<div style="font-weight: 800; color: #4f46e5; margin-top: 3px;">📝 ${isRtl ? 'الرقم الضريبي المسجل:' : 'VAT Registration Number:'} <span style="font-family: monospace;">${settings.taxRegistrationNumber}</span></div>` : ''}
-                </div>
-              </div>
-
-              <!-- Left Side: System/Stamp placeholder -->
-              <div style="text-align: ${isRtl ? 'left' : 'right'}; font-size: 10px; color: #64748b; font-weight: bold; width: 35%;">
-                <div style="font-size: 14px; font-weight: 900; color: #0d1221; letter-spacing: -0.5px;">MOSTAWDAll</div>
-                <div style="font-size: 8px; color: #6366f1; letter-spacing: 1px; margin-top: 1px;">DIGITAL ERP LEDGER</div>
-                <div style="margin-top: 10px; font-family: monospace; font-size: 9px; line-height: 1.4;">
-                  <div>Time: ${currentTime}</div>
-                  <div>Operator: venusalhab@gmail.com</div>
-                </div>
-              </div>
-            </div>
-
-            <div class="doc-heading-box">
-              <span class="doc-heading-title">${documentTypeTitle}</span>
-            </div>
-
-            <div class="metadata-grid">
-              <!-- Column 1 -->
-              <div class="meta-column" style="${isRtl ? 'border-left: 1px solid #e1e8f0; padding-left: 20px;' : 'border-right: 1px solid #e1e8f0; padding-right: 20px;'}">
-                <div class="meta-row">
-                  <span class="meta-label">${isRtl ? 'رقم الفاتورة:' : 'INVOICE NUMBER:'}</span>
-                  <span class="meta-value-highlight">#${inv.invoiceNumber}</span>
-                </div>
-                <div class="meta-row">
-                  <span class="meta-label">${isRtl ? 'تاريخ المعاملة:' : 'TRANSACTION DATE:'}</span>
-                  <span class="meta-value">${currentDate}</span>
-                </div>
-                <div class="meta-row">
-                  <span class="meta-label">${isRtl ? 'طريقة الدفع للتسوية:' : 'PAYMENT MODE:'}</span>
-                  <span class="meta-value" style="color: ${inv.type === 'sale' ? '#4f46e5' : '#10b981'}; font-weight: 800;">
-                    ${inv.type === 'sale' ? (isRtl ? 'مبيعات' : 'Sales') : (isRtl ? 'مشتريات' : 'Purchase')}
-                  </span>
-                </div>
-              </div>
-
-              <!-- Column 2 -->
-              <div class="meta-column" style="${isRtl ? 'padding-right: 20px;' : 'padding-left: 20px;'}">
-                <div class="meta-row">
-                  <span class="meta-label">
-                    ${inv.type === 'sale' ? (isRtl ? 'الجهة المستلمة (العميل):' : 'BILLING CLIENT:') : (isRtl ? 'جهة التوريد (المورد):' : 'BILLING SUPPLIER:')}
-                  </span>
-                  <span class="meta-value" style="font-weight: 900; color: #0f172a; font-size: 12px;">
-                    ${inv.customerName || inv.supplierName || (isRtl ? 'زبون نقدي عام' : 'General Client/Walk-in')}
-                  </span>
-                </div>
-                <div class="meta-row">
-                  <span class="meta-label">${isRtl ? 'العملة الأساسية للفاتورة:' : 'SETTLEMENT CURRENCY:'}</span>
-                  <span class="meta-value" style="font-family: monospace;">${currencyStr}</span>
-                </div>
-                <div class="meta-row">
-                  <span class="meta-label">${isRtl ? 'حالة القيد المعتمدة:' : 'REGISTRATION STATUS:'}</span>
-                  <span class="meta-value" style="color: #10b981; font-weight: bold;">✓ ${isRtl ? 'مؤمن ومسحوب' : 'Authorized & Sync'}</span>
-                </div>
-              </div>
-            </div>
-
-            <!-- Table -->
-            <table>
-              <thead>
-                <tr>
-                  <th style="border-top-${isRtl ? 'right' : 'left'}-radius: 8px; border-bottom-${isRtl ? 'right' : 'left'}-radius: 8px; text-align: ${isRtl ? 'right' : 'left'};">${isRtl ? 'رمز الصنف والمواصفات التفصيلية للمادة' : 'Product description / SKU'}</th>
-                  <th style="text-align: center; width: 15%;">${isRtl ? 'الكمية' : 'Qty'}</th>
-                  <th style="text-align: center; width: 20%;">${isRtl ? 'سعر المفرد' : 'Unit Price'}</th>
-                  <th style="border-top-${isRtl ? 'left' : 'right'}-radius: 8px; border-bottom-${isRtl ? 'left' : 'right'}-radius: 8px; text-align: ${isRtl ? 'left' : 'right'}; width: 25%;">${isRtl ? 'المجموع النهائي' : 'Subtotal'}</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${itemsHtml}
-              </tbody>
-            </table>
-
-            <div class="summary-block-grid">
-              <!-- Legal Disclaimer & Terms -->
-              <div class="notes-card">
-                <span class="notes-title">${isRtl ? 'شروط وأحكام الفاتورة القانونية' : 'Terms & Legal Declarations'}</span>
-                <p class="notes-content">
-                  ${isRtl 
-                    ? `1. البضاعة المباعة خاضعة للفحص الجمركي والخصم الفوري من مستودعاتنا المعتمدة.<br/>
-                       2. يرجى مراجعة الرصيد والكميات قبل مغادرة المستودع أو نقطة البيع لضمان جودة الأجهزة والمواد.<br/>
-                       3. الفاتورة الضريبية تعتبر سنداً مالياً قانونياً واجب الدفع وموثقاً لدى السجل المحاسبي المركزي.`
-                    : `1. Goods delivered should be inspected regarding quantities and specs before cargo departure.<br/>
-                       2. Claims corresponding to damaged objects or serial numbers should be addressed to administrators within 3 working days.<br/>
-                       3. This tax statement serves as an authorized contract of corporate settlement.`
-                  }
-                </p>
-              </div>
-
-              <!-- Mathematical summary calculations -->
-              <div class="math-card">
-                <div class="math-row">
-                  <span class="math-label">${isRtl ? 'المجموع الصافي الفرعي:' : 'SUBTOTAL VALUE:'}</span>
-                  <span class="math-value">${formatLocalCurrency(inv.subtotal)}</span>
-                </div>
-                <div class="math-row">
-                  <span class="math-label">${isRtl ? 'ضريبة القيمة المضافة' : 'VAT TAX AMOUNT'} (${settings?.defaultVatRate || 16}%):</span>
-                  <span class="math-value" style="font-family: monospace; font-weight: 800;">${formatLocalCurrency(inv.taxAmount)}</span>
-                </div>
-                
-                <div class="grand-total-container">
-                  <span class="grand-total-label">${isRtl ? 'الإجمالي النهائي الكلي:' : 'GRAND TOTAL:'}</span>
-                  <span class="grand-total-value">${formatLocalCurrency(inv.totalAmount)}</span>
-                </div>
-              </div>
-            </div>
-
-            <div class="signature-grid">
-              <div>
-                <span class="sign-leader">${isRtl ? 'توقيع المشتري / العميل المستلم' : 'Authorized Recipient Sign'}</span>
-                <div class="sign-line">${isRtl ? 'توقيع العميل / المفوض قانونياً' : 'Sign and Date'}</div>
-              </div>
-              <div>
-                <span class="sign-leader">${isRtl ? 'ختم الشركة واعتماد البائع' : 'Seller Audit & Company Stamp'}</span>
-                <div class="sign-line">${settings?.businessName || (isRtl ? 'أمين الصندوق والختم' : 'Cashier Seal & Stamp')}</div>
-              </div>
-            </div>
-
-            <div class="footer">
-              <h4 class="footer-thankyou">${isRtl ? 'نشكركم لثقتكم واختياركم خدماتنا!' : 'Thank you for choosing our quality catalog & products!'}</h4>
-              <p class="footer-rights">${isRtl ? 'نظام مستودعي الذكي لإدارة السلاسل اللوجستية والمستودعات' : 'Automated Supply Chain Ledger System - Powered by Mostawdaee ERP'}</p>
-            </div>
-          </div>
-        </body>
-        </html>
-      `;
-
-      doc.open();
-      doc.write(singleInvoiceHtml);
-      doc.close();
-
-      iframe.contentWindow?.focus();
-      setTimeout(() => {
-        iframe.contentWindow?.print();
-        setTimeout(() => {
-          document.body.removeChild(iframe);
-        }, 1000);
-      }, 250);
-
-      toast.success(isRtl ? `تم توليد الفاتورة #${inv.invoiceNumber} كملف PDF بنجاح! 📄🖨️` : `Invoice #${inv.invoiceNumber} PDF generated successfully!`);
+      printDocument(buildInvoicePrintHtml({
+        invoice: inv,
+        products,
+        isRtl,
+        businessName: settings?.businessName || appName(isRtl),
+        businessAddress: settings?.businessAddress,
+        businessPhone: settings?.businessPhone,
+        businessEmail: settings?.businessEmail,
+        taxRegistrationNumber: settings?.taxRegistrationNumber,
+        companyLogoUrl: settings?.companyLogoUrl,
+      }));
+      toast.success(isRtl ? 'جاهز للطباعة' : 'Ready to print');
     } catch (e) {
       console.error(e);
-      toast.error(isRtl ? 'فشل تصدير الفاتورة كـ PDF' : 'Failed to export invoice to PDF');
+      toast.error(isRtl ? 'تعذرت الطباعة' : 'Could not print');
     }
+  };
+
+  const currentRates = () => buildUsdUnitRates(settings, readCachedLiveRates());
+
+  /** A product is priced in its own currency; the invoice line must be in the invoice currency. */
+  const linePrice = (product: Product) => {
+    const base = Number(invoiceType === 'sale' ? product.sellingPrice : product.unitCost) || 0;
+    const from = product.currency || settings?.currency || 'JOD';
+    return from === invoiceCurrency ? base : convertMoney(base, from, invoiceCurrency, currentRates());
+  };
+
+  const changeInvoiceCurrency = (code: Currency) => {
+    if (code === invoiceCurrency) return;
+    if (invoiceItems.length) {
+      const rates = currentRates();
+      setInvoiceItems(invoiceItems.map((item) => {
+        const unitPrice = convertMoney(item.unitPrice, invoiceCurrency, code, rates);
+        return { ...item, unitPrice, total: roundMoney((Number(item.quantity) || 0) * unitPrice, code) };
+      }));
+      toast.info(isRtl ? `حُوّلت أسعار البنود إلى ${code}` : `Line prices converted to ${code}`);
+    }
+    setInvoiceCurrency(code);
   };
 
   const addItem = (product: Product) => {
@@ -784,7 +343,7 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
       return;
     }
 
-    const price = Number(invoiceType === 'sale' ? product.sellingPrice : product.unitCost) || 0;
+    const price = linePrice(product);
     const existing = invoiceItems.find(item => item.productId === product.id);
     
     if (existing) {
@@ -798,7 +357,7 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
         if (item.productId === product.id) {
           const newQty = (Number(item.quantity) || 0) + 1;
           const uPrice = Number(item.unitPrice) || 0;
-          return { ...item, quantity: newQty, total: Number((newQty * uPrice).toFixed(4)) };
+          return { ...item, quantity: newQty, total: roundMoney(newQty * uPrice, invoiceCurrency) };
         }
         return item;
       }));
@@ -808,7 +367,8 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
         description: product.name,
         quantity: 1,
         unitPrice: price,
-        total: price
+        total: price,
+        sku: product.sku
       }]);
     }
   };
@@ -827,7 +387,7 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
     setInvoiceItems(invoiceItems.map(item => {
       if (item.productId === productId) {
         const finalQty = Math.max(1, targetQty);
-        return { ...item, quantity: finalQty, unitPrice: targetPrice, total: Number((finalQty * targetPrice).toFixed(4)) };
+        return { ...item, quantity: finalQty, unitPrice: targetPrice, total: roundMoney(finalQty * targetPrice, invoiceCurrency) };
       }
       return item;
     }));
@@ -837,47 +397,67 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
     setInvoiceItems(invoiceItems.filter(item => item.productId !== productId));
   };
 
+  const vatRate = resolveVatRate(settings?.defaultVatRate);
+  const draftTotals = computeInvoiceTotals({
+    subtotal: invoiceItems.reduce((acc, item) => acc + (Number(item.total) || 0), 0),
+    vatRate,
+    currency: invoiceCurrency,
+  });
+
   const handleCreateInvoice = async (shouldPrint = false) => {
     if (invoiceItems.length === 0) return;
-    if (invoiceType === 'sale' && !customerName) {
+    if (invoiceType === 'sale' && !customerName.trim()) {
       toast.error(t.clientName);
       return;
     }
-    if (invoiceType === 'purchase' && !supplierName) {
+    if (invoiceType === 'sale' && paymentMethod === 'credit' && !selectedCustomerId) {
+      toast.error(isRtl ? 'البيع الآجل يحتاج عميلاً مسجلاً' : 'Credit sales need a registered customer');
+      return;
+    }
+    if (invoiceType === 'purchase' && !supplierName.trim()) {
       toast.error(isRtl ? 'يرجى إدخال اسم المورد' : 'Supplier name is required');
       return;
     }
 
     setIsSubmitting(true);
-    const subtotal = Number(invoiceItems.reduce((acc, item) => acc + (Number(item.total) || 0), 0).toFixed(4));
-    const vatRate = Number(settings?.defaultVatRate) || 0;
-    const tax = Number(((subtotal * vatRate) / 100).toFixed(4));
-    
+    const { subtotal, taxAmount: tax, total: totalAmount } = draftTotals;
+
     const invoiceNo = consumeInvoiceNumber(invoiceType === 'sale' ? 'SAL' : 'PUR', user?.uid || 'guest');
-    
+    const chosenCustomer = customers.find((c) => c.id === selectedCustomerId);
+
     const newInvoice: Invoice = {
       id: crypto.randomUUID(),
       invoiceNumber: invoiceNo,
-      customerName: invoiceType === 'sale' ? customerName : undefined,
-      supplierName: invoiceType === 'purchase' ? supplierName : undefined,
+      customerName: invoiceType === 'sale' ? customerName.trim() : undefined,
+      supplierName: invoiceType === 'purchase' ? supplierName.trim() : undefined,
       date: Date.now(),
       items: invoiceItems,
       subtotal,
       taxAmount: tax,
-      totalAmount: Number((subtotal + tax).toFixed(4)),
+      vatRate,
+      totalAmount,
       type: invoiceType,
-      currency: invoiceCurrency
+      currency: invoiceCurrency,
+      paymentMethod: invoiceType === 'sale' ? paymentMethod : 'cash',
+      customerId: invoiceType === 'sale' && selectedCustomerId ? selectedCustomerId : undefined,
     };
+    if (invoiceType === 'sale' && paymentMethod === 'credit' && chosenCustomer) {
+      // The debt is kept in the customer's currency; the provider writes it with the invoice in one transaction.
+      const customerCurrency = (chosenCustomer.currency || invoiceCurrency) as Currency;
+      newInvoice.debtCurrency = customerCurrency;
+      newInvoice.debtAmount = customerCurrency === invoiceCurrency
+        ? totalAmount
+        : convertMoney(totalAmount, invoiceCurrency, customerCurrency, currentRates());
+    }
 
     try {
-      await saveInvoice(newInvoice);
+      newInvoice.invoiceNumber = await saveInvoice(newInvoice);
+
       if (shouldPrint) {
         setSelectedInvoice(newInvoice);
         setView('view');
-        setCustomerName('');
-        setSupplierName('');
-        setInvoiceItems([]);
-        toast.success(isRtl ? "تم حفظ الفاتورة بنجاح وجاري تحضير الطباعة..." : "Invoice saved! Opening print manager...");
+        resetDraft();
+        toast.success(isRtl ? 'تم حفظ الفاتورة' : 'Invoice saved');
         setTimeout(() => {
           exportSingleInvoiceToPDF(newInvoice);
         }, 400);
@@ -886,9 +466,7 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
         setTimeout(() => {
           setNewInvoiceSuccess(false);
           setView('list');
-          setCustomerName('');
-          setSupplierName('');
-          setInvoiceItems([]);
+          resetDraft();
         }, 2000);
       }
     } catch (error) {
@@ -896,7 +474,7 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
       const msg = String((error as any)?.message || '');
       if (msg.startsWith('Insufficient vault funds')) {
         toast.error(isRtl ? 'رصيد الخزنة بهذه العملة غير كافٍ لدفع فاتورة الشراء. أضف رصيداً للخزنة أو غيّر العملة.' : 'Not enough balance in the vault for this currency to pay this purchase. Deposit funds or change the currency.');
-      } else if (!msg.startsWith('Insufficient stock')) {
+      } else if (!(error as any)?.notified && !msg.startsWith('Insufficient stock')) {
         toast.error(isRtl ? "فشلت عملية حفظ الفاتورة" : "Failed to record invoice");
       }
     } finally {
@@ -966,12 +544,23 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
                 <Search size={18} className={`absolute top-1/2 -translate-y-1/2 ${isRtl ? 'right-4' : 'left-4'} text-gray-400`} />
                 <input 
                   type="text"
-                  placeholder={t.searchPlaceholder}
+                  placeholder={t.searchPlaceholder} aria-label={t.searchPlaceholder}
                   value={invSearchTerm}
                   onChange={(e) => setInvSearchTerm(e.target.value)}
                   className={`w-full ${isRtl ? 'pr-11 pl-4' : 'pl-11 pr-4'} py-3 bg-gray-50 dark:bg-gray-900 border border-gray-100 dark:border-gray-700 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none text-sm transition-all dark:text-white`}
                 />
               </div>
+              <select
+                dir="ltr"
+                value={listCurrency}
+                onChange={(e) => setListCurrency(e.target.value as 'ALL' | Currency)}
+                className="w-full md:w-auto px-4 py-3 bg-gray-50 dark:bg-gray-900 border border-gray-100 dark:border-gray-700 rounded-xl text-sm font-bold dark:text-white outline-none"
+              >
+                <option value="ALL">{isRtl ? 'كل العملات' : 'All currencies'}</option>
+                {POS_CURRENCY_CODES.map((code) => (
+                  <option key={code} value={code}>{code} ({CURRENCY_SYMBOLS[code]})</option>
+                ))}
+              </select>
               <div className="flex gap-2 w-full md:w-auto flex-wrap sm:flex-nowrap">
                 {(['date', 'totalAmount'] as const).map(key => (
                   <button
@@ -986,11 +575,11 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
                 ))}
 
                 {/* Accounting Ledger Exports */}
-                <span className="h-6 w-[1px] bg-gray-200 dark:bg-gray-750 hidden md:block self-center" />
+                <span className="h-6 w-[1px] bg-gray-200 dark:bg-gray-700 hidden md:block self-center" />
                 <button
                   type="button"
                   onClick={exportInvoicesToCSV}
-                  title={isRtl ? 'تصدير كشف الحساب الحالي لملف Excel/CSV' : 'Export current list as CSV/Excel'}
+                  title={isRtl ? 'تصدير كشف الحساب الحالي لملف Excel/CSV' : 'Export current list as CSV/Excel'} aria-label={isRtl ? 'تصدير كشف الحساب الحالي لملف Excel/CSV' : 'Export current list as CSV/Excel'}
                   className="flex-1 md:flex-none flex items-center justify-center gap-1.5 px-4 py-3 bg-emerald-600/10 dark:bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 hover:border-emerald-500/50 rounded-xl text-xs font-black transition-all cursor-pointer"
                 >
                   <Download size={14} />
@@ -999,11 +588,11 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
                 <button
                   type="button"
                   onClick={exportInvoicesToPDF}
-                  title={isRtl ? 'تنزيل وطباعة كشف حساب الفواتير كـ PDF' : 'Download and print ledger audit PDF'}
+                  title={isRtl ? 'طباعة كشف الفواتير' : 'Print invoice list'} aria-label={isRtl ? 'طباعة كشف الفواتير' : 'Print invoice list'}
                   className="flex-1 md:flex-none flex items-center justify-center gap-1.5 px-4 py-3 bg-indigo-600/10 dark:bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border border-indigo-500/20 hover:border-indigo-500/50 rounded-xl text-xs font-black transition-all cursor-pointer"
                 >
-                  <FileText size={14} />
-                  <span>{isRtl ? 'كشف PDF' : 'Ledger PDF'}</span>
+                  <Printer size={14} />
+                  <span>{isRtl ? 'طباعة الكشف' : 'Print list'}</span>
                 </button>
               </div>
             </div>
@@ -1034,7 +623,8 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
                 </div>
                 <div className="space-y-4">
                   <div>
-                    <h3 className="text-lg font-bold text-gray-900 dark:text-gray-100 truncate">{inv.customerName || inv.supplierName || (isRtl ? 'عميل افتراضي' : 'Standard Client')}</h3>
+                    <h3 className="text-lg font-bold text-gray-900 dark:text-gray-100 truncate">{inv.customerName || inv.supplierName || (isRtl ? 'زبون نقدي' : 'Walk-in')}</h3>
+                    <p className="text-[11px] text-gray-400 font-bold mt-1">{paymentMethodLabel(inv.paymentMethod, isRtl)} · {inv.currency}</p>
                   </div>
                   <div className="flex items-center justify-between pt-4 border-t border-gray-50 dark:border-gray-700">
                     <button
@@ -1043,11 +633,11 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
                         e.stopPropagation();
                         exportSingleInvoiceToPDF(inv);
                       }}
-                      title={isRtl ? 'تصدير هذه الفاتورة كملف PDF مجهز للطباعة' : 'Export this invoice as print-ready PDF'}
-                      className="py-1.5 px-3 rounded-xl bg-slate-50 hover:bg-slate-200 dark:bg-slate-700 dark:hover:bg-slate-650 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-600/50 transition-colors cursor-pointer flex items-center gap-1.5 text-[10px] font-black"
+                      title={isRtl ? 'طباعة الفاتورة' : 'Print invoice'} aria-label={isRtl ? 'طباعة الفاتورة' : 'Print invoice'}
+                      className="py-1.5 px-3 rounded-xl bg-slate-50 hover:bg-slate-200 dark:bg-slate-700 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-600/50 transition-colors cursor-pointer flex items-center gap-1.5 text-[10px] font-black"
                     >
-                      <Download size={11} />
-                      <span>{isRtl ? 'تحميل PDF' : 'PDF'}</span>
+                      <Printer size={11} />
+                      <span>{isRtl ? 'طباعة' : 'Print'}</span>
                     </button>
                     <span className={`text-xl font-black ${inv.type === 'sale' ? 'text-indigo-600' : 'text-emerald-600'} font-mono`}>{formatCurrency(inv.totalAmount, inv.currency)}</span>
                   </div>
@@ -1086,7 +676,7 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
                         {t.sale}
                       </button>
                       <button
-                        onClick={() => { setInvoiceType('purchase'); setInvoiceItems([]); }}
+                        onClick={() => { setInvoiceType('purchase'); setInvoiceItems([]); setPaymentMethod('cash'); setSelectedCustomerId(''); }}
                         className={`px-4 py-2 rounded-xl text-xs font-black transition-all ${invoiceType === 'purchase' ? 'bg-white dark:bg-gray-700 text-emerald-600 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`}
                       >
                         {t.purchase}
@@ -1119,7 +709,7 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
                     <Search className={`absolute ${isRtl ? 'right-4' : 'left-4'} top-1/2 -translate-y-1/2 text-gray-400`} size={18} />
                     <input 
                       type="text"
-                      placeholder={t.searchPlaceholder}
+                      placeholder={t.searchPlaceholder} aria-label={t.searchPlaceholder}
                       value={searchTerm}
                       onChange={(e) => setSearchTerm(e.target.value)}
                       className="w-full pr-12 pl-12 py-3.5 bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-700 rounded-2xl focus:ring-2 focus:ring-indigo-500 outline-none dark:text-white font-medium"
@@ -1155,36 +745,88 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
                   </div>
 
                   <div className="space-y-4">
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                      <div className="md:col-span-2 space-y-1.5">
-                        <label className="text-[10px] font-black text-gray-400 uppercase flex items-center gap-1.5" dir={isRtl ? 'rtl' : 'ltr'}>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div className="space-y-1.5">
+                        <label className="text-[10px] font-black text-gray-400 uppercase flex items-center gap-1.5">
                           <User size={12} />
                           {invoiceType === 'sale' ? t.clientName : t.customerSupplier}
                         </label>
-                        <input 
-                          type="text"
-                          value={invoiceType === 'sale' ? customerName : supplierName}
-                          onChange={(e) => invoiceType === 'sale' ? setCustomerName(e.target.value) : setSupplierName(e.target.value)}
-                          placeholder={invoiceType === 'sale' ? t.placeholderUserName : t.placeholderBusinessName}
-                          className="w-full px-5 py-3.5 bg-gray-50 dark:bg-gray-900 border border-transparent dark:border-gray-700 rounded-2xl focus:bg-white dark:focus:bg-gray-800 focus:border-indigo-500 outline-none text-right font-bold dark:text-white transition-all"
-                        />
-                      </div>
-                      <div className="md:col-span-1 space-y-1.5">
-                        <label className="text-[10px] font-black text-gray-400 uppercase flex items-center gap-1.5" dir={isRtl ? 'rtl' : 'ltr'}>
-                          <span>💵</span>
-                          {isRtl ? "العملة" : "Currency"}
-                        </label>
-                        <select
-                          value={invoiceCurrency}
-                          onChange={(e) => setInvoiceCurrency(e.target.value as Currency)}
-                          className="w-full px-4 py-3.5 bg-gray-50 dark:bg-gray-900 border border-transparent dark:border-gray-700 rounded-2xl focus:bg-white dark:focus:bg-gray-800 focus:border-indigo-500 outline-none font-bold dark:text-white transition-all text-center select-none"
-                        >
-                          <option value="JOD">JOD ($)</option>
-                          <option value="ILS">ILS (₪)</option>
-                          <option value="USD">USD ($)</option>
-                        </select>
+                        {invoiceType === 'sale' ? (
+                          <>
+                            <select
+                              value={selectedCustomerId}
+                              onChange={(e) => {
+                                const id = e.target.value;
+                                setSelectedCustomerId(id);
+                                const found = customers.find((c) => c.id === id);
+                                if (found) {
+                                  setCustomerName(found.name);
+                                } else {
+                                  setCustomerName('');
+                                  if (paymentMethod === 'credit') setPaymentMethod('cash');
+                                }
+                              }}
+                              className="w-full px-4 py-3.5 bg-gray-50 dark:bg-gray-900 border border-transparent dark:border-gray-700 rounded-2xl focus:bg-white dark:focus:bg-gray-800 focus:border-indigo-500 outline-none font-bold dark:text-white"
+                            >
+                              <option value="">{isRtl ? 'زبون عابر (اكتب الاسم)' : 'Walk-in (type a name)'}</option>
+                              {customers.map((c) => (
+                                <option key={c.id} value={c.id}>{c.name}{c.phone ? ` · ${c.phone}` : ''}</option>
+                              ))}
+                            </select>
+                            {!selectedCustomerId && (
+                              <input
+                                type="text"
+                                value={customerName}
+                                onChange={(e) => setCustomerName(e.target.value)}
+                                placeholder={t.placeholderUserName} aria-label={t.placeholderUserName}
+                                className="w-full px-5 py-3.5 bg-gray-50 dark:bg-gray-900 border border-transparent dark:border-gray-700 rounded-2xl focus:bg-white dark:focus:bg-gray-800 focus:border-indigo-500 outline-none font-bold dark:text-white"
+                              />
+                            )}
+                          </>
+                        ) : (
+                          <input
+                            type="text"
+                            value={supplierName}
+                            onChange={(e) => setSupplierName(e.target.value)}
+                            placeholder={t.placeholderBusinessName} aria-label={t.placeholderBusinessName}
+                            className="w-full px-5 py-3.5 bg-gray-50 dark:bg-gray-900 border border-transparent dark:border-gray-700 rounded-2xl focus:bg-white dark:focus:bg-gray-800 focus:border-indigo-500 outline-none font-bold dark:text-white"
+                          />
+                        )}
                       </div>
                     </div>
+                    <CurrencyPicker
+                      value={invoiceCurrency}
+                      onChange={(code) => changeInvoiceCurrency(code as Currency)}
+                      isRtl={isRtl}
+                      label={isRtl ? 'عملة الفاتورة' : 'Invoice currency'}
+                    />
+
+                    {invoiceType === 'sale' && (
+                      <div className="space-y-1.5">
+                        <label className="text-[10px] font-black text-gray-400 uppercase">{isRtl ? 'طريقة الدفع' : 'Payment'}</label>
+                        <div className="grid grid-cols-3 gap-2">
+                          {([
+                            ['cash', isRtl ? 'نقدي' : 'Cash'],
+                            ['card', isRtl ? 'بطاقة' : 'Card'],
+                            ['credit', isRtl ? 'آجل' : 'Credit'],
+                          ] as const).map(([value, label]) => (
+                            <button
+                              key={value}
+                              type="button"
+                              disabled={value === 'credit' && !selectedCustomerId}
+                              onClick={() => setPaymentMethod(value)}
+                              className={`py-3 rounded-2xl text-xs font-black border transition-all ${
+                                paymentMethod === value
+                                  ? 'bg-indigo-600 text-white border-indigo-600'
+                                  : 'bg-gray-50 dark:bg-gray-900 text-gray-500 border-transparent disabled:opacity-40'
+                              }`}
+                            >
+                              {label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
 
                     <div className="bg-gray-50/50 dark:bg-gray-900/50 p-6 rounded-[2.5rem] space-y-4 min-h-[400px] border-2 border-dashed border-gray-100 dark:border-gray-700 overflow-y-auto">
                       {invoiceItems.length === 0 ? (
@@ -1196,7 +838,7 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
                         <div className="space-y-4">
                           {invoiceItems.map(item => (
                             <div key={item.productId} className="flex items-center justify-between bg-white dark:bg-gray-800 p-5 rounded-3xl shadow-sm border border-gray-100 dark:border-gray-700 group hover:shadow-md transition-all">
-                              <button onClick={() => removeItem(item.productId)} className="text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-900/30 p-2 rounded-xl transition-colors">
+                              <button onClick={() => removeItem(item.productId)} className="text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-900/30 p-2 rounded-xl transition-colors" aria-label={isRtl ? 'حذف' : 'Delete'}>
                                 <Trash2 size={18} />
                               </button>
                               
@@ -1207,7 +849,7 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
                                   <button onClick={() => updateItem(item.productId, item.quantity + 1, item.unitPrice)} className="text-gray-400 hover:text-indigo-600 font-black text-lg">+</button>
                                 </div>
                                 <div className="flex items-center gap-1 font-mono text-[10px] font-black text-gray-400">
-                                  <span>{invoiceCurrency === 'JOD' ? 'د.أ' : invoiceCurrency === 'USD' ? '$' : '₪'}</span>
+                                  <span>{CURRENCY_SYMBOLS[invoiceCurrency] || invoiceCurrency}</span>
                                   <input 
                                     type="number" 
                                     value={item.unitPrice} 
@@ -1229,11 +871,11 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
 
                     <div className="space-y-3 pt-6 px-4">
                       <div className="flex justify-between text-xs font-black text-gray-400 uppercase tracking-widest">
-                        <span className="font-mono">{formatCurrency(invoiceItems.reduce((acc, item) => acc + item.total, 0) * (settings?.defaultVatRate || 0) / 100, invoiceCurrency)}</span>
-                        <span>{t.tax} ({settings?.defaultVatRate}%)</span>
+                        <span className="font-mono">{formatCurrency(draftTotals.taxAmount, invoiceCurrency)}</span>
+                        <span>{t.tax} ({vatRate}%)</span>
                       </div>
                       <div className="flex justify-between text-2xl font-black text-indigo-600 dark:text-indigo-400 pt-3 border-t-2 border-gray-50 dark:border-gray-700">
-                        <span className="font-mono">{formatCurrency(invoiceItems.reduce((acc, item) => acc + item.total, 0) * (1 + (settings?.defaultVatRate || 0) / 100), invoiceCurrency)}</span>
+                        <span className="font-mono">{formatCurrency(draftTotals.total, invoiceCurrency)}</span>
                         <span className="uppercase tracking-tighter">{t.total}</span>
                       </div>
                     </div>
@@ -1242,9 +884,9 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
                       {/* Save without printing button */}
                       <button
                         type="button"
-                        disabled={isSubmitting || invoiceItems.length === 0 || (invoiceType === 'sale' ? !customerName : !supplierName)}
+                        disabled={isSubmitting || invoiceItems.length === 0 || (invoiceType === 'sale' ? !customerName.trim() || (paymentMethod === 'credit' && !selectedCustomerId) : !supplierName.trim())}
                         onClick={() => handleCreateInvoice(false)}
-                        className="flex-1 py-4 px-6 bg-white dark:bg-gray-805 text-gray-750 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-750 rounded-2xl font-bold text-sm shadow-sm transition-all active:scale-95 disabled:opacity-50 disabled:scale-100 flex items-center justify-center gap-2 cursor-pointer"
+                        className="flex-1 py-4 px-6 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700 rounded-2xl font-bold text-sm shadow-sm transition-all active:scale-95 disabled:opacity-50 disabled:scale-100 flex items-center justify-center gap-2 cursor-pointer"
                       >
                         {isSubmitting ? (
                           <svg className="animate-spin h-4 w-4 text-gray-500" fill="none" viewBox="0 0 24 24">
@@ -1260,11 +902,11 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
                       {/* Save and print button */}
                       <button
                         type="button"
-                        disabled={isSubmitting || invoiceItems.length === 0 || (invoiceType === 'sale' ? !customerName : !supplierName)}
+                        disabled={isSubmitting || invoiceItems.length === 0 || (invoiceType === 'sale' ? !customerName.trim() || (paymentMethod === 'credit' && !selectedCustomerId) : !supplierName.trim())}
                         onClick={() => handleCreateInvoice(true)}
                         className={`flex-1 py-4 px-6 ${
                           invoiceType === 'sale' 
-                            ? 'bg-indigo-650 shadow-indigo-100 dark:shadow-indigo-900/30 hover:bg-indigo-700' 
+                            ? 'bg-indigo-600 shadow-indigo-100 dark:shadow-indigo-900/30 hover:bg-indigo-700' 
                             : 'bg-emerald-600 shadow-emerald-100 dark:shadow-emerald-900/30 hover:bg-emerald-700'
                         } text-white rounded-2xl font-bold text-sm shadow-lg transition-all active:scale-95 disabled:opacity-50 disabled:scale-100 flex items-center justify-center gap-2 cursor-pointer`}
                       >
@@ -1293,8 +935,7 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
             animate={{ opacity: 1, scale: 1 }}
             className="flex flex-col items-center gap-8 w-full"
           >
-            {/* Action Bar */}
-            <div className="flex gap-4 w-full justify-end px-4 no-print class-action-bar">
+            <div className="flex flex-wrap gap-3 w-full justify-end px-4 no-print">
               <button
                 onClick={() => {
                   setView('list');
@@ -1306,12 +947,16 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
               </button>
               <button
                 onClick={() => {
+                  const party = selectedInvoice.customerName || selectedInvoice.supplierName || '';
+                  const amount = formatCurrency(selectedInvoice.totalAmount, selectedInvoice.currency);
+                  const text = isRtl
+                    ? `فاتورة ${selectedInvoice.invoiceNumber}${party ? ` — ${party}` : ''} — ${amount}`
+                    : `Invoice ${selectedInvoice.invoiceNumber}${party ? ` — ${party}` : ''} — ${amount}`;
                   if (navigator.share) {
-                    navigator.share({
-                      title: `Invoice ${selectedInvoice.invoiceNumber}`,
-                      text: `Invoice ${selectedInvoice.invoiceNumber} for ${selectedInvoice.customerName || selectedInvoice.supplierName}`,
-                      url: window.location.href,
-                    });
+                    navigator.share({ title: selectedInvoice.invoiceNumber, text });
+                  } else {
+                    navigator.clipboard?.writeText(text);
+                    toast.success(isRtl ? 'تم نسخ ملخص الفاتورة' : 'Invoice summary copied');
                   }
                 }}
                 className="flex items-center gap-2 px-6 py-3 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 border border-gray-100 dark:border-gray-700 rounded-2xl font-bold shadow-sm hover:bg-gray-50 dark:hover:bg-gray-700 transition-all active:scale-95 cursor-pointer no-print"
@@ -1321,224 +966,125 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
               </button>
               <button
                 onClick={() => exportSingleInvoiceToPDF(selectedInvoice)}
-                className="flex items-center gap-2 px-6 py-3 bg-indigo-650 text-white rounded-2xl font-bold shadow-lg shadow-indigo-100 dark:shadow-indigo-900/30 hover:bg-indigo-700 transition-all active:scale-95 cursor-pointer no-print"
+                className="flex items-center gap-2 px-6 py-3 bg-indigo-600 text-white rounded-2xl font-bold shadow-lg shadow-indigo-100 dark:shadow-indigo-900/30 hover:bg-indigo-700 transition-all active:scale-95 cursor-pointer no-print"
               >
                 <Printer size={20} />
-                {isRtl ? 'حفظ كـ PDF / طباعة' : 'Save as PDF / Print'}
+                {isRtl ? 'طباعة' : 'Print'}
               </button>
             </div>
 
-            {/* Printable Area - Premium Formal A4 Invoice Layout */}
-            <div 
+            <div
               id="invoice-capture"
               ref={printRef}
-              className="w-full max-w-3xl bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-2xl p-8 sm:p-14 rounded-[2rem] border border-slate-200 dark:border-slate-800 invoice-print relative overflow-hidden"
+              className="w-full max-w-3xl bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-xl p-8 sm:p-12 rounded-[2rem] border border-slate-200 dark:border-slate-800"
               dir={isRtl ? 'rtl' : 'ltr'}
             >
-              {/* Top Premium Luminous Accent Bar */}
-              <div className="absolute top-0 left-0 right-0 h-2 bg-gradient-to-r from-cyan-400 via-blue-500 to-indigo-600" />
-              <div className="border-b-4 border-double border-slate-300 dark:border-slate-700 pb-8 mb-8 text-slate-800 dark:text-slate-100">
-                <div className="flex flex-col md:flex-row justify-between items-center md:items-start gap-6">
-                  {/* Right Header Side (Arabic Letterhead info) */}
-                  <div className="space-y-2 text-center md:text-right flex-1 w-full order-2 md:order-1">
-                    <div className="flex items-center justify-center md:justify-start gap-3">
-                      {settings?.companyLogoUrl ? (
-                        <div className="w-16 h-16 bg-white rounded-xl border border-slate-200 p-1 flex items-center justify-center shadow-sm shrink-0">
-                          <img 
-                            src={settings.companyLogoUrl} 
-                            alt="Logo" 
-                            className="max-w-full max-h-full object-contain"
-                            referrerPolicy="no-referrer"
-                          />
-                        </div>
-                      ) : (
-                        <div className="w-12 h-12 bg-indigo-600 rounded-xl flex items-center justify-center text-white shadow-md shadow-indigo-500/10 shrink-0">
-                          <Building size={24} />
-                        </div>
-                      )}
-                      <div className="text-right">
-                        <span className="text-xl font-black text-slate-900 dark:text-white block tracking-tight">
-                          {settings?.businessName || (isRtl ? 'مستودعي الذكي' : 'Smart Warehouse')}
-                        </span>
-                        <span className="text-[10px] text-indigo-600 dark:text-indigo-400 font-extrabold uppercase tracking-widest block">
-                          {isRtl ? 'إدارة المستودعات ونقاط البيع' : 'Warehouse & Business System'}
-                        </span>
-                      </div>
+              <div className="flex flex-col sm:flex-row justify-between gap-6 pb-6 mb-6 border-b border-slate-200 dark:border-slate-700">
+                <div className="flex items-start gap-3">
+                  {settings?.companyLogoUrl ? (
+                    <div className="w-14 h-14 bg-white rounded-xl border border-slate-200 p-1 flex items-center justify-center shrink-0">
+                      <img src={settings.companyLogoUrl} alt="" className="max-w-full max-h-full object-contain" referrerPolicy="no-referrer" />
                     </div>
-
-                    <div className="text-xs text-slate-500 dark:text-slate-400 font-bold space-y-1 mt-3">
-                      {settings?.businessAddress && (
-                        <p className="flex items-center justify-center md:justify-start gap-1">
-                          <span>📍</span>
-                          <span>{settings.businessAddress}</span>
-                        </p>
-                      )}
-                      {settings?.businessPhone && (
-                        <p className="flex items-center justify-center md:justify-start gap-1">
-                          <span>📞</span>
-                          <span className="font-mono">{settings.businessPhone}</span>
-                        </p>
-                      )}
-                      {settings?.businessEmail && (
-                        <p className="flex items-center justify-center md:justify-start gap-1">
-                          <span>✉️</span>
-                          <span>{settings.businessEmail}</span>
-                        </p>
-                      )}
-                      {settings?.taxRegistrationNumber && (
-                        <p className="flex items-center justify-center md:justify-start gap-1 bg-amber-500/5 dark:bg-amber-500/10 px-2 py-1 rounded inline-block text-amber-700 dark:text-amber-400 font-black">
-                          <span>📝 {isRtl ? 'الرقم الضريبي:' : 'VAT ID:'}</span>
-                          <span className="font-mono">{settings.taxRegistrationNumber}</span>
-                        </p>
-                      )}
+                  ) : (
+                    <div className="w-12 h-12 bg-indigo-600 rounded-xl flex items-center justify-center text-white shrink-0">
+                      <Building size={22} />
                     </div>
-                  </div>
-
-                  {/* Middle Section (Official Document Title) */}
-                  <div className="flex flex-col items-center justify-center space-y-1.5 order-1 md:order-2 shrink-0">
-                    <span className="text-[9px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-widest">
-                      {isRtl ? 'مستند رسمي معتمد' : 'RECOGNIZED OFFICIAL DOCUMENT'}
-                    </span>
-                    <h2 className="text-base font-black bg-slate-100 dark:bg-slate-800/80 px-4 py-2 rounded-2xl border border-slate-200/60 dark:border-slate-700/50 text-indigo-600 dark:text-cyan-400 mt-1 shadow-sm text-center">
-                      {selectedInvoice.type === 'sale' 
-                        ? (isRtl ? 'فاتورة ضريبية قانونية' : 'Tax Sales Invoice') 
-                        : (isRtl ? 'فاتورة شراء مخزنية' : 'Warehouse Purchase Invoice')}
+                  )}
+                  <div>
+                    <h2 className="text-xl font-bold text-slate-900 dark:text-white">
+                      {settings?.businessName || appName(isRtl)}
                     </h2>
+                    <div className="text-xs text-slate-500 mt-1 space-y-0.5">
+                      {settings?.businessAddress && <p>{settings.businessAddress}</p>}
+                      {settings?.businessPhone && <p className="font-mono">{settings.businessPhone}</p>}
+                      {settings?.businessEmail && <p>{settings.businessEmail}</p>}
+                      {settings?.taxRegistrationNumber && (
+                        <p>{isRtl ? 'الرقم الضريبي' : 'Tax No.'}: <span className="font-mono">{settings.taxRegistrationNumber}</span></p>
+                      )}
+                    </div>
                   </div>
-
-                  {/* Left Header Side (System Branding) */}
-                  <div className="space-y-1 text-center md:text-left text-xs text-slate-400 dark:text-slate-500 order-3 flex-1 w-full flex flex-col items-center md:items-end md:justify-start">
-                    <span className="text-base font-black text-slate-900 dark:text-white tracking-tight">MOSTAWDAl</span>
-                    <p className="text-[10px] font-bold tracking-wider">ENTERPRISE ERP</p>
-                    <p className="text-[9px] mt-1 text-slate-450">{new Date(selectedInvoice.date).toLocaleTimeString(isRtl ? 'ar-JO' : 'en-US', { hour: '2-digit', minute: '2-digit' })}</p>
-                  </div>
+                </div>
+                <div className={`${isRtl ? 'text-left' : 'text-right'}`}>
+                  <p className="text-sm font-bold text-slate-900 dark:text-white">
+                    {invoiceDocumentTitle(selectedInvoice, isRtl, !!settings?.taxRegistrationNumber)}
+                  </p>
+                  <p className="font-mono font-bold text-indigo-600 dark:text-indigo-400 mt-1">#{selectedInvoice.invoiceNumber}</p>
                 </div>
               </div>
 
-              {/* Dynamic Metadata & Information Grid */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 bg-slate-50 dark:bg-slate-950/40 p-6 rounded-2xl border border-slate-200 dark:border-slate-800/50 mb-8 select-none">
-                <div className="space-y-2.5">
-                  <div className="flex justify-between items-center text-xs">
-                    <span className="text-slate-450 dark:text-slate-500 font-bold">{isRtl ? 'رقم الفاتورة المرجعي:' : 'Invoice ID Number:'}</span>
-                    <span className="font-mono font-extrabold text-indigo-600 dark:text-indigo-400 text-sm">#{selectedInvoice.invoiceNumber}</span>
-                  </div>
-                  <div className="flex justify-between items-center text-xs">
-                    <span className="text-slate-450 dark:text-slate-500 font-bold">{isRtl ? 'تصنيف الصفقة المالية:' : 'Transaction Category:'}</span>
-                    <span className={`px-2.5 py-0.5 rounded-md font-bold text-[11px] ${selectedInvoice.type === 'sale' ? 'bg-indigo-50 text-indigo-600 dark:bg-indigo-950/40 dark:text-indigo-400' : 'bg-emerald-50 text-emerald-600 dark:bg-emerald-950/40 dark:text-emerald-400'}`}>
-                      {selectedInvoice.type === 'sale' ? (isRtl ? 'فاتورة مبيعات' : 'Sales Transaction') : (isRtl ? 'فاتورة مشتريات' : 'Purchase Ledger')}
-                    </span>
-                  </div>
-                  <div className="flex justify-between items-center text-xs">
-                    <span className="text-slate-450 dark:text-slate-500 font-bold">{isRtl ? 'الرقم الضريبي الموحد للمنشأة:' : 'Registered Tax Registration ID:'}</span>
-                    <span className="font-mono font-black text-slate-800 dark:text-slate-200">
-                      {settings?.taxRegistrationNumber || (isRtl ? 'غير متوفر' : 'Not Registered')}
-                    </span>
-                  </div>
+              <div className="grid grid-cols-2 gap-4 text-sm mb-8">
+                <div>
+                  <p className="text-[11px] text-slate-400 font-bold">{isRtl ? 'التاريخ' : 'Date'}</p>
+                  <p className="font-semibold">
+                    {new Date(selectedInvoice.date).toLocaleString(isRtl ? 'ar' : 'en', { day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                  </p>
                 </div>
-
-                <div className="space-y-2.5 sm:border-r sm:border-slate-200 sm:dark:border-slate-800 sm:pr-6 sm:mr-6">
-                  <div className="flex justify-between items-center text-xs">
-                    <span className="text-slate-450 dark:text-slate-500 font-bold">{isRtl ? 'تاريخ المعاملة والتحرير:' : 'Issue Date & Time:'}</span>
-                    <span className="font-semibold text-slate-800 dark:text-slate-200">
-                      {new Date(selectedInvoice.date).toLocaleDateString(isRtl ? 'ar-JO' : 'en-US', { day: 'numeric', month: 'long', year: 'numeric' })}
-                    </span>
-                  </div>
-                  <div className="flex justify-between items-center text-xs">
-                    <span className="text-slate-450 dark:text-slate-500 font-bold">{isRtl ? 'اليوم في التقويم:' : 'Calendar Day:'}</span>
-                    <span className="font-black text-indigo-600 dark:text-indigo-400">
-                      {isRtl ? (['الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت'][new Date(selectedInvoice.date).getDay()]) : new Date(selectedInvoice.date).toLocaleDateString('en-US', { weekday: 'long' })}
-                    </span>
-                  </div>
-                  <div className="flex justify-between items-center text-xs">
-                    <span className="text-slate-450 dark:text-slate-500 font-bold">
-                      {selectedInvoice.type === 'sale' ? (isRtl ? 'العميل المفوتر:' : 'Invoiced Customer:') : (isRtl ? 'المورد المسجل:' : 'Registered Supplier:')}
-                    </span>
-                    <span className="font-black text-slate-900 dark:text-white">
-                      {selectedInvoice.customerName || selectedInvoice.supplierName || (isRtl ? 'زبون عام مجهول' : 'General Client/Walk-in')}
-                    </span>
-                  </div>
+                <div>
+                  <p className="text-[11px] text-slate-400 font-bold">{selectedInvoice.type === 'sale' ? (isRtl ? 'إلى' : 'Bill to') : (isRtl ? 'من' : 'From')}</p>
+                  <p className="font-semibold">{selectedInvoice.customerName || selectedInvoice.supplierName || (isRtl ? 'زبون نقدي' : 'Walk-in')}</p>
+                </div>
+                <div>
+                  <p className="text-[11px] text-slate-400 font-bold">{isRtl ? 'طريقة الدفع' : 'Payment'}</p>
+                  <p className="font-semibold">{paymentMethodLabel(selectedInvoice.paymentMethod, isRtl)}</p>
+                </div>
+                <div>
+                  <p className="text-[11px] text-slate-400 font-bold">{isRtl ? 'العملة' : 'Currency'}</p>
+                  <p className="font-semibold font-mono">{selectedInvoice.currency}</p>
                 </div>
               </div>
 
-              {/* Clean Data Table (الجدول الرقمي الموحد) */}
               <div className="overflow-hidden rounded-2xl border border-slate-200 dark:border-slate-800 mb-8">
-                <table className="w-full text-inner-table">
+                <table className="w-full">
                   <thead>
-                    <tr className="bg-slate-50 dark:bg-slate-950 font-bold text-xs text-slate-500 border-b border-slate-200 dark:border-slate-800">
-                      <th className="py-4 px-5 text-right font-black uppercase tracking-wider">{isRtl ? 'الصنف التفصيلي' : 'Item Description'}</th>
-                      <th className="py-4 px-5 text-center font-black uppercase tracking-wider w-24">{isRtl ? 'الكمية' : 'Qty'}</th>
-                      <th className="py-4 px-5 text-center font-black uppercase tracking-wider w-32">{isRtl ? 'سعر الوحدة' : 'Unit Price'}</th>
-                      <th className="py-4 px-5 text-left font-black uppercase tracking-wider w-36">{isRtl ? 'المجموع الإجمالي' : 'Total'}</th>
+                    <tr className="bg-slate-50 dark:bg-slate-950 text-xs text-slate-500 border-b border-slate-200 dark:border-slate-800">
+                      <th className={`py-3 px-4 font-bold ${isRtl ? 'text-right' : 'text-left'}`}>{isRtl ? 'الصنف' : 'Item'}</th>
+                      <th className="py-3 px-4 text-center font-bold w-20">{isRtl ? 'الكمية' : 'Qty'}</th>
+                      <th className="py-3 px-4 text-center font-bold w-28">{isRtl ? 'سعر الوحدة' : 'Unit'}</th>
+                      <th className={`py-3 px-4 font-bold w-32 ${isRtl ? 'text-left' : 'text-right'}`}>{isRtl ? 'المجموع' : 'Amount'}</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-200 dark:divide-slate-800 text-xs">
-                    {selectedInvoice.items.map((item, idx) => (
-                      <tr key={idx} className="hover:bg-slate-50/50 dark:hover:bg-slate-800/50 transition-colors">
-                        <td className="py-4 px-5 text-right">
-                          <div className="font-bold text-slate-900 dark:text-slate-100">{item.description}</div>
-                          <div className="text-[10px] text-slate-400 font-mono mt-0.5">ID: {item.productId.slice(0, 8)}</div>
-                        </td>
-                        <td className="py-4 px-5 text-center font-bold text-slate-900 dark:text-slate-100">{item.quantity}</td>
-                        <td className="py-4 px-5 text-center font-mono text-slate-500 dark:text-slate-400">{formatCurrency(item.unitPrice, selectedInvoice.currency)}</td>
-                        <td className="py-4 px-5 text-left font-mono font-black text-indigo-600 dark:text-indigo-400">{formatCurrency(item.total, selectedInvoice.currency)}</td>
-                      </tr>
-                    ))}
+                  <tbody className="divide-y divide-slate-200 dark:divide-slate-800 text-sm">
+                    {selectedInvoice.items.map((item, idx) => {
+                      const sku = invoiceItemSku(item, products);
+                      return (
+                        <tr key={idx}>
+                          <td className="py-3 px-4">
+                            <div className="font-bold text-slate-900 dark:text-slate-100">{item.description}</div>
+                            {sku && <div className="text-[11px] text-slate-400 font-mono mt-0.5">{isRtl ? 'رمز الصنف' : 'SKU'}: {sku}</div>}
+                          </td>
+                          <td className="py-3 px-4 text-center">{item.quantity}</td>
+                          <td className="py-3 px-4 text-center font-mono text-slate-500">{formatCurrency(item.unitPrice, selectedInvoice.currency)}</td>
+                          <td className={`py-3 px-4 font-mono font-bold ${isRtl ? 'text-left' : 'text-right'}`}>{formatCurrency(item.total, selectedInvoice.currency)}</td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
 
-              {/* Summary and Financial Calculations */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-8 items-start mb-10">
-                {/* Notes Column */}
-                <div className="p-5 bg-slate-50 dark:bg-slate-950/40 rounded-2xl border border-slate-200 dark:border-slate-800 h-full">
-                  <span className="text-[10px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-widest block mb-2">{isRtl ? 'ملاحظات وشروط الفاتورة' : 'Invoice Notes'}</span>
-                  <p className="text-xs text-slate-600 dark:text-slate-350 leading-relaxed italic space-y-1">
-                    <span>{isRtl ? '1. البضاعة المباعة لا ترد ولا تستبدل بعد مرور 3 أيام من تاريخ الشراء.' : '1. Goods sold can only be returned within 3 days of purchase.'}</span>
-                    <br />
-                    <span>{isRtl ? '2. تم تسجيل هذه المعاملة إلكترونياً وهي خاضعة لنظام المحاسبة المعتمد.' : '2. This invoice is registered digitally via automated secure ledgers.'}</span>
-                  </p>
+              <div className="max-w-xs ms-auto space-y-2 text-sm">
+                <div className="flex justify-between">
+                  <span className="text-slate-400">{isRtl ? 'المجموع الفرعي' : 'Subtotal'}</span>
+                  <span className="font-mono">{formatCurrency(selectedInvoice.subtotal, selectedInvoice.currency)}</span>
                 </div>
-                
-                {/* Math Calculations */}
-                <div className="space-y-3">
-                  <div className="flex justify-between items-center px-4 text-xs">
-                    <span className="text-slate-400 font-bold uppercase tracking-wider">{isRtl ? 'المجموع الفرعي:' : 'Subtotal:'}</span>
-                    <span className="font-mono font-bold text-slate-900 dark:text-slate-100">{formatCurrency(selectedInvoice.subtotal, selectedInvoice.currency)}</span>
-                  </div>
-                  <div className="flex justify-between items-center px-4 text-xs">
-                    <span className="text-slate-400 font-bold uppercase tracking-wider">{isRtl ? 'ضريبة القيمة المضافة' : 'VAT'} ({settings?.defaultVatRate || 16}%)</span>
-                    <span className="font-mono font-bold text-slate-900 dark:text-slate-100">{formatCurrency(selectedInvoice.taxAmount, selectedInvoice.currency)}</span>
-                  </div>
-                  <div className="bg-slate-900 dark:bg-white text-white dark:text-slate-900 p-5 sm:p-6 rounded-2xl shadow-xl relative overflow-hidden">
-                    <div className="relative z-10 flex justify-between items-center">
-                      <span className="font-black uppercase tracking-widest text-xs opacity-75">{isRtl ? 'المجموع النهائي الكلي:' : 'GRAND TOTAL:'}</span>
-                      <span className="text-2xl font-black font-mono">{formatCurrency(selectedInvoice.totalAmount, selectedInvoice.currency)}</span>
-                    </div>
-                  </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">{isRtl ? 'الضريبة' : 'VAT'} ({invoiceVatRate(selectedInvoice)}%)</span>
+                  <span className="font-mono">{formatCurrency(selectedInvoice.taxAmount, selectedInvoice.currency)}</span>
+                </div>
+                <div className="flex justify-between pt-3 border-t border-slate-200 dark:border-slate-700 text-base font-bold">
+                  <span>{isRtl ? 'الإجمالي' : 'Total'}</span>
+                  <span className="font-mono">{formatCurrency(selectedInvoice.totalAmount, selectedInvoice.currency)}</span>
                 </div>
               </div>
 
-              {/* Verified Badge and Digital Signatures (الملاحظات والتوقيع) */}
-              <div className="grid grid-cols-2 gap-6 pt-6 border-t border-dashed border-slate-200 dark:border-slate-800 text-center mb-6">
-                <div className="space-y-4">
-                  <span className="text-[11px] font-black text-slate-450 dark:text-slate-500 uppercase tracking-wider block">{isRtl ? 'توقيع المستلم / المشتري' : 'Buyer Signature'}</span>
-                  <div className="h-12 border border-dashed border-slate-200 dark:border-slate-800 rounded-xl flex items-center justify-center text-slate-300 text-[10px] italic">
-                    {isRtl ? 'توقيع رسمي معتمد' : 'Authorized Signature'}
-                  </div>
-                </div>
-                <div className="space-y-4">
-                  <span className="text-[11px] font-black text-slate-450 dark:text-slate-500 uppercase tracking-wider block">{isRtl ? 'توقيع البائع / أمين المستودع' : 'Seller Signature'}</span>
-                  <div className="h-12 border border-dashed border-slate-200 dark:border-slate-800 rounded-xl flex items-center justify-center text-slate-300 text-[10px] italic">
-                    {settings?.businessName || (isRtl ? 'ختم المنشأة' : 'Company Stamp')}
-                  </div>
-                </div>
+              <p className="mt-8 text-xs text-slate-500">
+                {isRtl ? 'يرجى مراجعة الكميات والمبالغ عند الاستلام.' : 'Please verify quantities and amounts on receipt.'}
+              </p>
+              <div className="grid grid-cols-2 gap-8 mt-10 pt-6 border-t border-slate-200 dark:border-slate-800 text-center text-xs text-slate-400">
+                <div className="pt-8 border-t border-slate-200 dark:border-slate-700">{isRtl ? 'توقيع المستلم' : 'Received by'}</div>
+                <div className="pt-8 border-t border-slate-200 dark:border-slate-700">{settings?.businessName || appName(isRtl)}</div>
               </div>
-              
-              {/* Minimal Printable Footer */}
-              <div className="pt-6 border-t border-slate-200 dark:border-slate-800 text-center invoice-print-footer">
-                <p className="text-slate-900 dark:text-white font-black text-sm tracking-tighter mb-1 select-none">{t.invoiceThankYou}</p>
-                <p className="text-slate-400 dark:text-slate-500 text-[10px] font-bold uppercase tracking-widest select-none">نظام مستودعي لإدارة المخازن والفواتير • 2026</p>
-              </div>
+              <p className="mt-8 text-center text-[11px] text-slate-400">{appName(isRtl)}</p>
             </div>
           </motion.div>
         )}

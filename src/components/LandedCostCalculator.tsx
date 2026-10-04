@@ -6,11 +6,13 @@ import { motion, AnimatePresence } from 'motion/react';
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from 'recharts';
 import { computeStockStatus } from '../lib/stock';
 import { apiUrl } from '../lib/apiBase';
+import { buildUsdUnitRates, convertAmount, readCachedLiveRates, roundMoney } from '../lib/exchangeRates';
+import { toast } from 'sonner';
 
 interface Props {
   language: Language;
   settings: AppSettings;
-  onAddProduct: (p: Product) => void;
+  onAddProduct: (p: Product) => Promise<void> | void;
   defaultVat: number;
   defaultCustoms: number;
 }
@@ -31,8 +33,20 @@ export default function LandedCostCalculator({ language, settings, onAddProduct,
   const [showToast, setShowToast] = useState(false);
   const [sku, setSku] = useState('');
   const [category, setCategory] = useState('');
-  const [selectedCurrency, setSelectedCurrency] = useState(CURRENCIES[0]);
+  const [selectedCurrency, setSelectedCurrency] = useState(CURRENCIES[1]);
   const [isFetchingRate, setIsFetchingRate] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const localCurrency = settings.currency || 'JOD';
+
+  /** Local units per one foreign unit from cached/default rates, or null when the pair is unknown. */
+  const approximateRate = (from: string): number | null => {
+    if (from === localCurrency) return 1;
+    const rates = buildUsdUnitRates(settings, readCachedLiveRates());
+    if (!rates[from] || !rates[localCurrency]) return null;
+    return Number(convertAmount(1, from, localCurrency, rates).toFixed(6));
+  };
+  const [rateSource, setRateSource] = useState<'same' | 'live' | 'approximate' | 'manual' | 'missing'>(() =>
+    CURRENCIES[1].id === localCurrency ? 'same' : approximateRate(CURRENCIES[1].id) ? 'approximate' : 'missing');
 
   // Form State
   const [product, setProduct] = useState<ProductDetails>({
@@ -42,8 +56,8 @@ export default function LandedCostCalculator({ language, settings, onAddProduct,
     currency: 'USD',
   });
 
-  const [logistics, setLogistics] = useState<LogisticsCosts>({
-    exchangeRate: 1,
+  const [logistics, setLogistics] = useState<LogisticsCosts>(() => ({
+    exchangeRate: approximateRate(CURRENCIES[1].id) ?? 0,
     shippingCost: 500,
     customsDuty: defaultCustoms,
     isDutyFixed: false,
@@ -52,27 +66,34 @@ export default function LandedCostCalculator({ language, settings, onAddProduct,
     vatRate: defaultVat,
     insuranceCost: undefined,
     inspectionFees: undefined,
-  });
-
-  const localCurrency = settings.currency || 'JOD';
+  }));
 
   const fetchExchangeRate = async (baseCurrency: string) => {
     if (baseCurrency === localCurrency) {
       setLogistics(prev => ({ ...prev, exchangeRate: 1 }));
+      setRateSource('same');
       return;
     }
+
+    // Never keep the previous currency's rate while the new one loads.
+    const fallback = approximateRate(baseCurrency);
+    setLogistics(prev => ({ ...prev, exchangeRate: fallback ?? 0 }));
+    setRateSource(fallback ? 'approximate' : 'missing');
 
     setIsFetchingRate(true);
     try {
       const response = await fetch(apiUrl(`/api/exchange-rate/${baseCurrency}`));
       if (!response.ok) throw new Error('Fetch failed');
       const data = await response.json();
-      
-      if (data && data.rates && data.rates[localCurrency]) {
-        setLogistics(prev => ({ ...prev, exchangeRate: data.rates[localCurrency] }));
-      }
+      const live = Number(data?.rates?.[localCurrency]);
+      if (!(live > 0)) throw new Error('Rate missing');
+      setLogistics(prev => ({ ...prev, exchangeRate: live }));
+      setRateSource('live');
     } catch (error) {
       console.error("Error fetching rate:", error);
+      toast.warning(fallback
+        ? (isRtl ? 'تعذّر جلب السعر المباشر؛ يُستخدم سعر تقريبي. راجعه قبل الحفظ.' : 'Live rate unavailable; using an approximate rate. Check it before saving.')
+        : (isRtl ? 'تعذّر جلب سعر الصرف. أدخله يدوياً.' : 'Could not load the exchange rate. Enter it manually.'));
     } finally {
       setIsFetchingRate(false);
     }
@@ -96,9 +117,7 @@ export default function LandedCostCalculator({ language, settings, onAddProduct,
 
   // Fetch initial exchange rate
   useEffect(() => {
-    if (selectedCurrency.id !== localCurrency) {
-      fetchExchangeRate(selectedCurrency.id);
-    }
+    fetchExchangeRate(selectedCurrency.id);
   }, [localCurrency]);
 
   // Calculation Logic
@@ -152,25 +171,37 @@ export default function LandedCostCalculator({ language, settings, onAddProduct,
     };
   }, [product, logistics]);
 
-  const handleSendToInventory = () => {
+  const rateReady = selectedCurrency.id === localCurrency || Number(logistics.exchangeRate) > 0;
+
+  const handleSendToInventory = async () => {
+    if (!rateReady || isSaving) return;
     const status: StockStatus = computeStockStatus(product.quantity);
+    const newId = crypto.randomUUID();
 
     const newInvProduct: Product = {
-      id: Math.random().toString(36).substr(2, 9),
+      id: newId,
       name: product.name || t.importedProduct,
-      sku: sku || 'SKU-' + Math.floor(Math.random() * 1000),
+      sku: sku || `SKU-${newId.slice(0, 8).toUpperCase()}`,
       category: category || t.importedCategory,
       brand: 'Imported',
       quantity: product.quantity,
       unitCost: results.costPerUnit,
-      sellingPrice: results.costPerUnit * 1.5, // 50% markup default
+      currency: localCurrency,
+      sellingPrice: roundMoney(results.costPerUnit * 1.5, localCurrency), // 50% markup default
       status: status,
       dateAdded: Date.now()
     };
 
-    onAddProduct(newInvProduct);
-    setShowToast(true);
-    setTimeout(() => setShowToast(false), 3000);
+    setIsSaving(true);
+    try {
+      await onAddProduct(newInvProduct);
+      setShowToast(true);
+      setTimeout(() => setShowToast(false), 3000);
+    } catch (error: any) {
+      toast.error(error?.message || (isRtl ? 'تعذّر حفظ الصنف' : 'Could not save the product'));
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   const chartData = [
@@ -237,7 +268,7 @@ export default function LandedCostCalculator({ language, settings, onAddProduct,
                   type="text"
                   value={product.name}
                   onChange={(e) => setProduct({ ...product, name: e.target.value })}
-                  placeholder={t.placeholderItem}
+                  placeholder={t.placeholderItem} aria-label={t.placeholderItem}
                   className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none dark:text-white"
                 />
               </div>
@@ -247,7 +278,7 @@ export default function LandedCostCalculator({ language, settings, onAddProduct,
                   type="text"
                   value={sku}
                   onChange={(e) => setSku(e.target.value)}
-                  placeholder="SKU-XXXX"
+                  placeholder="SKU-XXXX" aria-label="SKU-XXXX"
                   className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none font-mono dark:text-white"
                 />
               </div>
@@ -289,24 +320,31 @@ export default function LandedCostCalculator({ language, settings, onAddProduct,
               </div>
 
               {/* Dynamic Exchange Rate Input */}
-              {selectedCurrency.id !== 'ILS' && (
+              {selectedCurrency.id !== localCurrency && (
                 <div className="md:col-span-2 space-y-3 bg-gray-50 dark:bg-gray-900/50 p-6 rounded-3xl border border-gray-100 dark:border-gray-700">
                   <label className="text-sm font-bold text-gray-700 dark:text-gray-300 block">
-                    {t.exchangeRateFor} <span className="text-indigo-600">{t[selectedCurrency.label as keyof typeof t]} ({selectedCurrency.symbol})</span> {t.todayVsIls}
+                    {t.exchangeRateFor}: <span className="font-mono text-indigo-600">1 {selectedCurrency.id} = ? {localCurrency}</span>
+                    <span className="ms-2 text-xs font-medium text-gray-500">
+                      {rateSource === 'live' && (isRtl ? '(سعر مباشر)' : '(live rate)')}
+                      {rateSource === 'approximate' && (isRtl ? '(سعر تقريبي — راجعه)' : '(approximate — check it)')}
+                      {rateSource === 'manual' && (isRtl ? '(أدخلته يدوياً)' : '(entered manually)')}
+                      {rateSource === 'missing' && (isRtl ? '(غير متوفر — أدخله يدوياً)' : '(unavailable — enter it)')}
+                    </span>
                   </label>
                   <div className="relative">
                     <input
                       type="number"
-                      step="0.01"
-                      value={logistics.exchangeRate}
-                      onChange={(e) => setLogistics({ ...logistics, exchangeRate: Number(e.target.value) })}
+                      step="any"
+                      min="0"
+                      value={logistics.exchangeRate || ''}
+                      onChange={(e) => { setLogistics({ ...logistics, exchangeRate: Number(e.target.value) }); setRateSource('manual'); }}
                       className="w-full px-5 py-4 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-2xl focus:ring-2 focus:ring-indigo-500 outline-none font-mono text-xl font-bold shadow-sm dark:text-white"
                     />
                     <button
                       type="button"
                       onClick={() => fetchExchangeRate(selectedCurrency.id)}
                       disabled={isFetchingRate}
-                      title={isRtl ? 'تحديث سعر الصرف لتلك العملة' : 'Refresh live rate for this currency'}
+                      title={isRtl ? 'تحديث سعر الصرف لتلك العملة' : 'Refresh live rate for this currency'} aria-label={isRtl ? 'تحديث سعر الصرف لتلك العملة' : 'Refresh live rate for this currency'}
                       className={`absolute inset-y-0 ${isRtl ? 'left-5' : 'right-5'} flex items-center text-indigo-400 hover:text-indigo-600 dark:hover:text-indigo-300 disabled:opacity-50 transition-all cursor-pointer`}
                     >
                       {isFetchingRate ? (
@@ -486,7 +524,7 @@ export default function LandedCostCalculator({ language, settings, onAddProduct,
             whileHover={{ scale: 1.02 }}
             whileTap={{ scale: 0.98 }}
             onClick={handleSendToInventory}
-            disabled={!product.name}
+            disabled={!product.name || !rateReady || isSaving}
             className="w-full flex items-center justify-center gap-3 px-6 py-5 bg-white dark:bg-gray-800 border-2 border-indigo-600 text-indigo-700 dark:text-indigo-400 rounded-3xl font-bold text-lg hover:bg-indigo-600 hover:text-white transition-all shadow-lg shadow-indigo-50 dark:shadow-indigo-900/10 disabled:opacity-50 disabled:cursor-not-allowed group premium-button"
           >
             <TrendingUp className="group-hover:translate-y-[-2px] transition-transform" />

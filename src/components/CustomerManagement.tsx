@@ -25,25 +25,18 @@ import { Language, Customer, CustomerTransaction, AppSettings, Currency } from '
 import { motion, AnimatePresence } from 'motion/react';
 import { useFirebase } from './FirebaseProvider';
 import { CURRENCY_SYMBOLS, POS_CURRENCY_CODES, currencyDecimals, formatMoney } from '../lib/exchangeRates';
+import CurrencyPicker from './CurrencyPicker';
+import { matchesQuery, phoneMatches } from '../lib/search';
+import { useScreenSearch } from '../lib/screenSearch';
 import { TactileButton } from './ui/TactileButton';
 import InteractiveButton from './ui/InteractiveButton';
 import { toast } from 'sonner';
+import { escapeHtml } from '../lib/invoiceDocument';
+import { printHtmlDocument } from '../lib/printHtml';
 
 interface Props {
   language: Language;
   settings: AppSettings;
-}
-
-// Arabic Text Normalizer to secure searches against different spellings of Alef, Teh Marbouta, etc.
-function normalizeArabicText(text: string): string {
-  if (!text) return '';
-  return text
-    .toLowerCase()
-    .trim()
-    .replace(/[أإآا]/g, 'ا')
-    .replace(/ة/g, 'ه')
-    .replace(/ى/g, 'ي')
-    .replace(/[َُِّّْ]/g, ''); // Remove Arabic short vowels (diacritics)
 }
 
 export default function CustomerManagement({ language, settings }: Props) {
@@ -74,6 +67,12 @@ export default function CustomerManagement({ language, settings }: Props) {
   const [currencyFilter, setCurrencyFilter] = useState<'ALL' | Currency>('ALL');
   const [debtFilter, setDebtFilter] = useState<'ALL' | 'HAS_DEBT' | 'CLEAR'>('ALL');
 
+  useScreenSearch('customers', ({ query }) => {
+    setCurrencyFilter('ALL');
+    setDebtFilter('ALL');
+    setSearchQuery(query);
+  });
+
   // New/Edit Customer form
   const [formData, setFormData] = useState<Partial<Customer>>({
     name: '',
@@ -99,15 +98,6 @@ export default function CustomerManagement({ language, settings }: Props) {
       minimumFractionDigits: currencyDecimals(code || 'JOD'),
       maximumFractionDigits: currencyDecimals(code || 'JOD'),
     });
-  const currencyNames: Record<string, string> = {
-    JOD: isRtl ? 'دينار أردني' : 'Jordanian Dinar',
-    ILS: isRtl ? 'شيكل إسرائيلي' : 'Israeli Shekel',
-    USD: isRtl ? 'دولار أمريكي' : 'US Dollar',
-    IQD: isRtl ? 'دينار عراقي' : 'Iraqi Dinar',
-    SAR: isRtl ? 'ريال سعودي' : 'Saudi Riyal',
-    LYD: isRtl ? 'دينار ليبي' : 'Libyan Dinar',
-  };
-
   // Translations Map
   const t = {
     title: isRtl ? 'إدارة العملاء والديون' : 'Customers & Debt Board',
@@ -150,6 +140,7 @@ export default function CustomerManagement({ language, settings }: Props) {
 
   // WhatsApp Messages Prefills generator
   const getPrefilledMessage = (customer: Customer, type: string) => {
+    const sender = settings.businessName?.trim() || '';
     const formattedAmount = formatMoney(customer.totalDebt, customer.currency, isRtl ? 'ar' : 'en-US');
     if (type === 'reminder') {
       return isRtl 
@@ -162,7 +153,7 @@ export default function CustomerManagement({ language, settings }: Props) {
         .slice(0, 5);
 
       if (isRtl) {
-        let message = `*كشف حساب رسمي - تطبيق مستودعي*\n\n`;
+        let message = sender ? `*كشف حساب - ${sender}*\n\n` : `*كشف حساب*\n\n`;
         message += `المحترم/ة: *${customer.name}*\n`;
         message += `تحية طيبة وبعد، إليكم ملخص حسابكم الحالي حتى تاريخ اليوم:\n\n`;
         message += `📊 *إجمالي الدين المستحق:* *${customer.totalDebt.toLocaleString()} ${customer.currency}*\n`;
@@ -186,7 +177,7 @@ export default function CustomerManagement({ language, settings }: Props) {
         message += `لأي استفسار يرجى مراجعة إدارة المستودع. شكراً لثقتكم بنا. 🙏`;
         return message;
       } else {
-        let message = `*Official Account Statement - Mostawda'i Workspace*\n\n`;
+        let message = sender ? `*Account Statement - ${sender}*\n\n` : `*Account Statement*\n\n`;
         message += `Dear *${customer.name}*,\n`;
         message += `Please find below a summary of your current account status:\n\n`;
         message += `📊 *Outstanding Balance:* *${customer.totalDebt.toLocaleString()} ${customer.currency}*\n`;
@@ -212,23 +203,16 @@ export default function CustomerManagement({ language, settings }: Props) {
       }
     } else {
       return isRtl 
-        ? `الأخوة الكرام في ${customer.name}. نسعد دائماً بخدمتكم في مستودعي لتوفير المواد والمنتجات بجودة عالية وسرعة فائقة. يسعدنا البقاء على تواصل معكم دائماً.`
-        : `Dear ${customer.name}, thank you for choosing Mostawda'i Workspace as your primary industrial supply partner. We value your feedback and operations!`;
+        ? `الأخوة الكرام في ${customer.name}، نسعد دائماً بخدمتكم${sender ? ` في ${sender}` : ''}. يسعدنا البقاء على تواصل معكم.`
+        : `Dear ${customer.name}, thank you for dealing with ${sender || 'us'}. We are always happy to serve you.`;
     }
   };
 
   // Aggregates computed on the fly
   const filteredCustomers = customers.filter(customer => {
-    // Normalization search
-    const normQuery = normalizeArabicText(searchQuery);
-    const normName = normalizeArabicText(customer.name);
-    const normPhone = customer.phone.replace(/[\s\-\+\(\)]/g, '');
-    const cleanQuery = searchQuery.replace(/[\s\-\+\(\)]/g, '');
-
-    const matchesSearch = 
-      normName.includes(normQuery) || 
-      customer.customerId.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      normPhone.includes(cleanQuery);
+    const matchesSearch =
+      matchesQuery([customer.name, customer.customerId], searchQuery) ||
+      phoneMatches(customer.phone, searchQuery);
 
     const matchesCurrency = currencyFilter === 'ALL' || customer.currency === currencyFilter;
 
@@ -290,11 +274,11 @@ export default function CustomerManagement({ language, settings }: Props) {
     }
 
     const cleanedPhone = formData.phone.trim();
-    const id = editingCustomer ? editingCustomer.id : `CUST_2026_${Math.floor(1000 + Math.random() * 9000)}`;
+    const id = editingCustomer ? editingCustomer.id : `CUST_${crypto.randomUUID()}`;
 
     const newCustomer: Customer = {
       id,
-      customerId: editingCustomer ? editingCustomer.customerId : id,
+      customerId: editingCustomer ? editingCustomer.customerId : `C-${id.slice(5, 13).toUpperCase()}`,
       name: formData.name.trim(),
       phone: cleanedPhone,
       createdAt: editingCustomer ? editingCustomer.createdAt : new Date().toISOString(),
@@ -306,8 +290,8 @@ export default function CustomerManagement({ language, settings }: Props) {
       await saveCustomer(newCustomer);
       setIsModalOpen(false);
       toast.success(editingCustomer ? (isRtl ? 'تم تحديث العميل بنجاح' : 'Profile updated') : (isRtl ? 'تم تسجيل العميل بنجاح' : 'Client created successfully'));
-    } catch (err) {
-      toast.error(isRtl ? 'خطأ في حفظ البيانات' : 'Error writing client records');
+    } catch (err: any) {
+      toast.error(err?.message || (isRtl ? 'خطأ في حفظ البيانات' : 'Error writing client records'));
     }
   };
 
@@ -413,9 +397,7 @@ export default function CustomerManagement({ language, settings }: Props) {
         });
       }
     } catch (err: any) {
-      toast.error(String(err?.message || '').startsWith('No active session')
-        ? (isRtl ? 'سجّل الدخول بحساب حقيقي لتعديل الحسابات (وضع الضيف للمعاينة فقط).' : 'Sign in with a real account (guest mode is preview only).')
-        : (isRtl ? 'حدث خطأ أثناء حذف الحركة' : 'Failed to delete transaction'));
+      if (!err?.notified) toast.error(isRtl ? 'حدث خطأ أثناء حذف الحركة' : 'Failed to delete transaction');
     }
   };
 
@@ -537,7 +519,7 @@ export default function CustomerManagement({ language, settings }: Props) {
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder={t.searchPlaceholder}
+            placeholder={t.searchPlaceholder} aria-label={t.searchPlaceholder}
             className="w-full h-[48px] pl-11 pr-4 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none transition-all dark:text-white"
           />
         </div>
@@ -548,16 +530,25 @@ export default function CustomerManagement({ language, settings }: Props) {
           {/* Currency filtering dropdown */}
           <div className="flex items-center gap-2">
             <span className="text-xs font-bold text-gray-400 uppercase tracking-wider">{t.currencyLabel}:</span>
-            <select
-              value={currencyFilter}
-              onChange={(e) => setCurrencyFilter(e.target.value as any)}
-              className="h-[44px] px-3 rounded-lg border border-gray-100 dark:border-gray-700 bg-white dark:bg-gray-800 text-xs font-bold focus:ring-2 focus:ring-indigo-500"
-            >
-              <option value="ALL">{t.allCurrencies}</option>
+            <div className="flex flex-wrap gap-1">
+              <button
+                type="button"
+                onClick={() => setCurrencyFilter('ALL')}
+                className={`h-9 px-2.5 rounded-lg text-[11px] font-black border ${currencyFilter === 'ALL' ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white dark:bg-gray-800 text-gray-500 border-gray-200 dark:border-gray-700'}`}
+              >
+                {t.allCurrencies}
+              </button>
               {POS_CURRENCY_CODES.map(code => (
-                <option key={code} value={code}>{code} - {symbolOf(code)}</option>
+                <button
+                  key={code}
+                  type="button"
+                  onClick={() => setCurrencyFilter(code)}
+                  className={`h-9 px-2.5 rounded-lg text-[11px] font-black border font-mono ${currencyFilter === code ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-300 border-gray-200 dark:border-gray-700'}`}
+                >
+                  {code}
+                </button>
               ))}
-            </select>
+            </div>
           </div>
 
           {/* Debt balance status filtering dropdown */}
@@ -619,14 +610,14 @@ export default function CustomerManagement({ language, settings }: Props) {
                       <button 
                         onClick={() => handleOpenEdit(customer)}
                         className="p-2 bg-gray-50 hover:bg-indigo-50 dark:bg-gray-700/50 dark:hover:bg-indigo-950/40 text-gray-400 hover:text-indigo-600 rounded-lg transition-colors cursor-pointer"
-                        title={t.editCustomer}
+                        title={t.editCustomer} aria-label={t.editCustomer}
                       >
                         <Edit2 size={13} />
                       </button>
                       <button 
                         onClick={() => handleDelete(customer)}
                         className="p-2 bg-gray-50 hover:bg-rose-50 dark:bg-gray-700/50 dark:hover:bg-rose-950/40 text-gray-400 hover:text-rose-600 rounded-lg transition-colors cursor-pointer"
-                        title={t.confirmDelete}
+                        title={t.confirmDelete} aria-label={t.confirmDelete}
                       >
                         <Trash2 size={13} />
                       </button>
@@ -648,7 +639,7 @@ export default function CustomerManagement({ language, settings }: Props) {
                         <button 
                           onClick={() => handleOpenMessenger(customer)}
                           className="p-1.5 bg-emerald-50 dark:bg-emerald-950/30 text-emerald-600 dark:text-emerald-400 rounded-md hover:scale-105 active:scale-95 transition-all text-[11px] cursor-pointer"
-                          title={t.sendMessage}
+                          title={t.sendMessage} aria-label={t.sendMessage}
                         >
                           <Phone size={11} className="inline mr-1" />
                           <MessageSquare size={11} className="inline" />
@@ -712,7 +703,7 @@ export default function CustomerManagement({ language, settings }: Props) {
                   <div className="mt-2 text-center">
                     <button 
                       onClick={() => { setSelectedLedgerCustomer(customer); setIsLedgerModalOpen(true); }}
-                      className="w-full h-[36px] bg-slate-50 hover:bg-slate-100 dark:bg-slate-900/40 dark:hover:bg-indigo-950/20 text-gray-700 dark:text-indigo-300 rounded-xl text-[10px] font-bold border border-gray-150 dark:border-gray-700/60 inline-flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                      className="w-full h-[36px] bg-slate-50 hover:bg-slate-100 dark:bg-slate-900/40 dark:hover:bg-indigo-950/20 text-gray-700 dark:text-indigo-300 rounded-xl text-[10px] font-bold border border-gray-100 dark:border-gray-700/60 inline-flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
                     >
                       <Coins size={12} className="text-indigo-500" />
                       {isRtl ? 'كشف الحساب التاريخي' : 'View Account Statement'}
@@ -725,7 +716,7 @@ export default function CustomerManagement({ language, settings }: Props) {
           </motion.div>
         ) : (
           <div className="h-[250px] bg-white dark:bg-gray-800 rounded-[2rem] border border-gray-100 dark:border-gray-700 shadow-sm flex flex-col items-center justify-center text-center p-8">
-            <Users className="text-gray-300 dark:text-gray-650 mb-3" size={48} />
+            <Users className="text-gray-300 dark:text-gray-600 mb-3" size={48} />
             <h3 className="text-lg font-bold text-gray-700 dark:text-gray-200">
               {customers.length === 0 ? t.noCustomers : t.noMatchingCustomers}
             </h3>
@@ -768,8 +759,8 @@ export default function CustomerManagement({ language, settings }: Props) {
                 </h2>
                 <button 
                   onClick={() => setIsModalOpen(false)}
-                  className="p-2 bg-gray-100 hover:bg-gray-250 dark:bg-gray-750 dark:hover:bg-gray-700 rounded-full text-gray-400 transition-colors cursor-pointer"
-                >
+                  className="p-2 bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-700 rounded-full text-gray-400 transition-colors cursor-pointer"
+                 aria-label={isRtl ? 'إغلاق' : 'Close'}>
                   <X size={16} />
                 </button>
               </div>
@@ -786,7 +777,7 @@ export default function CustomerManagement({ language, settings }: Props) {
                     required
                     value={formData.name}
                     onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                    placeholder={isRtl ? 'مثال: شركة القدس للمقاولات العامة' : 'e.g. Al-Quds Contracting Co.'}
+                    placeholder={isRtl ? 'مثال: شركة القدس للمقاولات العامة' : 'e.g. Al-Quds Contracting Co.'} aria-label={isRtl ? 'مثال: شركة القدس للمقاولات العامة' : 'e.g. Al-Quds Contracting Co.'}
                     className="w-full h-[48px] px-4 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none dark:text-white"
                   />
                 </div>
@@ -801,7 +792,7 @@ export default function CustomerManagement({ language, settings }: Props) {
                     required
                     value={formData.phone}
                     onChange={(e) => setFormData({ ...formData, phone: e.target.value })}
-                    placeholder={isRtl ? '+970599000000 أو +96277...' : '+972599... or +962...'}
+                    placeholder={isRtl ? '+970599000000 أو +96277...' : '+972599... or +962...'} aria-label={isRtl ? '+970599000000 أو +96277...' : '+972599... or +962...'}
                     className="w-full h-[48px] px-4 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none font-mono tracking-wide dark:text-white"
                   />
                   <p className="text-[10px] text-gray-400">
@@ -812,21 +803,18 @@ export default function CustomerManagement({ language, settings }: Props) {
                 <div className="grid grid-cols-2 gap-4">
                   
                   {/* Currency selector */}
-                  <div className="space-y-1">
-                    <label className="text-xs font-black text-gray-400 uppercase tracking-wider">
-                      {t.currencyLabel}
-                    </label>
-                    <select
-                      value={formData.currency}
-                      disabled={!!editingCustomer && ((editingCustomer.totalDebt || 0) > 0 || customerTransactions.some(tx => tx.customerId === editingCustomer.id))}
-                      title={isRtl ? 'لا يمكن تغيير العملة بعد وجود دين أو حركات على الحساب' : 'Currency cannot change once the account has debt or movements'}
-                      onChange={(e) => setFormData({ ...formData, currency: e.target.value as any })}
-                      className="w-full h-[48px] px-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none dark:text-white"
-                    >
-                      {POS_CURRENCY_CODES.map(code => (
-                        <option key={code} value={code}>{code} - {currencyNames[code]}</option>
-                      ))}
-                    </select>
+                  <div className={`space-y-1 col-span-2 ${!!editingCustomer && ((editingCustomer.totalDebt || 0) > 0 || customerTransactions.some(tx => tx.customerId === editingCustomer.id)) ? 'pointer-events-none opacity-60' : ''}`}>
+                    <CurrencyPicker
+                      value={formData.currency || settings.currency || 'JOD'}
+                      onChange={(code) => setFormData({ ...formData, currency: code })}
+                      isRtl={isRtl}
+                      label={t.currencyLabel}
+                    />
+                    {!!editingCustomer && ((editingCustomer.totalDebt || 0) > 0 || customerTransactions.some(tx => tx.customerId === editingCustomer.id)) && (
+                      <p className="text-[10px] text-amber-600">
+                        {isRtl ? 'لا يمكن تغيير العملة بعد وجود دين أو حركات على الحساب.' : 'Currency cannot change once the account has debt or movements.'}
+                      </p>
+                    )}
                   </div>
 
                   {/* Initial opening balance debt */}
@@ -901,8 +889,8 @@ export default function CustomerManagement({ language, settings }: Props) {
                 </div>
                 <button 
                   onClick={() => setIsPayModalOpen(false)}
-                  className="p-2 bg-gray-100 hover:bg-gray-200 dark:bg-gray-750 dark:hover:bg-gray-700 rounded-full text-gray-400 transition-colors cursor-pointer"
-                >
+                  className="p-2 bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-700 rounded-full text-gray-400 transition-colors cursor-pointer"
+                 aria-label={isRtl ? 'إغلاق' : 'Close'}>
                   <X size={16} />
                 </button>
               </div>
@@ -948,19 +936,19 @@ export default function CustomerManagement({ language, settings }: Props) {
                     type="text"
                     value={debtNote}
                     onChange={(e) => setDebtNote(e.target.value)}
-                    placeholder={isRtl ? 'بيان المعاملة بالتفصيل...' : 'Transaction info...'}
+                    placeholder={isRtl ? 'بيان المعاملة بالتفصيل...' : 'Transaction info...'} aria-label={isRtl ? 'بيان المعاملة بالتفصيل...' : 'Transaction info...'}
                     className="w-full h-[48px] px-4 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none dark:text-white"
                   />
                 </div>
 
                 {/* Sync to safe box check box */}
-                <div className="p-4 bg-gray-50 dark:bg-gray-900/40 rounded-2xl flex items-start gap-3 border border-gray-100 dark:border-gray-750">
+                <div className="p-4 bg-gray-50 dark:bg-gray-900/40 rounded-2xl flex items-start gap-3 border border-gray-100 dark:border-gray-700">
                   <input
                     type="checkbox"
                     id="syncVault"
                     checked={syncToVault}
                     onChange={(e) => setSyncToVault(e.target.checked)}
-                    className="w-4 h-4 text-indigo-600 focus:ring-indigo-500 border-gray-300 rounded mt-1 accent-indigo-650 cursor-pointer"
+                    className="w-4 h-4 text-indigo-600 focus:ring-indigo-500 border-gray-300 rounded mt-1 accent-indigo-600 cursor-pointer"
                   />
                   <label htmlFor="syncVault" className="text-xs text-gray-500 dark:text-gray-300 select-none cursor-pointer">
                     <p className="font-bold text-gray-700 dark:text-gray-200">{isRtl ? 'تسجيل في حساب الصندوق/الخزنة' : 'Sync balance with Safe Cash register'}</p>
@@ -1031,8 +1019,8 @@ export default function CustomerManagement({ language, settings }: Props) {
                 </div>
                 <button 
                   onClick={() => setIsMsgModalOpen(false)}
-                  className="p-2 bg-gray-100 hover:bg-gray-200 dark:bg-gray-750 dark:hover:bg-gray-700 rounded-full text-gray-400 transition-colors cursor-pointer"
-                >
+                  className="p-2 bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-700 rounded-full text-gray-400 transition-colors cursor-pointer"
+                 aria-label={isRtl ? 'إغلاق' : 'Close'}>
                   <X size={16} />
                 </button>
               </div>
@@ -1040,8 +1028,8 @@ export default function CustomerManagement({ language, settings }: Props) {
               <div className="p-6 space-y-4">
                 
                 {/* Meta details */}
-                <p className="text-xs text-gray-500 dark:text-gray-450 leading-relaxed">
-                  {t.waHeader}: <strong className="text-gray-800 dark:text-gray-250 font-mono">{selectedCustomer.phone}</strong>
+                <p className="text-xs text-gray-500 dark:text-gray-400 leading-relaxed">
+                  {t.waHeader}: <strong className="text-gray-800 dark:text-gray-200 font-mono">{selectedCustomer.phone}</strong>
                 </p>
 
                 {/* Message Template selector */}
@@ -1150,7 +1138,7 @@ export default function CustomerManagement({ language, settings }: Props) {
                 <button 
                   onClick={() => { setIsLedgerModalOpen(false); setLedgerSearchQuery(''); }}
                   className="p-2 bg-[#1b3038] hover:bg-rose-900/20 text-gray-400 hover:text-rose-400 rounded-full transition-colors cursor-pointer"
-                >
+                 aria-label={isRtl ? 'إغلاق' : 'Close'}>
                   <X size={15} />
                 </button>
               </div>
@@ -1242,8 +1230,8 @@ export default function CustomerManagement({ language, settings }: Props) {
                       type="text"
                       value={ledgerSearchQuery}
                       onChange={(e) => setLedgerSearchQuery(e.target.value)}
-                      placeholder={isRtl ? 'تصفية الجدول والحركات بالبيان...' : 'Filter ledger entries by reference/note...'}
-                      className="w-full h-[40px] pl-10 pr-4 rounded-xl border border-teal-850 bg-[#0c181c] text-xs focus:ring-2 focus:ring-teal-500 focus:outline-none text-white font-medium"
+                      placeholder={isRtl ? 'تصفية الجدول والحركات بالبيان...' : 'Filter ledger entries by reference/note...'} aria-label={isRtl ? 'تصفية الجدول والحركات بالبيان...' : 'Filter ledger entries by reference/note...'}
+                      className="w-full h-[40px] pl-10 pr-4 rounded-xl border border-teal-800 bg-[#0c181c] text-xs focus:ring-2 focus:ring-teal-500 focus:outline-none text-white font-medium"
                     />
                   </div>
 
@@ -1327,7 +1315,7 @@ export default function CustomerManagement({ language, settings }: Props) {
                                   <button
                                     onClick={() => handleDeleteLedgerTransaction(tx)}
                                     className="p-1 px-1.5 bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 rounded-md transition-colors cursor-pointer ml-1"
-                                    title={isRtl ? 'حذف الحركة' : 'Delete transaction'}
+                                    title={isRtl ? 'حذف الحركة' : 'Delete transaction'} aria-label={isRtl ? 'حذف الحركة' : 'Delete transaction'}
                                   >
                                     <Trash2 size={11} />
                                   </button>
@@ -1368,25 +1356,25 @@ export default function CustomerManagement({ language, settings }: Props) {
 
                       const generatedRows = txsToPrint.map(tx => `
                         <tr>
-                          <td style="text-align: center; font-family: monospace;">#${tx.transactionId || tx.id}</td>
-                          <td>${new Date(tx.date).toLocaleString()}</td>
+                          <td style="text-align: center; font-family: monospace;">#${escapeHtml(tx.transactionId || tx.id)}</td>
+                          <td>${escapeHtml(new Date(tx.date).toLocaleString(isRtl ? 'ar' : 'en'))}</td>
                           <td>${tx.type === 'payment' ? (isRtl ? 'سداد دفعة' : 'Payment Received') : (isRtl ? 'فاتورة بيع بالآجل' : 'Credit Sale')}</td>
-                          <td>${tx.notes || ''}</td>
+                          <td>${escapeHtml(tx.notes || '')}</td>
                           <td style="text-align: right; font-weight: bold; color: ${tx.type === 'payment' ? '#10b981' : '#ef4444'};">
-                            ${tx.type === 'payment' ? '-' : '+'}${tx.amount.toLocaleString()} ${tx.currency}
+                            ${tx.type === 'payment' ? '-' : '+'}${escapeHtml(formatMoney(Number(tx.amount) || 0, tx.currency || selectedLedgerCustomer.currency || 'JOD'))}
                           </td>
                           <td style="text-align: right; font-weight: bold;">
-                            ${tx.remainingBalanceAfter.toLocaleString()} ${tx.currency}
+                            ${escapeHtml(formatMoney(Number(tx.remainingBalanceAfter) || 0, tx.currency || selectedLedgerCustomer.currency || 'JOD'))}
                           </td>
                         </tr>
                       `).join('');
 
-                      const printW = window.open('', '_blank');
-                      if (printW) {
-                        printW.document.write(`
+                      {
+                        printHtmlDocument(`
                           <html>
                             <head>
-                              <title>Mostawda'i Ledger Statement [${selectedLedgerCustomer.name}]</title>
+                              <meta charset="UTF-8">
+                              <title>${escapeHtml(isRtl ? 'كشف حساب' : 'Statement')} - ${escapeHtml(selectedLedgerCustomer.name)}</title>
                               <style>
                                 body { font-family: system-ui, -apple-system, sans-serif; direction: ${isRtl ? 'rtl' : 'ltr'}; padding: 40px; color: #1e293b; background-color: #ffffff; }
                                 .brand { font-size: 24px; font-weight: 900; color: #0f172a; border-bottom: 2px solid #0f172a; padding-bottom: 10px; margin-bottom: 20px; }
@@ -1402,12 +1390,12 @@ export default function CustomerManagement({ language, settings }: Props) {
                               <div class="brand">كشف الحساب المالي الموحد - مستودعي</div>
                               <div class="header-details">
                                 <div class="detail-block">
-                                  <p><strong>العميل:</strong> ${selectedLedgerCustomer.name}</p>
-                                  <p><strong>الهاتف:</strong> ${selectedLedgerCustomer.phone}</p>
+                                  <p><strong>العميل:</strong> ${escapeHtml(selectedLedgerCustomer.name)}</p>
+                                  <p><strong>الهاتف:</strong> <span dir="ltr">${escapeHtml(selectedLedgerCustomer.phone)}</span></p>
                                 </div>
                                 <div class="detail-block" style="text-align: ${isRtl ? 'left' : 'right'};">
-                                  <p><strong>الرصيد المترتب الحالي:</strong> <span style="font-size: 16px; color: #0284c7; font-weight: 900;">${selectedLedgerCustomer.totalDebt.toLocaleString()} ${selectedLedgerCustomer.currency}</span></p>
-                                  <p><strong>تاريخ طباعة الكشف:</strong> ${new Date().toLocaleString()}</p>
+                                  <p><strong>الرصيد المترتب الحالي:</strong> <span style="font-size: 16px; color: #0284c7; font-weight: 900;">${escapeHtml(formatMoney(Number(selectedLedgerCustomer.totalDebt) || 0, selectedLedgerCustomer.currency || 'JOD'))}</span></p>
+                                  <p><strong>تاريخ طباعة الكشف:</strong> ${escapeHtml(new Date().toLocaleString(isRtl ? 'ar' : 'en'))}</p>
                                 </div>
                               </div>
                               <table>
@@ -1429,11 +1417,6 @@ export default function CustomerManagement({ language, settings }: Props) {
                             </body>
                           </html>
                         `);
-                        printW.document.close();
-                        // Delay print slightly to ensure document is fully parsed
-                        setTimeout(() => {
-                          printW.print();
-                        }, 250);
                       }
                     }}
                     className="px-5 py-2.5 rounded-xl h-[38px] cursor-pointer bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold transition-all flex items-center gap-1.5"

@@ -1,13 +1,18 @@
 import { supabase } from '../supabaseClient';
 import { apiUrl } from './apiBase';
-import type { ProcessedTransaction } from '../services/billing';
+import { restorePurchases, type ProcessedTransaction } from '../services/billing';
 
-export async function activatePaidSubscription(tx: ProcessedTransaction): Promise<void> {
+async function sessionToken(): Promise<string> {
   const { data } = await supabase.auth.getSession();
   const accessToken = data?.session?.access_token;
   if (!accessToken) {
     throw new Error('يرجى تسجيل الدخول أولاً');
   }
+  return accessToken;
+}
+
+export async function activatePaidSubscription(tx: Pick<ProcessedTransaction, 'productId' | 'purchaseToken' | 'transactionId'>): Promise<void> {
+  const accessToken = await sessionToken();
 
   const response = await fetch(apiUrl('/api/subscription/activate'), {
     method: 'POST',
@@ -27,4 +32,40 @@ export async function activatePaidSubscription(tx: ProcessedTransaction): Promis
     const details = await response.json().catch(() => ({}));
     throw new Error(details.message || 'تعذر تفعيل الاشتراك من الخادم');
   }
+}
+
+/** Asks the server to re-read this account's Google Play purchases (renewals, refunds). */
+export async function syncPaidSubscription(): Promise<void> {
+  const accessToken = await sessionToken();
+  const response = await fetch(apiUrl('/api/subscription/sync'), {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!response.ok) {
+    const details = await response.json().catch(() => ({}));
+    throw new Error(details.message || 'تعذر مزامنة الاشتراك مع Google Play');
+  }
+}
+
+/** Links every premium purchase Google Play reports on this device to the signed-in account. */
+export async function linkOwnedPurchases(tokens: string[]): Promise<{ linked: number; errors: string[] }> {
+  let linked = 0;
+  const errors: string[] = [];
+  for (const purchaseToken of tokens) {
+    try {
+      await activatePaidSubscription({ productId: 'mostawdaee_premium_100', purchaseToken, transactionId: '' });
+      linked += 1;
+    } catch (error) {
+      errors.push(error instanceof Error ? error.message : String(error));
+    }
+  }
+  return { linked, errors };
+}
+
+/** Restore: re-reads Google Play purchases on this device, links them to this account, then re-syncs. */
+export async function restoreOwnedPurchases(): Promise<{ found: number; linked: number; errors: string[] }> {
+  const tokens = await restorePurchases();
+  const { linked, errors } = await linkOwnedPurchases(tokens);
+  await syncPaidSubscription().catch((error) => errors.push(error instanceof Error ? error.message : String(error)));
+  return { found: tokens.length, linked, errors };
 }

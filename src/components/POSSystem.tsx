@@ -1,3 +1,4 @@
+import { printHtmlDocument } from '../lib/printHtml';
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Html5Qrcode } from 'html5-qrcode';
 import { 
@@ -18,12 +19,12 @@ import {
   Printer,
   CreditCard,
   Smartphone,
-  PauseCircle
+  PauseCircle,
+  Package
 } from 'lucide-react';
 import { useFirebase } from './FirebaseProvider';
 import { readUserCache, writeUserCache, migrateLegacyUserCache } from '../lib/userStorage';
-import { usePreferredCurrency } from './CurrencyContext';
-import { Language, Product, Invoice, InvoiceItem } from '../types';
+import { Language, Product, Invoice, InvoiceItem, Currency } from '../types';
 import { translations } from '../translations';
 import { motion, AnimatePresence } from 'motion/react';
 import { toast } from 'sonner';
@@ -39,10 +40,14 @@ import {
   currencyDecimals,
   fetchLiveUsdRates,
   readCachedLiveRates,
+  readCachedLiveRatesTimestamp,
 } from '../lib/exchangeRates';
 import { consumeInvoiceNumber, peekInvoiceNumber } from '../lib/invoiceNumber';
+import { computeInvoiceTotals, resolveVatRate } from '../lib/invoiceTotals';
+import { markUnsavedWork } from '../lib/backNavigation';
 import { getExternalSalesApi } from '../lib/externalSalesApi';
 import { computeStockStatus } from '../lib/stock';
+import CurrencyPicker from './CurrencyPicker';
 
 interface POSSystemProps {
   language: Language;
@@ -57,6 +62,7 @@ const QUICK_CASH: Record<string, number[]> = {
   SAR: [10, 50, 100, 500],
   JOD: [5, 10, 20, 50],
   LYD: [5, 10, 20, 50],
+  EGP: [50, 100, 200, 500],
   IQD: [1000, 5000, 10000, 25000],
 };
 
@@ -69,13 +75,20 @@ export default function POSSystem({ language }: POSSystemProps) {
   const isRtl = language === 'ar';
   
   const { products, saveInvoice, settings, saveProduct, warehouses, user } = useFirebase();
-  const { preferredCurrency } = usePreferredCurrency();
   const storeCurrency = isPosCurrency(settings?.currency) ? settings.currency : 'JOD';
-  const preferredPosCurrency: PosCurrency = isPosCurrency(preferredCurrency) ? preferredCurrency : storeCurrency;
-  const [posCurrency, setPosCurrency] = useState<PosCurrency>(preferredPosCurrency);
+  const [posCurrency, setPosCurrency] = useState<PosCurrency>(() => {
+    try {
+      const saved = localStorage.getItem('mustawdae_pos_checkout_currency');
+      if (isPosCurrency(saved)) return saved;
+    } catch { /* ignore */ }
+    return storeCurrency;
+  });
   const activeCurrency = posCurrency;
   const [liveRates, setLiveRates] = useState<Record<string, number> | null>(() => readCachedLiveRates());
+  const [ratesAt, setRatesAt] = useState<number | null>(() => readCachedLiveRatesTimestamp());
+  const [ratesLoading, setRatesLoading] = useState(false);
   const usdUnitRates = useMemo(() => buildUsdUnitRates(settings, liveRates), [settings, liveRates]);
+  const hadLiveRatesRef = useRef(!!liveRates);
   const [invoiceTick, setInvoiceTick] = useState(0);
   // Original catalog price per product, so switching currency never compounds rounding errors.
   const itemBaseRef = useRef<Record<string, { amount: number; currency: string }>>({});
@@ -102,6 +115,10 @@ export default function POSSystem({ language }: POSSystemProps) {
   const previewInvoiceNo = useMemo(() => peekInvoiceNumber(invoicePrefix, sessionUid), [invoicePrefix, sessionUid, invoiceTick]);
   const [barcodeInput, setBarcodeInput] = useState('');
   const [scannedItems, setScannedItems] = useState<InvoiceItem[]>([]);
+  useEffect(() => {
+    markUnsavedWork('pos-cart', scannedItems.length > 0);
+    return () => markUnsavedWork('pos-cart', false);
+  }, [scannedItems.length]);
   
   // Advanced POS states
   const [lastScannedProductId, setLastScannedProductId] = useState<string | null>(null);
@@ -134,12 +151,13 @@ export default function POSSystem({ language }: POSSystemProps) {
       playBeep('error');
       return;
     }
-    const billNum = `HLD-${Math.floor(1000 + Math.random() * 9000)}`;
+    const heldId = crypto.randomUUID();
+    const billNum = `HLD-${heldId.slice(0, 6).toUpperCase()}`;
     const formattedTime = new Date().toLocaleTimeString(isRtl ? 'ar-EG' : 'en-US', { hour: '2-digit', minute: '2-digit' });
     const itemsCount = scannedItems.reduce((acc, item) => acc + (Number(item.quantity) || 0), 0);
     
     const newHeldBill = {
-      id: `held-${Date.now()}`,
+      id: heldId,
       invoiceNumber: billNum,
       items: [...scannedItems],
       discount: discount,
@@ -205,11 +223,12 @@ export default function POSSystem({ language }: POSSystemProps) {
       setReceivedAmount('');
     }
     setPosCurrency(targetCurrency);
+    try { localStorage.setItem('mustawdae_pos_checkout_currency', targetCurrency); } catch { /* ignore */ }
     if (showToast) {
       toast.success(
         isRtl
-          ? `عملة الصندوق: ${targetCurrency} — الأسعار محوّلة دون خلط رموز العملات`
-          : `Checkout currency: ${targetCurrency} — prices converted without mixing symbols`
+          ? `عملة الصندوق: ${targetCurrency} — التحويل بسعر الصرف الحالي`
+          : `Checkout currency: ${targetCurrency} — converted at the current rate`
       );
     }
   };
@@ -227,34 +246,50 @@ export default function POSSystem({ language }: POSSystemProps) {
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [showCashPaymentModal, setShowCashPaymentModal] = useState(false);
 
-  // Fallback demo menu items for cafe and shopping malls if inventory is blank
-  const fallbackProducts: Product[] = [
-    { id: 'fb-1', name: isRtl ? 'قهوة إسبريسو مزدوجة' : 'Double Espresso', sku: 'ESP-1', category: isRtl ? 'مشروبات ساخنة' : 'Hot Drinks', brand: 'Premium', quantity: 99, unitCost: 4.00, sellingPrice: 12.00, status: 'In Stock', dateAdded: Date.now() },
-    { id: 'fb-2', name: isRtl ? 'كابتشينو إيطالي وسط' : 'Cappuccino Medium', sku: 'CAP-2', category: isRtl ? 'مشروبات ساخنة' : 'Hot Drinks', brand: 'Premium', quantity: 99, unitCost: 5.00, sellingPrice: 14.00, status: 'In Stock', dateAdded: Date.now() },
-    { id: 'fb-3', name: isRtl ? 'كرواسون زبدة فرنسي' : 'French Butter Croissant', sku: 'CRO-3', category: isRtl ? 'مخبوزات' : 'Bakeries', brand: 'Bakery', quantity: 50, unitCost: 3.00, sellingPrice: 8.50, status: 'In Stock', dateAdded: Date.now() },
-    { id: 'fb-4', name: isRtl ? 'حليب المراعي 1 لتر' : 'Almarai Milk 1L', sku: 'MIL-4', category: isRtl ? 'ألبان وأجبان' : 'Dairy', brand: 'Almarai', quantity: 120, unitCost: 4.50, sellingPrice: 6.50, status: 'In Stock', dateAdded: Date.now() },
-    { id: 'fb-5', name: isRtl ? 'عصير برتقال طبيعي طازج' : 'Fresh Orange Juice', sku: 'JU-5', category: isRtl ? 'عصائر طبيعية' : 'Juices', brand: 'Fresh', quantity: 80, unitCost: 3.50, sellingPrice: 10.00, status: 'In Stock', dateAdded: Date.now() },
-    { id: 'fb-6', name: isRtl ? 'شاي إنجليزي أحمر فاخر' : 'English Rich Tea', sku: 'TEA-6', category: isRtl ? 'مشروبات ساخنة' : 'Hot Drinks', brand: 'Twinings', quantity: 200, unitCost: 1.50, sellingPrice: 5.00, status: 'In Stock', dateAdded: Date.now() },
-    { id: 'fb-7', name: isRtl ? 'مياه معدنية مبردة' : 'Mineral Spring Water', sku: 'WAT-7', category: isRtl ? 'عصائر طبيعية' : 'Cold Beverages', brand: 'Arwa', quantity: 300, unitCost: 0.80, sellingPrice: 2.50, status: 'In Stock', dateAdded: Date.now() },
-    { id: 'fb-8', name: isRtl ? 'دونات كاكاو بلجيكي' : 'Belgian Chocolate Donut', sku: 'DON-8', category: isRtl ? 'مخبوزات' : 'Bakeries', brand: 'Bakery', quantity: 45, unitCost: 2.00, sellingPrice: 6.00, status: 'In Stock', dateAdded: Date.now() },
-  ];
+  const submitLockRef = useRef(false);
+  const submitRef = useRef<(cashOverride?: number) => Promise<void>>(async () => {});
 
-  // Merge dynamic items from real Firestore with demo products for an immersive cafe/mall menu
-  const displayedProducts = products.length > 0 ? products : fallbackProducts;
+  const displayedProducts = products;
 
   // Retrieve unique categories
   const categoriesList = ['all', ...Array.from(new Set(displayedProducts.map(p => p.category).filter(Boolean)))];
 
   const refreshRates = async (force = false) => {
-    const r = await fetchLiveUsdRates(force);
-    if (r) setLiveRates(r);
+    setRatesLoading(true);
+    try {
+      const r = await fetchLiveUsdRates(force);
+      if (r) {
+        setLiveRates(r);
+        setRatesAt(readCachedLiveRatesTimestamp() || Date.now());
+      }
+    } finally {
+      setRatesLoading(false);
+    }
   };
 
   useEffect(() => {
-    refreshRates();
-    const interval = setInterval(() => refreshRates(), 5 * 60 * 1000);
+    refreshRates(true);
+    const interval = setInterval(() => refreshRates(true), 5 * 60 * 1000);
     return () => clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    if (!liveRates || hadLiveRatesRef.current) {
+      hadLiveRatesRef.current = !!liveRates;
+      return;
+    }
+    hadLiveRatesRef.current = true;
+    if (scannedItems.length === 0) return;
+    setScannedItems((prev) =>
+      prev.map((item) => {
+        const base = itemBaseRef.current[item.productId];
+        if (!base) return item;
+        const newPrice = convertMoney(base.amount, base.currency, posCurrency, usdUnitRates);
+        const qty = Number(item.quantity) || 0;
+        return { ...item, unitPrice: newPrice, total: roundMoney(newPrice * qty, posCurrency) };
+      })
+    );
+  }, [liveRates, posCurrency, usdUnitRates, scannedItems.length]);
 
   // Background offline sales synchronization hook
   useEffect(() => {
@@ -485,45 +520,31 @@ export default function POSSystem({ language }: POSSystemProps) {
   const scannerInputRef = useRef<HTMLInputElement>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
 
-  // Focus scanner on mount and periodically or via click event to ensure absolute focus-lock
+  const focusScanner = () => {
+    const active = document.activeElement as HTMLElement | null;
+    const tag = active?.tagName;
+    if (active && active !== scannerInputRef.current && (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT')) return;
+    scannerInputRef.current?.focus({ preventScroll: true });
+  };
+
+  // Return to the barcode field only after a click has already run.
+  // Refocusing on blur (during mousedown) cancels the button the user pressed.
   useEffect(() => {
-    focusScanner();
-    
+    const timer = window.setTimeout(() => focusScanner(), 0);
+
     const handleDocumentClick = (e: MouseEvent) => {
-      // If the user clicked inside a selection modal or button with action, don't hijack focus
-      const target = e.target as HTMLElement;
-      if (
-        target.tagName === 'INPUT' || 
-        target.tagName === 'TEXTAREA' || 
-        target.closest('button') || 
-        target.closest('a') ||
-        target.closest('.fixed') // Modals
-      ) {
-        return;
-      }
-      focusScanner();
+      const target = e.target as HTMLElement | null;
+      if (!target) return;
+      if (target.closest('input, textarea, select, [role="dialog"]')) return;
+      window.setTimeout(() => focusScanner(), 0);
     };
 
     document.addEventListener('click', handleDocumentClick);
-
-    const interval = setInterval(() => {
-      // Keep focused if no other input is active
-      if (document.activeElement?.tagName !== 'INPUT' && document.activeElement?.tagName !== 'TEXTAREA') {
-        focusScanner();
-      }
-    }, 3000);
-
     return () => {
       document.removeEventListener('click', handleDocumentClick);
-      clearInterval(interval);
+      window.clearTimeout(timer);
     };
   }, []);
-
-  const focusScanner = () => {
-    if (scannerInputRef.current) {
-      scannerInputRef.current.focus();
-    }
-  };
 
   // Beep sound simulator using Web Audio API for a premium real-life hardware register feel
   const playBeep = (type: 'success' | 'error' | 'success_checkout') => {
@@ -649,7 +670,7 @@ export default function POSSystem({ language }: POSSystemProps) {
             // Trigger payment instantly on Enter if focused on barcode scanner AND it's empty, or not in any input/textarea
             if ((isFromScanner && !barcodeInput.trim()) || !isInputActive) {
               e.preventDefault();
-              handleSubmitProcess();
+              if (!e.repeat) submitRef.current();
             }
           } else if (e.key === ' ' || e.code === 'Space') {
             // Trigger payment instantly on Spacebar if no input text fields are active
@@ -663,7 +684,7 @@ export default function POSSystem({ language }: POSSystemProps) {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [scannedItems, posMode, discount, warehouses, showCashPaymentModal]);
+  }, [scannedItems, posMode, discount, warehouses, showCashPaymentModal, barcodeInput]);
 
   // Handle Scanning Lookup (Now supporting asynchronous external API fallbacks safely)
   const handleBarcodeSubmit = async (e: React.FormEvent) => {
@@ -798,7 +819,8 @@ export default function POSSystem({ language }: POSSystemProps) {
         description: product.name,
         quantity: 1,
         unitPrice: finalPrice,
-        total: finalPrice
+        total: finalPrice,
+        sku: product.sku
       };
       setScannedItems([...scannedItems, newItem]);
     }
@@ -891,25 +913,22 @@ export default function POSSystem({ language }: POSSystemProps) {
 
   // Calculations
   const totalPieces = scannedItems.reduce((acc, item) => acc + (Number(item.quantity) || 0), 0);
-  const subtotal = scannedItems.reduce((acc, item) => acc + (Number(item.total) || 0), 0);
-  const vatRate = Number(settings?.defaultVatRate) || 16;
-  const taxAmount = enableTax ? roundMoney((subtotal * vatRate) / 100, activeCurrency) : 0;
-  const preDiscountGrandTotal = roundMoney(subtotal + taxAmount, activeCurrency);
-  const appliedDiscount = Math.min(Math.max(Number(discount) || 0, 0), preDiscountGrandTotal);
-  const grandTotal = roundMoney(preDiscountGrandTotal - appliedDiscount, activeCurrency);
+  const vatRate = resolveVatRate(settings?.defaultVatRate);
+  const {
+    subtotal,
+    discount: appliedDiscount,
+    taxAmount,
+    total: grandTotal,
+  } = computeInvoiceTotals({
+    subtotal: scannedItems.reduce((acc, item) => acc + (Number(item.total) || 0), 0),
+    discount,
+    vatRate,
+    taxEnabled: enableTax,
+    currency: activeCurrency as Currency,
+  });
 
-  // Print Thermal 80mm Receipt using hidden iframe rendering
+  // Print Thermal 80mm Receipt
   const printThermalReceipt = (invoiceObj: Invoice) => {
-    const iframe = document.createElement('iframe');
-    iframe.style.position = 'absolute';
-    iframe.style.width = '0px';
-    iframe.style.height = '0px';
-    iframe.style.border = 'none';
-    document.body.appendChild(iframe);
-
-    const doc = iframe.contentWindow?.document;
-    if (!doc) return;
-
     let itemsHtml = '';
     invoiceObj.items.forEach(item => {
       itemsHtml += `
@@ -929,7 +948,8 @@ export default function POSSystem({ language }: POSSystemProps) {
       USD: '$',
       IQD: 'د.ع',
       SAR: 'ر.س',
-      LYD: 'د.ل'
+      LYD: 'د.ل',
+      EGP: 'ج.م',
     };
     const symbol = symbolMap[currencyStr] || currencyStr;
 
@@ -992,16 +1012,16 @@ export default function POSSystem({ language }: POSSystemProps) {
               <span>${isRtl ? 'المجموع الفرعي:' : 'Subtotal:'}</span>
               <span>${formatCurrencyValue(invoiceObj.subtotal, invoiceObj.currency)}</span>
           </div>
-          <div class="calc-row">
-              <span>${isRtl ? 'ضريبة القيمة المضافة:' : 'VAT Tax:'}</span>
-              <span>${formatCurrencyValue(invoiceObj.taxAmount, invoiceObj.currency)}</span>
-          </div>
           ${invoiceObj.discount ? `
           <div class="calc-row" style="color: #d32f2f;">
               <span>${isRtl ? 'الخصم:' : 'Discount:'}</span>
               <span>-${formatCurrencyValue(invoiceObj.discount, invoiceObj.currency)}</span>
           </div>
           ` : ''}
+          <div class="calc-row">
+              <span>${isRtl ? 'ضريبة القيمة المضافة:' : 'VAT Tax:'}</span>
+              <span>${formatCurrencyValue(invoiceObj.taxAmount, invoiceObj.currency)}</span>
+          </div>
           
           <div class="total-section">
               <span>${isRtl ? 'المجموع النهائي الكلي:' : 'GRAND TOTAL:'}</span>
@@ -1029,27 +1049,19 @@ export default function POSSystem({ language }: POSSystemProps) {
       </html>
     `;
 
-    doc.open();
-    doc.write(receiptHTML);
-    doc.close();
-
-    iframe.contentWindow?.focus();
-    setTimeout(() => {
-      iframe.contentWindow?.print();
-      setTimeout(() => {
-        document.body.removeChild(iframe);
-      }, 1000);
-    }, 250);
+    printHtmlDocument(receiptHTML);
   };
 
   // Submit standard invoice
   const handleSubmitProcess = async (cashOverride?: number) => {
+    if (submitLockRef.current) return;
     if (scannedItems.length === 0) {
       playBeep('error');
       toast.error(isRtl ? 'ليست هناك أي مواد ممسوحة في المعاملة!' : 'Cart is empty!');
       return;
     }
 
+    submitLockRef.current = true;
     setIsSubmitting(true);
     try {
       const typedCash = typeof cashOverride === 'number' ? cashOverride : parseFloat(receivedAmount);
@@ -1065,13 +1077,14 @@ export default function POSSystem({ language }: POSSystemProps) {
       const changeDue = roundMoney(Math.max(0, parsedCash - grandTotal), activeCurrency);
       
       const officialInvoice: Invoice = {
-        id: `pos-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        id: crypto.randomUUID(),
         invoiceNumber: generatedNo,
         customerName: posMode === 'sale' ? (isRtl ? 'مبيعات نقاط البيع مباشرة' : 'Direct POS Customer') : undefined,
         supplierName: posMode === 'purchase' ? (isRtl ? 'مشتريات توريد مباشرة' : 'Direct Supplier') : undefined,
         items: [...scannedItems],
         subtotal,
         taxAmount,
+        vatRate: enableTax ? vatRate : 0,
         totalAmount: grandTotal,
         type: posMode,
         date: Date.now(),
@@ -1084,7 +1097,7 @@ export default function POSSystem({ language }: POSSystemProps) {
 
       // Persist first: any failure here aborts checkout (cart is kept) instead of showing a false success.
       if (user) {
-        await saveInvoice(officialInvoice);
+        officialInvoice.invoiceNumber = await saveInvoice(officialInvoice);
         consumeInvoiceNumber(invoicePrefix, sessionUid);
       } else {
         toast.warning(
@@ -1148,11 +1161,14 @@ export default function POSSystem({ language }: POSSystemProps) {
       console.error(error);
       setIsSubmitting(false);
       playBeep('error');
-      if (!String(error?.message || '').startsWith('Insufficient stock')) {
+      if (!error?.notified && !String(error?.message || '').startsWith('Insufficient stock')) {
         toast.error(isRtl ? 'تعذّر حفظ الفاتورة؛ لم تُسجَّل العملية وبقيت السلة كما هي.' : 'Could not save the invoice; nothing was recorded and the cart was kept.');
       }
+    } finally {
+      submitLockRef.current = false;
     }
   };
+  submitRef.current = handleSubmitProcess;
 
   // Format currency with standard support
   const formatCurrencyValue = (val: number, customCurrency?: string) =>
@@ -1166,13 +1182,13 @@ export default function POSSystem({ language }: POSSystemProps) {
   return (
     <div className="flex-1 p-2 sm:p-4 lg:p-6 flex flex-col min-h-[85vh] text-slate-800 dark:text-slate-100" dir={isRtl ? 'rtl' : 'ltr'}>
       {/* Title & Mode Switcher header */}
-      <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 pb-5 border-b border-slate-200/60 dark:border-slate-805/60">
+      <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 pb-5 border-b border-slate-200/60 dark:border-slate-800/60">
         <div>
           <div className="flex items-center gap-2">
             <span className="p-2 bg-emerald-600 text-white rounded-xl">
               <Barcode size={22} />
             </span>
-            <h1 className="text-2xl font-black text-slate-905 dark:text-white tracking-tight">
+            <h1 className="text-2xl font-black text-slate-900 dark:text-white tracking-tight">
               {isRtl ? 'نظام المبيعات والتوريد المباشر بالباركود' : 'Direct Sales & Supply POS'}
             </h1>
           </div>
@@ -1233,15 +1249,7 @@ export default function POSSystem({ language }: POSSystemProps) {
                 type="text" 
                 value={barcodeInput}
                 onChange={(e) => setBarcodeInput(e.target.value)}
-                onBlur={() => {
-                  setTimeout(() => {
-                    const activeTag = document.activeElement?.tagName;
-                    if (activeTag !== 'INPUT' && activeTag !== 'TEXTAREA') {
-                      scannerInputRef.current?.focus();
-                    }
-                  }, 80);
-                }}
-                placeholder={isRtl ? "مرر باركود الصنف هنا أو اكتب رمز الـ SKU الخاص بالمادة..." : "Pass item barcode here or enter SKU codename manually..."} 
+                placeholder={isRtl ? "مرر باركود الصنف هنا أو اكتب رمز الـ SKU الخاص بالمادة..." : "Pass item barcode here or enter SKU codename manually..."} aria-label={isRtl ? "مرر باركود الصنف هنا أو اكتب رمز الـ SKU الخاص بالمادة..." : "Pass item barcode here or enter SKU codename manually..."} 
                 className="w-full bg-white dark:bg-white/[0.03] border-2 border-emerald-500/50 focus:border-emerald-500 rounded-xl px-5 py-4 text-emerald-600 dark:text-emerald-400 font-mono text-base font-bold shadow-sm outline-none transition-colors"
                 autoFocus
               />
@@ -1254,11 +1262,11 @@ export default function POSSystem({ language }: POSSystemProps) {
               type="button"
               onClick={() => setIsCameraScanning(true)}
               className="px-6 py-4 sm:py-0 bg-gradient-to-r from-cyan-600 via-blue-600 to-indigo-600 hover:from-cyan-500 hover:via-blue-500 hover:to-indigo-500 text-white rounded-xl font-bold flex items-center justify-center gap-2.5 transition shadow-lg shadow-cyan-500/15 active:scale-95 cursor-pointer text-xs md:text-sm shrink-0 border border-cyan-400/20"
-              title={isRtl ? "مسح الباركود باستخدام الكاميرا" : "Scan barcode using Camera"}
+              title={isRtl ? "مسح الباركود باستخدام الكاميرا" : "Scan barcode using Camera"} aria-label={isRtl ? "مسح الباركود باستخدام الكاميرا" : "Scan barcode using Camera"}
             >
               <span className="relative flex h-2 w-2">
                 <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-200 opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-cyan-155"></span>
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-cyan-200"></span>
               </span>
               <span className="text-base sm:text-lg">📸</span>
               <span>{isRtl ? 'مسح باركود الكاميرا' : 'Camera Scan Barcode'}</span>
@@ -1284,7 +1292,7 @@ export default function POSSystem({ language }: POSSystemProps) {
                   setSearchTerm('');
                   setShowProductLookup(true);
                 }}
-                className="text-xs font-bold text-slate-600 dark:text-slate-350 flex items-center gap-1.5 hover:text-indigo-600 transition"
+                className="text-xs font-bold text-slate-600 dark:text-slate-300 flex items-center gap-1.5 hover:text-indigo-600 transition"
               >
                 🔍 {isRtl ? 'البحث بالاسم' : 'Lookup Item'}
               </button>
@@ -1345,6 +1353,19 @@ export default function POSSystem({ language }: POSSystemProps) {
 
           {/* 4. Touch grid displaying products based on active category */}
           <div className="flex-1 overflow-y-auto max-h-[550px] w-full box-border pr-1">
+            {displayedProducts.length === 0 && (
+              <div className="flex flex-col items-center justify-center text-center gap-2 py-16 px-6 rounded-xl border border-dashed border-slate-300 dark:border-white/10">
+                <Package size={28} className="text-slate-400" />
+                <p className="text-sm font-bold text-slate-700 dark:text-slate-200">
+                  {isRtl ? 'لا توجد أصناف في المخزون بعد' : 'No products in inventory yet'}
+                </p>
+                <p className="text-xs text-slate-500 dark:text-slate-400 max-w-xs">
+                  {isRtl
+                    ? 'أضف أصنافك من شاشة المخزون أو بالتسجيل السريع (F7)، ثم امسح الباركود أو اختر الصنف للبيع.'
+                    : 'Add products from Inventory or Quick Register (F7), then scan or tap a product to sell.'}
+                </p>
+              </div>
+            )}
             <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-4 w-full box-border">
               {displayedProducts
                 .filter(p => selectedCategory === 'all' || p.category === selectedCategory)
@@ -1393,19 +1414,19 @@ export default function POSSystem({ language }: POSSystemProps) {
 
           {/* Keyboard Shortcuts indicators inside active terminal */}
           <div className="mt-4 pt-3 border-t border-slate-200/50 dark:border-slate-800/80 flex flex-wrap items-center gap-2.5 text-[10px] text-slate-400 font-extrabold select-none font-arabic">
-            <span className="bg-slate-100 dark:bg-slate-900 border border-slate-200/40 px-2 py-0.5 rounded text-slate-700 dark:text-slate-450">
+            <span className="bg-slate-100 dark:bg-slate-900 border border-slate-200/40 px-2 py-0.5 rounded text-slate-700 dark:text-slate-400">
               <kbd className="font-mono bg-white dark:bg-slate-950 px-1 border border-slate-300 dark:border-white/10 rounded">F9</kbd> {isRtl ? 'تركيز الماسح الكاشف' : 'Focus Scanner'}
             </span>
-            <span className="bg-slate-100 dark:bg-slate-900 border border-slate-200/40 px-2 py-0.5 rounded text-slate-700 dark:text-slate-450">
+            <span className="bg-slate-100 dark:bg-slate-900 border border-slate-200/40 px-2 py-0.5 rounded text-slate-700 dark:text-slate-400">
               <kbd className="font-mono bg-white dark:bg-slate-950 px-1 border border-slate-300 dark:border-white/10 rounded">F2</kbd> {isRtl ? 'تعليق الفاتورة' : 'Hold/Suspend'}
             </span>
-            <span className="bg-slate-100 dark:bg-slate-900 border border-slate-200/40 px-2 py-0.5 rounded text-slate-700 dark:text-slate-450 text-rose-600 dark:text-rose-400">
+            <span className="bg-slate-100 dark:bg-slate-900 border border-slate-200/40 px-2 py-0.5 rounded text-slate-700 dark:text-slate-400 text-rose-600 dark:text-rose-400">
               <kbd className="font-mono bg-white dark:bg-slate-950 px-1 border border-rose-300 dark:border-rose-900/40 rounded text-rose-600">F4</kbd> {isRtl ? 'إلغاء الفاتورة بالكامل' : 'Cancel/Clear Invoice'}
             </span>
-            <span className="bg-slate-100 dark:bg-slate-900 border border-slate-200/40 px-2 py-0.5 rounded text-slate-700 dark:text-slate-450">
+            <span className="bg-slate-100 dark:bg-slate-900 border border-slate-200/40 px-2 py-0.5 rounded text-slate-700 dark:text-slate-400">
               <kbd className="font-mono bg-white dark:bg-slate-950 px-1 border border-slate-300 dark:border-white/10 rounded">F3</kbd> {isRtl ? 'تركيز الخصم' : 'Focus Discount'}
             </span>
-            <span className="bg-slate-100 dark:bg-slate-900 border border-slate-200/40 px-2 py-0.5 rounded text-slate-700 dark:text-slate-450">
+            <span className="bg-slate-100 dark:bg-slate-900 border border-slate-200/40 px-2 py-0.5 rounded text-slate-700 dark:text-slate-400">
               <kbd className="font-mono bg-white dark:bg-slate-950 px-1 border border-slate-300 dark:border-white/10 rounded">F10</kbd> {isRtl ? 'دفع فوري' : 'Submit Check'}
             </span>
           </div>
@@ -1423,31 +1444,39 @@ export default function POSSystem({ language }: POSSystemProps) {
                 {isRtl ? 'الفاتورة الحالية' : 'Current Checkout Invoice'}
               </h2>
             </div>
-            <span className="text-xs font-mono bg-slate-205 dark:bg-white/10 text-slate-700 dark:text-slate-300 px-2 py-1 rounded">
+            <span className="text-xs font-mono bg-slate-200 dark:bg-white/10 text-slate-700 dark:text-slate-300 px-2 py-1 rounded">
               #{previewInvoiceNo}
             </span>
           </div>
 
-          {/* Invoice Currency Switcher */}
-          <div className="px-4 py-2 bg-slate-100 dark:bg-white/[0.01] border-b border-slate-200/50 dark:border-white/5 flex items-center justify-between text-xs gap-2">
-            <span className="text-slate-500 dark:text-slate-400 font-bold flex items-center gap-1.5 shrink-0">
-              🪙 {isRtl ? 'عملة البيع الفوري:' : 'Checkout Currency:'}
-            </span>
-            <div className="flex items-center flex-wrap gap-1 bg-white dark:bg-slate-900 border border-slate-200 dark:border-white/10 rounded-lg p-0.5 shadow-sm">
-              {['JOD', 'ILS', 'USD', 'IQD', 'SAR', 'LYD'].map((cur) => (
-                <button
-                  key={cur}
-                  type="button"
-                  onClick={() => handleCurrencyChange(cur)}
-                  className={`px-2 py-1 rounded text-[10px] font-mono font-bold transition-all cursor-pointer ${
-                    activeCurrency === cur
-                      ? 'bg-emerald-500 text-white shadow-sm'
-                      : 'text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-white/5'
-                  }`}
-                >
-                  {cur}
-                </button>
-              ))}
+          <div className="px-4 py-3 bg-slate-100 dark:bg-white/[0.01] border-b border-slate-200/50 dark:border-white/5 space-y-2">
+            <CurrencyPicker
+              value={activeCurrency}
+              onChange={(code) => handleCurrencyChange(code)}
+              isRtl={isRtl}
+              label={isRtl ? 'عملة الصندوق' : 'Checkout currency'}
+            />
+            <div className="flex items-center justify-between gap-2 text-[11px] font-mono text-slate-500 dark:text-slate-400">
+              <span>
+                {activeCurrency === storeCurrency
+                  ? (isRtl ? `الأسعار بعملة ${activeCurrency}` : `Prices in ${activeCurrency}`)
+                  : `1 ${storeCurrency} = ${formatMoney(convertMoney(1, storeCurrency, activeCurrency, usdUnitRates), activeCurrency)}`}
+                {' · '}
+                {settings?.useManualExchangeRates
+                  ? (isRtl ? 'سعر يدوي' : 'Manual')
+                  : liveRates
+                    ? (isRtl ? 'سعر مباشر' : 'Live')
+                    : (isRtl ? 'سعر احتياطي' : 'Fallback')}
+                {ratesAt ? ` · ${new Date(ratesAt).toLocaleTimeString(isRtl ? 'ar' : 'en', { hour: '2-digit', minute: '2-digit' })}` : ''}
+              </span>
+              <button
+                type="button"
+                onClick={() => refreshRates(true)}
+                disabled={ratesLoading}
+                className="text-emerald-600 dark:text-emerald-400 font-bold disabled:opacity-50"
+              >
+                {ratesLoading ? '...' : (isRtl ? 'تحديث' : 'Refresh')}
+              </button>
             </div>
           </div>
 
@@ -1495,7 +1524,7 @@ export default function POSSystem({ language }: POSSystemProps) {
                             type="button"
                             onClick={() => handleDiscardHeldBill(bill.id)}
                             className="text-slate-400 hover:text-rose-500 transition-colors font-medium p-1 text-[11px] hover:bg-slate-100 dark:hover:bg-white/5 rounded-md cursor-pointer"
-                            title={isRtl ? "إلغاء وإتلاف الفاتورة" : "Delete held bill"}
+                            title={isRtl ? "إلغاء وإتلاف الفاتورة" : "Delete held bill"} aria-label={isRtl ? "إلغاء وإتلاف الفاتورة" : "Delete held bill"}
                           >
                             ✕
                           </button>
@@ -1560,14 +1589,14 @@ export default function POSSystem({ language }: POSSystemProps) {
 
                     {/* Quantity state controls */}
                     <div className="flex justify-between items-center mt-3.5 w-full">
-                      <span className="text-[10px] text-slate-405 font-mono">
+                      <span className="text-[10px] text-slate-400 font-mono">
                         {formatCurrencyValue(item.unitPrice)} / {isRtl ? 'للوحدة' : 'unit'}
                       </span>
                       <div className="flex items-center gap-2 bg-white dark:bg-black/20 rounded-lg p-1 border border-slate-200 dark:border-white/5">
                         <button 
                           type="button"
                           onClick={() => updateItemQty(item.productId, -1)}
-                          className="w-6 h-6 rounded bg-slate-100 dark:bg-white/10 flex items-center justify-center text-slate-705 dark:text-white hover:bg-rose-500 hover:text-white transition-colors text-xs font-bold cursor-pointer"
+                          className="w-6 h-6 rounded bg-slate-100 dark:bg-white/10 flex items-center justify-center text-slate-700 dark:text-white hover:bg-rose-500 hover:text-white transition-colors text-xs font-bold cursor-pointer"
                         >
                           -
                         </button>
@@ -1585,7 +1614,7 @@ export default function POSSystem({ language }: POSSystemProps) {
                         <button 
                           type="button"
                           onClick={() => updateItemQty(item.productId, 1)}
-                          className="w-6 h-6 rounded bg-slate-100 dark:bg-white/10 flex items-center justify-center text-slate-705 dark:text-white hover:bg-emerald-500 hover:text-white transition-colors text-xs font-bold cursor-pointer"
+                          className="w-6 h-6 rounded bg-slate-100 dark:bg-white/10 flex items-center justify-center text-slate-700 dark:text-white hover:bg-emerald-500 hover:text-white transition-colors text-xs font-bold cursor-pointer"
                         >
                           +
                         </button>
@@ -1594,7 +1623,7 @@ export default function POSSystem({ language }: POSSystemProps) {
                           type="button"
                           onClick={() => removeItem(item.productId)}
                           className="text-slate-300 hover:text-rose-600 transition p-1 ml-1"
-                          title={isRtl ? "حذف" : "Remove"}
+                          title={isRtl ? "حذف" : "Remove"} aria-label={isRtl ? "حذف" : "Remove"}
                         >
                           <Trash2 size={12} />
                         </button>
@@ -1810,7 +1839,7 @@ export default function POSSystem({ language }: POSSystemProps) {
                   }
                 }}
                 disabled={isSubmitting || scannedItems.length === 0}
-                className="py-3 rounded-xl bg-slate-200 dark:bg-white/10 text-slate-850 dark:text-white font-bold hover:bg-slate-300 dark:hover:bg-white/20 transition-all flex items-center justify-center gap-1.5 text-xs cursor-pointer disabled:opacity-50"
+                className="py-3 rounded-xl bg-slate-200 dark:bg-white/10 text-slate-800 dark:text-white font-bold hover:bg-slate-300 dark:hover:bg-white/20 transition-all flex items-center justify-center gap-1.5 text-xs cursor-pointer disabled:opacity-50"
               >
                 {posMode === 'sale' ? (
                   <>
@@ -1866,7 +1895,7 @@ export default function POSSystem({ language }: POSSystemProps) {
               className="bg-white dark:bg-slate-950 rounded-[2rem] border border-slate-200 dark:border-slate-800 p-6 max-w-lg w-full shadow-2xl space-y-4"
             >
               <div className="flex justify-between items-center pb-2 border-b border-slate-100 dark:border-slate-800">
-                <h3 className="font-black text-slate-905 dark:text-white text-base">
+                <h3 className="font-black text-slate-900 dark:text-white text-base">
                   {isRtl ? 'البحث التفصيلي عن صنف في المستودع' : 'Filter & Add Warehouse Item'}
                 </h3>
                 <button 
@@ -1884,7 +1913,7 @@ export default function POSSystem({ language }: POSSystemProps) {
                 </div>
                 <input 
                   type="text"
-                  placeholder={isRtl ? "اكتب اسم المادة أو الـ SKU المفقود..." : "Type text search SKU description..."}
+                  placeholder={isRtl ? "اكتب اسم المادة أو الـ SKU المفقود..." : "Type text search SKU description..."} aria-label={isRtl ? "اكتب اسم المادة أو الـ SKU المفقود..." : "Type text search SKU description..."}
                   value={searchTerm}
                   onChange={(e) => setSearchTerm(e.target.value)}
                   className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl pr-10 pl-4 py-2.5 text-xs text-slate-900 dark:text-white"
@@ -1908,7 +1937,7 @@ export default function POSSystem({ language }: POSSystemProps) {
                     >
                       <div className="space-y-0.5">
                         <p className="font-extrabold text-xs text-slate-900 dark:text-white">{p.name}</p>
-                        <p className="text-[10px] text-slate-450 dark:text-slate-550 font-mono">SKU: {p.sku || p.id} • {isRtl ? 'المتوفر:' : 'Qty:'} {p.quantity}</p>
+                        <p className="text-[10px] text-slate-400 dark:text-slate-500 font-mono">SKU: {p.sku || p.id} • {isRtl ? 'المتوفر:' : 'Qty:'} {p.quantity}</p>
                       </div>
                       <span className="text-xs font-black text-indigo-600 dark:text-indigo-400 font-mono">
                         {formatCurrencyValue(Number(convertMoney(posMode === 'sale' ? p.sellingPrice : p.unitCost, p.currency || settings?.currency || 'JOD', activeCurrency, usdUnitRates)) || 0)}
@@ -1939,7 +1968,7 @@ export default function POSSystem({ language }: POSSystemProps) {
                 <h3 className="font-extrabold text-slate-900 dark:text-white text-xl">
                   {isRtl ? 'تم إعتماد التقييد بنجاح!' : 'Transaction posted successfully!'}
                 </h3>
-                <p className="text-xs text-slate-450 dark:text-slate-400 font-semibold leading-relaxed">
+                <p className="text-xs text-slate-400 dark:text-slate-400 font-semibold leading-relaxed">
                   {isRtl 
                     ? `تم تسجيل الفاتورة الرقمية رقم (${lastInvoiceNumber}) بسلام وتعديل أرصدة الكميات في المستودع وقاصة الأموال بنجاح.`
                     : `Invoice ${lastInvoiceNumber} recorded. Quantities in storage and secure vault registers have been updated.`}
@@ -1963,7 +1992,7 @@ export default function POSSystem({ language }: POSSystemProps) {
                     setShowSuccessModal(false);
                     focusScanner();
                   }}
-                  className="flex-1 py-3 bg-indigo-650 hover:bg-indigo-700 text-white font-black rounded-xl text-xs transition active:scale-95 cursor-pointer"
+                  className="flex-1 py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-black rounded-xl text-xs transition active:scale-95 cursor-pointer"
                 >
                   {isRtl ? 'المتابعة ومسح صنف ومادة جديدة' : 'Scan Next Item'}
                 </button>
@@ -2029,7 +2058,7 @@ export default function POSSystem({ language }: POSSystemProps) {
                         type="text"
                         value={manualScanInput}
                         onChange={(e) => setManualScanInput(e.target.value)}
-                        placeholder="e.g. ESP-1, 12345, or any code"
+                        placeholder="e.g. ESP-1, 12345, or any code" aria-label="e.g. ESP-1, 12345, or any code"
                         className="flex-1 px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs font-mono text-emerald-400 outline-none focus:border-emerald-500"
                         onKeyDown={(e) => {
                           if (e.key === 'Enter') {
@@ -2132,8 +2161,8 @@ export default function POSSystem({ language }: POSSystemProps) {
                 }
 
                 try {
-                  const generatedId = Math.random().toString(36).substr(2, 9);
-                  const finalSku = quickRegForm.sku.trim() || generatedId;
+                  const generatedId = crypto.randomUUID();
+                  const finalSku = quickRegForm.sku.trim() || `SKU-${generatedId.slice(0, 8).toUpperCase()}`;
                   const effectiveThreshold = Number(quickRegForm.lowStockThreshold) || 5;
                   const initialQty = Number(quickRegForm.quantity) || 0;
 
@@ -2180,7 +2209,7 @@ export default function POSSystem({ language }: POSSystemProps) {
 
                 {/* SKU / Barcode */}
                 <div>
-                  <label className="block text-xs font-black text-slate-600 dark:text-slate-350 mb-1.5">
+                  <label className="block text-xs font-black text-slate-600 dark:text-slate-300 mb-1.5">
                     {isRtl ? 'رمز الباركود / SKU' : 'Barcode / SKU'}
                   </label>
                   <input
@@ -2188,14 +2217,14 @@ export default function POSSystem({ language }: POSSystemProps) {
                     required
                     value={quickRegForm.sku}
                     onChange={(e) => setQuickRegForm({ ...quickRegForm, sku: e.target.value })}
-                    placeholder={isRtl ? 'أدخل الباركود الخاص بالمادة' : 'Enter product barcode SKU...'}
+                    placeholder={isRtl ? 'أدخل الباركود الخاص بالمادة' : 'Enter product barcode SKU...'} aria-label={isRtl ? 'أدخل الباركود الخاص بالمادة' : 'Enter product barcode SKU...'}
                     className="w-full px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 font-mono text-sm font-semibold text-emerald-600 dark:text-emerald-400 outline-none focus:border-emerald-500"
                   />
                 </div>
 
                 {/* Name */}
                 <div>
-                  <label className="block text-xs font-black text-slate-600 dark:text-slate-350 mb-1.5">
+                  <label className="block text-xs font-black text-slate-600 dark:text-slate-300 mb-1.5">
                     {isRtl ? 'اسم المنتج الصنف *' : 'Product Name *'}
                   </label>
                   <input
@@ -2204,7 +2233,7 @@ export default function POSSystem({ language }: POSSystemProps) {
                     autoFocus
                     value={quickRegForm.name}
                     onChange={(e) => setQuickRegForm({ ...quickRegForm, name: e.target.value })}
-                    placeholder={isRtl ? 'اسم المادة مثلا: عصير ربيع 1 لتر' : 'e.g. Fresh Mango Juice 1L'}
+                    placeholder={isRtl ? 'اسم المادة مثلا: عصير ربيع 1 لتر' : 'e.g. Fresh Mango Juice 1L'} aria-label={isRtl ? 'اسم المادة مثلا: عصير ربيع 1 لتر' : 'e.g. Fresh Mango Juice 1L'}
                     className="w-full px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-sm font-semibold outline-none focus:border-indigo-500"
                   />
                 </div>
@@ -2212,7 +2241,7 @@ export default function POSSystem({ language }: POSSystemProps) {
                 {/* Grid for prices */}
                 <div className="grid grid-cols-2 gap-4">
                   <div>
-                    <label className="block text-xs font-black text-slate-600 dark:text-slate-350 mb-1.5">
+                    <label className="block text-xs font-black text-slate-600 dark:text-slate-300 mb-1.5">
                       {isRtl ? `سعر التكلفة (${activeCurrency})` : `Cost Price (${activeCurrency})`}
                     </label>
                     <input
@@ -2227,7 +2256,7 @@ export default function POSSystem({ language }: POSSystemProps) {
                   </div>
 
                   <div>
-                    <label className="block text-xs font-black text-slate-600 dark:text-slate-350 mb-1.5">
+                    <label className="block text-xs font-black text-slate-600 dark:text-slate-300 mb-1.5">
                       {isRtl ? `سعر البيع المعروض * (${activeCurrency})` : `Selling Price * (${activeCurrency})`}
                     </label>
                     <input
@@ -2246,7 +2275,7 @@ export default function POSSystem({ language }: POSSystemProps) {
                 {/* Grid for Initial Stock & Threshold */}
                 <div className="grid grid-cols-2 gap-4">
                   <div>
-                    <label className="block text-xs font-black text-slate-600 dark:text-slate-350 mb-1.5">
+                    <label className="block text-xs font-black text-slate-600 dark:text-slate-300 mb-1.5">
                       {isRtl ? 'كمية المخزون الإبتدائي' : 'Initial Stock Qty'}
                     </label>
                     <input
@@ -2262,7 +2291,7 @@ export default function POSSystem({ language }: POSSystemProps) {
                   </div>
 
                   <div>
-                    <label className="block text-xs font-black text-slate-600 dark:text-slate-350 mb-1.5">
+                    <label className="block text-xs font-black text-slate-600 dark:text-slate-300 mb-1.5">
                       {isRtl ? 'حد منبه قرب نفاذ الصنف' : 'Low Stock Warning Threshold'}
                     </label>
                     <input
@@ -2281,7 +2310,7 @@ export default function POSSystem({ language }: POSSystemProps) {
                 {/* Optional Category and Brand */}
                 <div className="grid grid-cols-2 gap-4">
                   <div>
-                    <label className="block text-xs font-black text-slate-600 dark:text-slate-350 mb-1.5">
+                    <label className="block text-xs font-black text-slate-600 dark:text-slate-300 mb-1.5">
                       {isRtl ? 'التصنيف / الفئة' : 'Category / Class'}
                     </label>
                     <input
@@ -2289,7 +2318,7 @@ export default function POSSystem({ language }: POSSystemProps) {
                       list="quick-categories-list"
                       value={quickRegForm.category}
                       onChange={(e) => setQuickRegForm({ ...quickRegForm, category: e.target.value })}
-                      placeholder={isRtl ? 'اكتب أو اختر تصنيفاً' : 'e.g. Dairy, Soft Drinks...'}
+                      placeholder={isRtl ? 'اكتب أو اختر تصنيفاً' : 'e.g. Dairy, Soft Drinks...'} aria-label={isRtl ? 'اكتب أو اختر تصنيفاً' : 'e.g. Dairy, Soft Drinks...'}
                       className="w-full px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-sm font-semibold outline-none focus:border-indigo-500"
                     />
                     <datalist id="quick-categories-list">
@@ -2300,7 +2329,7 @@ export default function POSSystem({ language }: POSSystemProps) {
                   </div>
 
                   <div>
-                    <label className="block text-xs font-black text-slate-600 dark:text-slate-350 mb-1.5">
+                    <label className="block text-xs font-black text-slate-600 dark:text-slate-300 mb-1.5">
                       {isRtl ? 'المستودع الرئيسي الافتراضي' : 'Default Warehouse'}
                     </label>
                     <select

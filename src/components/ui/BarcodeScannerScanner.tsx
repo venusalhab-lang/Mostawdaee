@@ -212,7 +212,7 @@ export default function BarcodeScannerScanner({ onScan, isRtl, onClose }: Props)
           <div className="absolute inset-0 flex flex-col items-center justify-center text-center p-6 space-y-4 select-none z-10 bg-slate-950/70">
             <VideoOff size={32} className="text-slate-500" />
             <div>
-              <p className="text-slate-350 font-bold text-xs">
+              <p className="text-slate-300 font-bold text-xs">
                 {isRtl ? 'الكاميرا متوقفة حالياً' : 'Camera feed is sleeping'}
               </p>
               <p className="text-slate-500 text-[10px] max-w-[280px] mx-auto mt-1 leading-normal font-semibold">

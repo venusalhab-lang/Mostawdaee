@@ -20,12 +20,13 @@ interface HeaderProps {
 }
 
 const CURRENCIES = [
-  { code: 'JOD', symbol: 'د.أ', label: 'دينار أردني', sub: 'Jordanian Dinar', color: 'text-emerald-600 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-250/20' },
-  { code: 'USD', symbol: '$', label: 'دولار أمريكي', sub: 'US Dollar', color: 'text-amber-500 bg-amber-50 dark:bg-amber-950/40 border border-amber-250/20' },
-  { code: 'ILS', symbol: '₪', label: 'شيكل في فلسطين', sub: 'New Israeli Shekel', color: 'text-sky-500 bg-sky-50 dark:bg-sky-950/40 border border-sky-250/20' },
-  { code: 'SAR', symbol: 'ر.س', label: 'ريال سعودي', sub: 'Saudi Riyal', color: 'text-teal-600 bg-teal-50 dark:bg-teal-950/40 border border-teal-250/20' },
-  { code: 'IQD', symbol: 'د.ع', label: 'دينار عراقي', sub: 'Iraqi Dinar', color: 'text-indigo-600 bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-250/20' },
-  { code: 'LYD', symbol: 'د.ل', label: 'دينار ليبي', sub: 'Libyan Dinar', color: 'text-purple-600 bg-purple-50 dark:bg-purple-950/40 border border-purple-250/20' },
+  { code: 'JOD', symbol: 'د.أ', label: 'دينار أردني', sub: 'Jordanian Dinar', color: 'text-emerald-600 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200/20' },
+  { code: 'USD', symbol: '$', label: 'دولار أمريكي', sub: 'US Dollar', color: 'text-amber-500 bg-amber-50 dark:bg-amber-950/40 border border-amber-200/20' },
+  { code: 'ILS', symbol: '₪', label: 'شيكل في فلسطين', sub: 'New Israeli Shekel', color: 'text-sky-500 bg-sky-50 dark:bg-sky-950/40 border border-sky-200/20' },
+  { code: 'SAR', symbol: 'ر.س', label: 'ريال سعودي', sub: 'Saudi Riyal', color: 'text-teal-600 bg-teal-50 dark:bg-teal-950/40 border border-teal-200/20' },
+  { code: 'IQD', symbol: 'د.ع', label: 'دينار عراقي', sub: 'Iraqi Dinar', color: 'text-indigo-600 bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-200/20' },
+  { code: 'LYD', symbol: 'د.ل', label: 'دينار ليبي', sub: 'Libyan Dinar', color: 'text-purple-600 bg-purple-50 dark:bg-purple-950/40 border border-purple-200/20' },
+  { code: 'EGP', symbol: 'ج.م', label: 'جنيه مصري', sub: 'Egyptian Pound', color: 'text-rose-600 bg-rose-50 dark:bg-rose-950/40 border border-rose-200/20' },
   { code: 'DEFAULT', symbol: '⚙️', label: 'افتراضي النظام', sub: 'System Default', color: 'text-slate-500 bg-slate-50 dark:bg-slate-900 border border-slate-200' }
 ];
 
@@ -115,7 +116,6 @@ export default function Header({
       hasLongPressedRef.current = true;
       if (onChangeScreen) {
         onChangeScreen('ai-assistant');
-        toast.success(isRtl ? "تم فتح مساعد مستودعي الذكي! 🤖✨" : "Mostawda'i AI Assistant Activated! 🤖✨");
       }
       setIsPressing(false);
       setPressProgress(0);
@@ -142,31 +142,13 @@ export default function Header({
     }
     sounds.playClick();
     if (onChangeScreen) {
-      if (activeScreen === 'ai-assistant') {
-        onChangeScreen('dashboard');
-        toast.info(isRtl ? "تم إغلاق المساعد الذكي" : "AI Assistant closed");
-      } else {
-        onChangeScreen('ai-assistant');
-        toast.success(isRtl ? "تم فتح مساعد مستودعي الذكي! 🤖" : "AI Assistant Activated! 🤖");
-      }
+      onChangeScreen(activeScreen === 'ai-assistant' ? 'dashboard' : 'ai-assistant');
     }
   };
 
   const handleQuickPOSClick = () => {
     sounds.playClick();
-    if (onChangeScreen) {
-      onChangeScreen('dashboard');
-    }
-    setTimeout(() => {
-      const element = document.getElementById('quick-pos-section');
-      if (element) {
-        element.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        element.classList.add('ring-4', 'ring-indigo-505', 'ring-indigo-500/50', 'ring-offset-2', 'dark:ring-offset-slate-900', 'transition-all', 'duration-500');
-        setTimeout(() => {
-          element.classList.remove('ring-4', 'ring-indigo-505', 'ring-indigo-500/50', 'ring-offset-2', 'dark:ring-offset-slate-900', 'transition-all', 'duration-500');
-        }, 2200);
-      }
-    }, 180);
+    onChangeScreen?.('pos');
   };
 
   // Close dropdown when clicking outside
@@ -182,16 +164,19 @@ export default function Header({
     };
   }, []);
 
-  const currentCurrencyObj = CURRENCIES.find(c => c.code === preferredCurrency) || CURRENCIES[0];
+  const currentCurrencyObj = CURRENCIES.find(c => c.code === preferredCurrency) || CURRENCIES.find(c => c.code === 'DEFAULT') || CURRENCIES[0];
 
   const handleCurrencySelect = (code: string) => {
     sounds.playClick();
     onPreferredCurrencyChange(code);
     setDropdownOpen(false);
+    const chosen = CURRENCIES.find(c => c.code === code);
     toast.success(
-      isRtl 
-        ? `تم تغيير العملة النشطة إلى ${code} (${CURRENCIES.find(c => c.code === code)?.symbol})` 
-        : `Active currency changed to ${code} (${CURRENCIES.find(c => c.code === code)?.symbol})`
+      code === 'DEFAULT'
+        ? (isRtl ? 'العملة النشطة هي عملة النظام المحفوظة' : 'Active currency follows the saved system currency')
+        : (isRtl
+          ? `عملة النظام الآن ${chosen?.label || code} (${chosen?.symbol || ''})`
+          : `System currency is now ${chosen?.sub || code} (${chosen?.symbol || ''})`)
     );
   };
 
@@ -214,8 +199,8 @@ export default function Header({
             sounds.playClick();
             onOpenSidebar();
           }}
-          className="p-2 text-slate-500 dark:text-slate-400 hover:text-indigo-650 dark:hover:text-indigo-400 hover:bg-slate-100 dark:hover:bg-slate-850 rounded-xl transition-all cursor-pointer active:scale-95 shrink-0 flex items-center justify-center mentoring-open-sidebar"
-          title={isRtl ? 'فتح القائمة الجانبية' : 'Open Sidebar'}
+          className="p-2 text-slate-500 dark:text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl transition-all cursor-pointer active:scale-95 shrink-0 flex items-center justify-center mentoring-open-sidebar"
+          title={isRtl ? 'فتح القائمة الجانبية' : 'Open Sidebar'} aria-label={isRtl ? 'فتح القائمة الجانبية' : 'Open Sidebar'}
         >
           <Menu className="w-5.5 h-5.5" />
         </button>
@@ -229,8 +214,13 @@ export default function Header({
             onTouchStart={startPress}
             onTouchEnd={endPress}
             onClick={handleLogoClick}
-            className={`relative w-10 h-10 rounded-[12px] bg-slate-100/60 dark:bg-white/5 border border-slate-350 dark:border-white/10 shadow-[0_4px_12px_rgba(0,0,0,0.03)] dark:shadow-[0_0_15px_rgba(255,255,255,0.04)] flex items-center justify-center transition-all duration-300 shrink-0 select-none cursor-pointer overflow-hidden ${isPressing ? 'scale-90 bg-indigo-50 dark:bg-indigo-950/20' : 'hover:scale-105 active:scale-95'}`}
-            title={isRtl ? "اضغط لفتح/إغلاق المساعد الذكي أو اضغط باستمرار! 🤖" : "Click to toggle or hold Logo to activate Smart AI Assistant! 🤖"}
+            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleLogoClick(); } }}
+            role="button"
+            tabIndex={0}
+            aria-label={isRtl ? 'المساعد الذكي' : 'Smart assistant'}
+            aria-pressed={activeScreen === 'ai-assistant'}
+            className={`relative w-10 h-10 rounded-[12px] bg-slate-100/60 dark:bg-white/5 border border-slate-300 dark:border-white/10 shadow-[0_4px_12px_rgba(0,0,0,0.03)] dark:shadow-[0_0_15px_rgba(255,255,255,0.04)] flex items-center justify-center transition-all duration-300 shrink-0 select-none cursor-pointer overflow-hidden ${isPressing ? 'scale-90 bg-indigo-50 dark:bg-indigo-950/20' : 'hover:scale-105 active:scale-95'}`}
+            title={isRtl ? 'المساعد الذكي' : 'Smart assistant'}
           >
             {/* Visual Long-Press Progress Bar Overlay representing fill-up */}
             {isPressing && (
@@ -261,7 +251,7 @@ export default function Header({
                 )}
                 <span className={`relative inline-flex rounded-full h-1.5 w-1.5 ${isOnline ? 'bg-emerald-500' : 'bg-rose-600'}`}></span>
               </span>
-              <span className={`text-[9px] font-extrabold tracking-tight ${isOnline ? 'text-emerald-600 dark:text-emerald-405' : 'text-rose-600 dark:text-rose-455'} font-arabic`}>
+              <span className={`text-[9px] font-extrabold tracking-tight ${isOnline ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-500'} font-arabic`}>
                 {isOnline 
                   ? (isRtl ? 'متصل' : 'Online Sync Active') 
                   : (isRtl ? 'أوفلاين' : 'Offline Mode')}
@@ -277,8 +267,8 @@ export default function Header({
         <button
           type="button"
           onClick={handleQuickPOSClick}
-          className="flex items-center gap-1 sm:gap-2 bg-indigo-600 hover:bg-indigo-750 active:scale-95 text-white rounded-full pl-2.5 pr-3 sm:pl-3.5 sm:pr-4 py-1 sm:py-2 transition-all shadow-md shadow-indigo-600/10 hover:shadow-indigo-600/20 cursor-pointer select-none shrink-0 border border-indigo-500/20 text-xs font-black font-arabic"
-          title={isRtl ? 'صندوق البيع السريع الفوري ⚡' : 'Integrated Instant Quick POS ⚡'}
+          className="flex items-center gap-1 sm:gap-2 bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white rounded-full pl-2.5 pr-3 sm:pl-3.5 sm:pr-4 py-1 sm:py-2 transition-all shadow-md shadow-indigo-600/10 hover:shadow-indigo-600/20 cursor-pointer select-none shrink-0 border border-indigo-500/20 text-xs font-black font-arabic"
+          title={isRtl ? 'صندوق البيع السريع الفوري ⚡' : 'Integrated Instant Quick POS ⚡'} aria-label={isRtl ? 'صندوق البيع السريع الفوري ⚡' : 'Integrated Instant Quick POS ⚡'}
         >
           <ShoppingCart className="w-3.5 h-3.5 sm:w-4.5 sm:h-4.5 stroke-[2.5]" />
           <span className="hidden sm:inline">
@@ -294,10 +284,10 @@ export default function Header({
               sounds.playClick();
               setDropdownOpen(!dropdownOpen);
             }}
-            className="flex items-center gap-1 sm:gap-1.5 bg-slate-100 hover:bg-slate-150 active:scale-95 dark:bg-slate-800 dark:hover:bg-slate-750 border border-slate-200 dark:border-slate-700/85 rounded-full px-2 sm:pl-3.5 sm:pr-4 py-1 sm:py-1.5 transition-all shadow-sm cursor-pointer select-none"
+            className="flex items-center gap-1 sm:gap-1.5 bg-slate-100 hover:bg-slate-100 active:scale-95 dark:bg-slate-800 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700/85 rounded-full px-2 sm:pl-3.5 sm:pr-4 py-1 sm:py-1.5 transition-all shadow-sm cursor-pointer select-none"
             aria-haspopup="listbox"
             aria-expanded={dropdownOpen}
-            title={isRtl ? 'تبديل العملة المعروضة' : 'Switch Preferred Currency'}
+            title={isRtl ? 'تبديل العملة المعروضة' : 'Switch Preferred Currency'} aria-label={isRtl ? 'تبديل العملة المعروضة' : 'Switch Preferred Currency'}
           >
             {/* Custom Visual Concept: Stylized Credit Cards & Dynamic Trans-Currency 3D Exchange Asset */}
             <div className="relative w-4 h-4 sm:w-[22px] sm:h-[22px] flex items-center justify-center shrink-0">
@@ -434,7 +424,7 @@ export default function Header({
                           {curr.symbol}
                         </span>
                         <div className="text-left">
-                          <span className="block text-xs font-black text-slate-850 dark:text-slate-150 leading-none">
+                          <span className="block text-xs font-black text-slate-800 dark:text-slate-100 leading-none">
                             {curr.code}
                           </span>
                           <span className="text-[10px] text-slate-400 dark:text-slate-500 block leading-none mt-0.5 font-normal">
@@ -465,10 +455,10 @@ export default function Header({
           onClick={onToggleMute}
           className={`w-8 h-8 sm:w-10 sm:h-10 rounded-full flex items-center justify-center border transition-all active:scale-95 cursor-pointer shrink-0 ${
             isMuted 
-              ? 'bg-slate-100 hover:bg-slate-200 border-slate-205 text-slate-400 dark:bg-slate-950 dark:border-slate-800 dark:text-slate-600' 
-              : 'bg-emerald-50 hover:bg-emerald-100 border-emerald-250 text-emerald-600 dark:bg-emerald-500/10 dark:border-emerald-500/20 dark:text-emerald-400'
+              ? 'bg-slate-100 hover:bg-slate-200 border-slate-200 text-slate-400 dark:bg-slate-950 dark:border-slate-800 dark:text-slate-600' 
+              : 'bg-emerald-50 hover:bg-emerald-100 border-emerald-200 text-emerald-600 dark:bg-emerald-500/10 dark:border-emerald-500/20 dark:text-emerald-400'
           }`}
-          title={isRtl ? 'كتم/تفعيل صوت التنبيهات' : 'Toggle Audio System'}
+          title={isRtl ? 'كتم/تفعيل صوت التنبيهات' : 'Toggle Audio System'} aria-label={isRtl ? 'كتم/تفعيل صوت التنبيهات' : 'Toggle Audio System'}
         >
           {isMuted ? (
             <svg className="w-4 h-4 sm:w-4.5 sm:h-4.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -489,9 +479,9 @@ export default function Header({
           className={`w-8 h-8 sm:w-10 sm:h-10 rounded-full flex items-center justify-center border transition-all active:scale-95 cursor-pointer shrink-0 ${
             isClassDarkMode 
               ? 'bg-amber-500/10 border-amber-500/30 text-amber-400 hover:bg-amber-500/20' 
-              : 'bg-slate-105 hover:bg-slate-205 border-slate-200 text-slate-500 dark:bg-slate-950 dark:border-slate-800 dark:text-slate-500'
+              : 'bg-slate-100 hover:bg-slate-200 border-slate-200 text-slate-500 dark:bg-slate-950 dark:border-slate-800 dark:text-slate-500'
           }`}
-          title={isRtl ? 'الوضع الداكن' : 'Night Mode'}
+          title={isRtl ? 'الوضع الداكن' : 'Night Mode'} aria-label={isRtl ? 'الوضع الداكن' : 'Night Mode'}
         >
           {isClassDarkMode ? (
             <svg className="w-4 h-4 sm:w-4.5 sm:h-4.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">

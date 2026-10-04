@@ -144,7 +144,7 @@ export default function LandingPage({ language = 'ar', onEnter = () => {}, darkM
   ];
 
   return (
-    <div className={`min-h-screen flex flex-col justify-between overflow-x-hidden bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-100 dark:from-slate-950 dark:via-blue-955 dark:to-slate-900 text-slate-800 dark:text-slate-100 ${darkMode ? 'dark' : ''} ${isRtl ? 'font-arabic' : ''}`} dir={isRtl ? 'rtl' : 'ltr'}>
+    <div className={`min-h-screen flex flex-col justify-between overflow-x-hidden bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-100 dark:from-slate-950 dark:via-blue-950 dark:to-slate-900 text-slate-800 dark:text-slate-100 ${darkMode ? 'dark' : ''} ${isRtl ? 'font-arabic' : ''}`} dir={isRtl ? 'rtl' : 'ltr'}>
       
       {/* Top clean spacing */}
       <div className="w-full py-4 px-6 border-b border-white/40 dark:border-slate-800/40 bg-white/20 dark:bg-slate-950/20 backdrop-blur-md">
@@ -161,7 +161,7 @@ export default function LandingPage({ language = 'ar', onEnter = () => {}, darkM
             </div>
           </div>
           
-          <div className="flex items-center gap-3 font-mono text-xs text-slate-550 dark:text-slate-400 bg-white/40 dark:bg-slate-900/40 border border-white/60 dark:border-slate-800/60 px-3 pl-4 py-1.5 rounded-xl shadow-inner select-none">
+          <div className="flex items-center gap-3 font-mono text-xs text-slate-500 dark:text-slate-400 bg-white/40 dark:bg-slate-900/40 border border-white/60 dark:border-slate-800/60 px-3 pl-4 py-1.5 rounded-xl shadow-inner select-none">
             <Clock size={14} className="text-indigo-600 dark:text-indigo-400 shrink-0" />
             <span className="font-bold">{currentTime || '--:--:--'}</span>
           </div>
@@ -247,7 +247,7 @@ export default function LandingPage({ language = 'ar', onEnter = () => {}, darkM
                 <button
                   type="button"
                   onClick={onBackToLogin}
-                  className="w-full py-3 border border-slate-200 hover:bg-slate-50 dark:border-slate-800 dark:hover:bg-slate-800/40 text-slate-705 dark:text-slate-200 rounded-2xl font-bold text-xs sm:text-sm transition flex items-center justify-center gap-2 select-none cursor-pointer"
+                  className="w-full py-3 border border-slate-200 hover:bg-slate-50 dark:border-slate-800 dark:hover:bg-slate-800/40 text-slate-700 dark:text-slate-200 rounded-2xl font-bold text-xs sm:text-sm transition flex items-center justify-center gap-2 select-none cursor-pointer"
                 >
                   <span>{isRtl ? 'الرجوع لصفحة الدخول' : 'Back to Login Screen'}</span>
                 </button>
@@ -311,7 +311,7 @@ export default function LandingPage({ language = 'ar', onEnter = () => {}, darkM
             <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
             <span>© 2026 {isRtl ? 'نظام مستودعي الذكي.' : 'Mostawdaee Enterprise Suite.'} {isRtl ? 'جميع الأنظمة نشطة ومعايرة.' : 'All sub-systems ready.'}</span>
           </div>
-          <div className="flex gap-4 sm:gap-6 font-bold text-slate-650 dark:text-slate-350 flex-wrap justify-center">
+          <div className="flex gap-4 sm:gap-6 font-bold text-slate-600 dark:text-slate-300 flex-wrap justify-center">
             <button 
               type="button"
               onClick={() => setActiveModal('eula')} 
@@ -358,7 +358,7 @@ export default function LandingPage({ language = 'ar', onEnter = () => {}, darkM
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.96, y: 15 }}
               transition={{ type: "spring", stiffness: 350, damping: 28 }}
-              className="relative w-full max-w-2xl bg-white dark:bg-slate-900 rounded-[2.5rem] border border-gray-150 dark:border-slate-800 shadow-2xl overflow-hidden z-20 flex flex-col max-h-[85vh]"
+              className="relative w-full max-w-2xl bg-white dark:bg-slate-900 rounded-[2.5rem] border border-gray-100 dark:border-slate-800 shadow-2xl overflow-hidden z-20 flex flex-col max-h-[85vh]"
             >
               {/* Head Section */}
               <div className="p-6 sm:p-8 border-b border-gray-100 dark:border-slate-800 bg-gray-50/50 dark:bg-slate-950/20 flex justify-between items-center">
@@ -385,7 +385,7 @@ export default function LandingPage({ language = 'ar', onEnter = () => {}, darkM
               </div>
 
               {/* Scrollable Document Container (Muted, comfortable read) */}
-              <div className="p-6 sm:p-8 overflow-y-auto space-y-6 text-slate-705 dark:text-slate-300 leading-relaxed text-sm sm:text-base selection:bg-indigo-100 dark:selection:bg-indigo-955 select-text">
+              <div className="p-6 sm:p-8 overflow-y-auto space-y-6 text-slate-700 dark:text-slate-300 leading-relaxed text-sm sm:text-base selection:bg-indigo-100 dark:selection:bg-indigo-950 select-text">
                 {activeModal === 'eula' ? (
                   isRtl ? (
                     <div className="space-y-6">

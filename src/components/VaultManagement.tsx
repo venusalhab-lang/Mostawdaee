@@ -44,6 +44,7 @@ const CURRENCY_NAMES: Record<Currency, { ar: string; en: string }> = {
   IQD: { ar: 'دينار عراقي', en: 'Iraqi Dinar' },
   SAR: { ar: 'ريال سعودي', en: 'Saudi Riyal' },
   LYD: { ar: 'دينار ليبي', en: 'Libyan Dinar' },
+  EGP: { ar: 'جنيه مصري', en: 'Egyptian Pound' },
 };
 
 /** Works for new entries (with `source`) and old ones (category only). */
@@ -259,9 +260,7 @@ export default function VaultManagement({ language, settings }: Props) {
       setDescription('');
       setCategory('general');
     } catch (err: any) {
-      toast.error(String(err?.message || '').startsWith('No active session')
-        ? (isRtl ? 'سجّل الدخول بحساب حقيقي لحفظ الحركات في الخزنة (وضع الضيف للمعاينة فقط).' : 'Sign in with a real account to record vault movements (guest mode is preview only).')
-        : (isRtl ? 'حدث خطأ أثناء حفظ العملية' : 'An error occurred while saving the transaction'));
+      if (!err?.notified) toast.error(isRtl ? 'حدث خطأ أثناء حفظ العملية' : 'An error occurred while saving the transaction');
     } finally {
       setIsSubmitting(false);
     }
@@ -561,7 +560,7 @@ export default function VaultManagement({ language, settings }: Props) {
               <Search className={`absolute top-1/2 -translate-y-1/2 ${isRtl ? 'right-3' : 'left-3'} text-slate-400 w-4 h-4`} />
               <input 
                 type="text"
-                placeholder={isRtl ? 'ابحث في الوصف أو التصنيف...' : 'Search records...'}
+                placeholder={isRtl ? 'ابحث في الوصف أو التصنيف...' : 'Search records...'} aria-label={isRtl ? 'ابحث في الوصف أو التصنيف...' : 'Search records...'}
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 className={`w-full ${isRtl ? 'pr-9 pl-4' : 'pl-9 pr-4'} py-2.5 bg-slate-50 dark:bg-black/40 border border-slate-200 dark:border-white/10 rounded-xl outline-none text-xs focus:ring-1 focus:ring-[#00E5FF] transition-all text-slate-900 dark:text-white`}
@@ -795,7 +794,7 @@ export default function VaultManagement({ language, settings }: Props) {
                   type="button"
                   onClick={() => setIsModalOpen(false)} 
                   className="p-1.5 hover:bg-slate-100 dark:hover:bg-white/10 rounded-xl transition-all text-slate-500 dark:text-white"
-                >
+                 aria-label={isRtl ? 'إغلاق' : 'Close'}>
                   <X size={20} />
                 </button>
               </div>
@@ -854,7 +853,7 @@ export default function VaultManagement({ language, settings }: Props) {
                     <label className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider">{isRtl ? 'العملة المعنية' : 'Currency'}</label>
                     <input 
                       type="text"
-                      className="w-full px-4 py-3.5 bg-slate-100 dark:bg-black/60 border border-slate-200 dark:border-white/5 rounded-2xl text-center font-bold text-slate-600 dark:text-slate-350 text-sm h-[54px] pointer-events-none select-none"
+                      className="w-full px-4 py-3.5 bg-slate-100 dark:bg-black/60 border border-slate-200 dark:border-white/5 rounded-2xl text-center font-bold text-slate-600 dark:text-slate-300 text-sm h-[54px] pointer-events-none select-none"
                       value={activeCurrency}
                       disabled
                     />
@@ -874,6 +873,8 @@ export default function VaultManagement({ language, settings }: Props) {
                     onChange={(e) => setDescription(e.target.value)}
                     rows={3}
                     placeholder={modalType === 'recalibrate'
+                      ? (isRtl ? 'مثال: تسوية النقدية مطابقة جرد نهاية الشهر الأول...' : 'e.g. Month-end safe audit compensation...')
+                      : (isRtl ? 'اكتب بياناً مفصلاً على هذه المعاملة (مثال: دفعة مبيعات الفاتورة #113)...' : 'Write memo details here...')} aria-label={modalType === 'recalibrate'
                       ? (isRtl ? 'مثال: تسوية النقدية مطابقة جرد نهاية الشهر الأول...' : 'e.g. Month-end safe audit compensation...')
                       : (isRtl ? 'اكتب بياناً مفصلاً على هذه المعاملة (مثال: دفعة مبيعات الفاتورة #113)...' : 'Write memo details here...')}
                     className="w-full px-4 py-3.5 bg-slate-50 dark:bg-black/45 border border-slate-200 dark:border-white/10 rounded-2xl text-xs font-medium text-slate-900 dark:text-white focus:ring-1 focus:ring-cyan-500 outline-none transition-all resize-none"

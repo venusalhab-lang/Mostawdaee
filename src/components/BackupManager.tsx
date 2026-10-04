@@ -46,7 +46,7 @@ export default function BackupManager({ language }: BackupManagerProps) {
       : "CRITICAL ACTION REQUIRED:\nThis overlay operation will permanently erase or modify existing records on the active cloud PostgreSQL database to match the imported snapshot.\n\nAre you absolutely sure you want to run this master recovery?",
     successTitle: isRtl ? 'تمت العملية بنجاح' : 'System State Updated Successfully',
     processingRestore: isRtl ? 'جاري مراجعة الملف وترميم البيانات...' : 'Inspecting file structure & overlaying PostgreSQL tables...',
-    failedFetch: isRtl ? 'خطأ في سحب وتجميع البيانات من خادم PostgreSQL السحابي' : 'Failed fetching rows from Supabase cloud state. Check connection credentials.',
+    failedFetch: isRtl ? 'تعذّر جلب البيانات من الخادم. تحقق من الاتصال وأعد المحاولة.' : 'Could not load data from the server. Check your connection and try again.',
     
     // CSV Stock Report additions
     csvTitle: isRtl ? 'تقرير وجرد المخزون (Excel)' : 'Master Stock Sheet (CSV/Excel)',
@@ -498,7 +498,7 @@ export default function BackupManager({ language }: BackupManagerProps) {
         {/* Section 1: JSON Export Panel */}
         <div className="bg-white dark:bg-slate-900 rounded-[2.5rem] border border-slate-200/50 dark:border-white/5 p-6 md:p-8 shadow-xl flex flex-col justify-between space-y-6">
           <div className="space-y-4">
-            <div className="w-12 h-12 bg-indigo-50 dark:bg-indigo-950/30 rounded-2xl flex items-center justify-center text-indigo-600 dark:text-indigo-400 border border-indigo-100 dark:border-indigo-405/20">
+            <div className="w-12 h-12 bg-indigo-50 dark:bg-indigo-950/30 rounded-2xl flex items-center justify-center text-indigo-600 dark:text-indigo-400 border border-indigo-100 dark:border-indigo-400/20">
               <Download size={24} />
             </div>
             <h3 className="text-lg font-black text-slate-900 dark:text-white tracking-tight">

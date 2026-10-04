@@ -8,20 +8,21 @@ import {
 } from 'lucide-react';
 import SubscriptionSettings from './SubscriptionSettings';
 import { Language, AppSettings, Currency } from '../types';
+import { CURRENCY_SYMBOLS, POS_CURRENCY_CODES, formatMoney, roundMoney } from '../lib/exchangeRates';
+import { readVaultBalances } from '../lib/vaultMath';
 import { translations } from '../translations';
 import { motion, AnimatePresence } from 'motion/react';
 import { TactileButton } from './ui/TactileButton';
 import { useFirebase } from './FirebaseProvider';
 import { toast } from 'sonner';
-import { isSupabaseConfigured, getSupabaseClient, fetchSupabaseProducts, insertSupabaseProduct, SupabaseProductRow, getSupabaseCredentials, saveSupabaseCredentials, clearSupabaseCredentials } from '../services/supabase';
 import { db } from '../services/firebase';
-import { doc, setDoc } from 'firebase/firestore';
+import { doc, setDoc } from '../lib/supabaseDocs';
 
 interface Props {
   language: Language;
   onLanguageToggle: () => void;
   settings: AppSettings;
-  onSaveSettings: (settings: AppSettings) => void;
+  onSaveSettings: (settings: AppSettings) => Promise<void> | void;
 }
 
 type SettingsSection = 'profile' | 'visuals' | 'inventory' | 'notifications' | 'subscription' | 'system';
@@ -87,6 +88,8 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
   const [isLocalRestoreInProgress, setIsLocalRestoreInProgress] = useState(false);
   
   const [recalibrateData, setRecalibrateData] = useState({ amount: '', currency: 'JOD' as Currency, reason: '' });
+  const [recalibrateConfirming, setRecalibrateConfirming] = useState(false);
+  const [recalibrating, setRecalibrating] = useState(false);
   const [showToast, setShowToast] = useState(false);
   
   const [notificationPermission, setNotificationPermission] = useState<NotificationPermission>(
@@ -119,11 +122,18 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
     }
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    onSaveSettings(formData);
-    setShowToast(true);
-    setTimeout(() => setShowToast(false), 3000);
+    try {
+      await onSaveSettings(formData);
+      setShowToast(true);
+      setTimeout(() => setShowToast(false), 3000);
+    } catch (error) {
+      console.error('Settings save failed:', error);
+      toast.error(isRtl
+        ? 'لم تُحفظ الإعدادات على الخادم. تحقق من الاتصال وأعد المحاولة.'
+        : 'Settings were not saved to the server. Check your connection and try again.');
+    }
   };
 
   const sections: { id: SettingsSection; label: string; icon: any }[] = [
@@ -238,7 +248,7 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
       // 7. Customers
       if (Array.isArray(selectedBackupForLocalRestore.customers)) {
         for (const cust of selectedBackupForLocalRestore.customers) {
-          await saveCustomer(cust);
+          await saveCustomer(cust, { restore: true });
         }
       }
 
@@ -273,339 +283,6 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
     } finally {
       setIsLocalRestoreInProgress(false);
     }
-  };
-
-  const [sqlTab, setSqlTab] = useState<'schema' | 'inserts' | 'supabase'>('schema');
-  const [isSqlCopied, setIsSqlCopied] = useState(false);
-
-  // Supabase local overrides states
-  const [supabaseSetUrl, setSupabaseSetUrl] = useState(() => getSupabaseCredentials().url);
-  const [supabaseSetKey, setSupabaseSetKey] = useState(() => getSupabaseCredentials().key);
-  const [localIsConfigured, setLocalIsConfigured] = useState(isSupabaseConfigured());
-
-  const handleSaveLocalSupabase = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!supabaseSetUrl.trim() || !supabaseSetKey.trim()) {
-      toast.error(isRtl ? 'يرجى ملء جميع الحقول المطلوبة' : 'Please fill all required fields');
-      return;
-    }
-    let cleanedUrl = supabaseSetUrl.trim();
-    if (cleanedUrl.toLowerCase().includes('kwvrtsnvadjknioqbb')) {
-      cleanedUrl = 'https://kwvrtsnvadjknioqbbxs.supabase.co';
-    } else {
-      cleanedUrl = cleanedUrl.replace(/supabse\.co/gi, 'supabase.co');
-      cleanedUrl = cleanedUrl.replace(/supabse\.com/gi, 'supabase.co');
-      cleanedUrl = cleanedUrl.replace(/supabase\.com/gi, 'supabase.co');
-    }
-    setSupabaseSetUrl(cleanedUrl);
-    saveSupabaseCredentials(cleanedUrl, supabaseSetKey.trim());
-    setLocalIsConfigured(isSupabaseConfigured());
-    toast.success(isRtl ? 'تم حفظ مفاتيح Supabase بنجاح!' : 'Supabase credentials saved successfully!');
-  };
-
-  const handleClearLocalSupabase = () => {
-    clearSupabaseCredentials();
-    setSupabaseSetUrl('');
-    setSupabaseSetKey('');
-    setLocalIsConfigured(false);
-    toast.info(isRtl ? 'تم مسح الإعدادات بنجاح!' : 'Credentials cleared.');
-  };
-
-  // Supabase dynamic sandbox states
-  const [supabaseLoading, setSupabaseLoading] = useState(false);
-  const [supabaseSuccess, setSupabaseSuccess] = useState<boolean | null>(null);
-  const [supabaseErrorMsg, setSupabaseErrorMsg] = useState('');
-  const [supabaseLiveProducts, setSupabaseLiveProducts] = useState<SupabaseProductRow[]>([]);
-
-  const handleTestSupabaseFetch = async () => {
-    setSupabaseLoading(true);
-    setSupabaseSuccess(null);
-    setSupabaseErrorMsg('');
-    try {
-      const data = await fetchSupabaseProducts();
-      if (data) {
-        setSupabaseLiveProducts(data);
-        setSupabaseSuccess(true);
-        toast.success(isRtl ? 'تم الاتصال بـ Supabase وجلب المنتجات بنجاح!' : 'Connected and fetched products from Supabase!');
-      } else {
-        throw new Error('No data returned from products table.');
-      }
-    } catch (err: any) {
-      setSupabaseSuccess(false);
-      setSupabaseErrorMsg(err.message || String(err));
-      toast.error(isRtl ? 'فشل جلب المنتجات. يرجى مراجعة قيم المفاتيح وقواعد RLS.' : 'Failed to fetch products. Check credentials and RLS setup.');
-    } finally {
-      setSupabaseLoading(false);
-    }
-  };
-
-  const handleSyncToSupabase = async () => {
-    if (products.length === 0) {
-      toast.error(isRtl ? 'لا توجد منتجات محلية لمزامنتها!' : 'No local products found to sync!');
-      return;
-    }
-    setSupabaseLoading(true);
-    setSupabaseSuccess(null);
-    setSupabaseErrorMsg('');
-    try {
-      let syncedCount = 0;
-      const client = getSupabaseClient();
-      if (!client) {
-        throw new Error('Supabase client failed to initialize. Check your credentials.');
-      }
-      
-      const { data: { user: sbUser } } = await client.auth.getUser();
-      const finalUserId = sbUser?.id;
-      
-      if (!finalUserId) {
-        throw new Error(isRtl 
-          ? 'المستخدم غير مسجل دخوله في Supabase! تتطلب قاعدة RLS وجود معرف مستخدم صالح (user_id REFERENCES auth.users).' 
-          : 'No active logged-in user found on Supabase auth. The user_id REFERENCES auth.users(id) requires a valid active UUID user session.'
-        );
-      }
-
-      for (const prod of products) {
-        await insertSupabaseProduct({
-          product_name: prod.name,
-          quantity: prod.quantity,
-          price: prod.sellingPrice,
-          user_id: finalUserId
-        });
-        syncedCount++;
-      }
-      
-      setSupabaseSuccess(true);
-      toast.success(isRtl 
-        ? `تمت مزامنة ${syncedCount} بنجاح مع جدول products في Supabase Cloud!`
-        : `Successfully synced ${syncedCount} products to Supabase Cloud!`
-      );
-      
-      const fresh = await fetchSupabaseProducts();
-      if (fresh) setSupabaseLiveProducts(fresh);
-    } catch (err: any) {
-      setSupabaseSuccess(false);
-      setSupabaseErrorMsg(err.message || String(err));
-      toast.error(isRtl 
-        ? `فشل مزامنة البيانات: ${err.message}` 
-        : `Failed to insert products: ${err.message}`
-      );
-    } finally {
-      setSupabaseLoading(false);
-    }
-  };
-
-  const supabaseIntegrationText = `-- ==========================================================
--- SUPABASE CLOUD DATABASE DDL: products
--- ==========================================================
-
--- 1. إنشاء جدول المنتجات المطابق تماماً لمتطلباتك:
-CREATE TABLE products (
-    id SERIAL PRIMARY KEY,
-    product_name VARCHAR(255) NOT NULL,
-    quantity INT DEFAULT 0,
-    price NUMERIC(10, 2) DEFAULT 0.00,
-    -- هنا المربط: عمود يربط المنتج بالمستخدم اللي أضافه
-    user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE NOT NULL
-);
-
--- 2. تفعيل جدار الحماية ومستوى حماية الصفوف (Row Level Security):
-ALTER TABLE products ENABLE ROW LEVEL SECURITY;
-
--- 3. سياسة القراءة: "المستخدم يرى منتجاته فقط"
-CREATE POLICY "المستخدم يرى منتجاته فقط" ON products
-    FOR SELECT
-    USING (auth.uid() = user_id);
-
--- 4. سياسة الإضافة: "المستخدم يضيف لنفسه فقط"
-CREATE POLICY "المستخدم يضيف لنفسه فقط" ON products
-    FOR INSERT
-    WITH CHECK (auth.uid() = user_id);
-
--- 5. سياسة التعديل والحذف: "المستخدم يعدل ويحذف منتجاته فقط"
-CREATE POLICY "المستخدم يعدل ويحذف منتجاته فقط" ON products
-    FOR ALL -- تشمل UPDATE و DELETE
-    USING (auth.uid() = user_id);
-
--- 6. كود جلب المنتجات في تطبيق React/TypeScript:
-/*
-const { data, error } = await supabase
-  .from('products')
-  .select('*');
-*/`;
-
-  const ddlSchemaText = `-- 1. إنشاء جدول العملات
-CREATE TABLE currencies (
-    id SERIAL PRIMARY KEY,
-    code VARCHAR(3) UNIQUE NOT NULL,
-    name VARCHAR(50) NOT NULL,
-    exchange_rate DECIMAL(10, 4) NOT NULL DEFAULT 1.0000,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
--- 2. إنشاء جدول المنتجات
-CREATE TABLE products (
-    id SERIAL PRIMARY KEY,
-    barcode VARCHAR(100) UNIQUE NOT NULL,
-    name VARCHAR(255) NOT NULL,
-    sku VARCHAR(50) UNIQUE,
-    quantity INT NOT NULL DEFAULT 0,
-    min_safety_quantity INT NOT NULL DEFAULT 5,
-    purchase_price DECIMAL(15, 4) NOT NULL DEFAULT 0.0000,
-    landed_cost DECIMAL(15, 4) NOT NULL DEFAULT 0.0000, -- حساب التكلفة الواصلة
-    selling_price DECIMAL(15, 4) NOT NULL DEFAULT 0.0000,
-    currency_id INT REFERENCES currencies(id),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
--- 3. إنشاء جدول فواتير المبيعات
-CREATE TABLE invoices (
-    id SERIAL PRIMARY KEY,
-    invoice_number VARCHAR(50) UNIQUE NOT NULL,
-    invoice_type VARCHAR(20) CHECK (invoice_type IN ('CASH', 'CREDIT')) NOT NULL,
-    total_amount DECIMAL(15, 4) NOT NULL DEFAULT 0.0000,
-    discount DECIMAL(15, 4) NOT NULL DEFAULT 0.0000,
-    currency_id INT REFERENCES currencies(id),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
--- 4. إنشاء جدول تفاصيل الفاتورة
-CREATE TABLE invoice_items (
-    id SERIAL PRIMARY KEY,
-    invoice_id INT REFERENCES invoices(id) ON DELETE CASCADE,
-    product_id INT REFERENCES products(id),
-    quantity INT NOT NULL CHECK (quantity > 0),
-    unit_price DECIMAL(15, 4) NOT NULL,
-    UNIQUE(invoice_id, product_id) -- تمنع تكرار نفس المنتج في نفس الفاتورة كسطرين منفصلين
-);
-
--- إضافة كشافات (Indexes) لتسريع عمليات البحث عن طريق الباركود وفواتير المبيعات
-CREATE INDEX idx_products_barcode ON products(barcode);
-CREATE INDEX idx_invoices_number ON invoices(invoice_number);`;
-
-  const generateSqlInserts = () => {
-    let sql = `-- ==========================================================\n`;
-    sql += `-- MOSTAWDAEE POSTGRESQL INSERT DUMP (GENERATED LATEST DATA)\n`;
-    sql += `-- Generated At: ${new Date().toISOString()}\n`;
-    sql += `-- ==========================================================\n\n`;
-
-    // 1. Currencies
-    sql += `-- MAPPING ACTIVE CURRENCIES\n`;
-    sql += `INSERT INTO currencies (id, code, name, exchange_rate) VALUES\n`;
-    sql += `  (1, 'JOD', 'Jordanian Dinar', 1.0000),\n`;
-    sql += `  (2, 'USD', 'US Dollar', 1.4110),\n`;
-    sql += `  (3, 'ILS', 'Israeli Shekel', 0.2720)\n`;
-    sql += `ON CONFLICT (code) DO UPDATE SET exchange_rate = EXCLUDED.exchange_rate;\n\n`;
-
-    // 2. Products Map & Inserts
-    if (products && products.length > 0) {
-      sql += `-- MAPPING PRODUCTS (${products.length} ENTRIES)\n`;
-      sql += `INSERT INTO products (id, barcode, name, sku, quantity, min_safety_quantity, purchase_price, landed_cost, selling_price, currency_id, created_at) VALUES\n`;
-      
-      const productLines = products.map((p, idx) => {
-        const id = idx + 1;
-        const barcode = p.sku || p.id;
-        const cleanName = (p.name || '').replace(/'/g, "''");
-        const sku = p.sku || `SKU-${id}`;
-        const qty = p.quantity || 0;
-        const minQty = p.lowStockThreshold || settings.lowStockThreshold || 5;
-        const buyPrice = p.unitCost || 0;
-        const landCost = p.unitCost || 0;
-        const sellPrice = p.sellingPrice || 0;
-        
-        const currentCur = settings.currency || 'JOD';
-        const curId = currentCur === 'JOD' ? 1 : currentCur === 'USD' ? 2 : 3;
-
-        const pDate = p.dateAdded || Date.now();
-        const dateStr = `TO_TIMESTAMP(${Math.floor(pDate / 1000)})`;
-
-        return `  (${id}, '${barcode}', '${cleanName}', '${sku}', ${qty}, ${minQty}, ${buyPrice.toFixed(4)}, ${landCost.toFixed(4)}, ${sellPrice.toFixed(4)}, ${curId}, ${dateStr})`;
-      });
-
-      sql += productLines.join(',\n') + ';\n\n';
-    } else {
-      sql += `-- No products recorded in current workspace to export.\n\n`;
-    }
-
-    // Maps for foreign keys Referencing ID indexes
-    const productIdMap = new Map<string, number>();
-    products.forEach((p, idx) => {
-      productIdMap.set(p.id, idx + 1);
-    });
-
-    // 3. Invoices Inserts
-    if (invoices && invoices.length > 0) {
-      sql += `-- MAPPING INVOICES (${invoices.length} ENTRIES)\n`;
-      sql += `INSERT INTO invoices (id, invoice_number, invoice_type, total_amount, discount, currency_id, created_at) VALUES\n`;
-
-      const invoiceLines = invoices.map((i, idx) => {
-        const id = idx + 1;
-        const invNo = i.invoiceNumber || `INV-POS-${id}`;
-        const type = i.type === 'sale' ? 'CREDIT' : 'CASH';
-        const total = i.totalAmount || 0;
-        const discount = 0.0000;
-        
-        const invoiceCur = i.currency || settings.currency || 'JOD';
-        const curId = invoiceCur === 'JOD' ? 1 : invoiceCur === 'USD' ? 2 : 3;
-
-        const iDate = i.date || Date.now();
-        const dateStr = `TO_TIMESTAMP(${Math.floor(iDate / 1000)})`;
-
-        return `  (${id}, '${invNo}', '${type}', ${total.toFixed(4)}, ${discount.toFixed(4)}, ${curId}, ${dateStr})`;
-      });
-
-      sql += invoiceLines.join(',\n') + ';\n\n';
-
-      // 4. Invoice Items Inserts
-      sql += `-- MAPPING INVOICE DETAILED ITEMS\n`;
-      sql += `INSERT INTO invoice_items (invoice_id, product_id, quantity, unit_price) VALUES\n`;
-
-      const itemLines: string[] = [];
-      invoices.forEach((i, idx) => {
-        const invoiceId = idx + 1;
-        if (i.items && Array.isArray(i.items)) {
-          i.items.forEach(itm => {
-            const mappedProdId = productIdMap.get(itm.productId);
-            if (mappedProdId) {
-              itemLines.push(`  (${invoiceId}, ${mappedProdId}, ${itm.quantity}, ${itm.unitPrice || 0})`);
-            }
-          });
-        }
-      });
-
-      if (itemLines.length > 0) {
-        sql += itemLines.join(',\n') + ';\n';
-      } else {
-        sql += `-- No valid items mapped to invoices.\n`;
-      }
-    } else {
-      sql += `-- No invoices recorded in current workspace to export.\n\n`;
-    }
-
-    return sql;
-  };
-
-  const handleDownloadFullSql = () => {
-    const fullContent = `${ddlSchemaText}\n\n\n-- ==========================================================\n-- INITIAL SEED & DYNAMIC DATA INSERTION\n-- ==========================================================\n\n${generateSqlInserts()}`;
-    const blob = new Blob([fullContent], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `mostawdaee_postgresql_migration_dump_${new Date().toISOString().split('T')[0]}.sql`;
-    a.click();
-    toast.success(isRtl ? 'تم توليد وتنزيل ملف SQL الموحد بنجاح!' : 'Fully consolidated backup .sql generated and downloaded!');
-  };
-
-  const handleCopySqlToClipboard = () => {
-    const textToCopy = 
-      sqlTab === 'schema' 
-        ? ddlSchemaText 
-        : sqlTab === 'inserts' 
-          ? generateSqlInserts() 
-          : supabaseIntegrationText;
-    navigator.clipboard.writeText(textToCopy);
-    setIsSqlCopied(true);
-    toast.success(isRtl ? 'تم النسخ إلى الحافظة بنجاح!' : 'Copied selected code blocks to clipboard!');
-    setTimeout(() => setIsSqlCopied(false), 2000);
   };
 
   const accentColors = [
@@ -706,7 +383,7 @@ CREATE INDEX idx_invoices_number ON invoices(invoice_number);`;
                             value={formData.userName}
                             onChange={(e) => setFormData({ ...formData, userName: e.target.value })}
                             className="w-full px-5 py-4 bg-white/50 dark:bg-gray-800/50 border border-white dark:border-gray-700/50 rounded-[1.5rem] focus:ring-4 focus:ring-indigo-500/20 outline-none transition-all dark:text-white font-bold"
-                            placeholder={t.placeholderUserName}
+                            placeholder={t.placeholderUserName} aria-label={t.placeholderUserName}
                           />
                           <User className={`absolute top-4 ${isRtl ? 'left-4' : 'right-4'} text-gray-300`} size={20} />
                         </div>
@@ -719,7 +396,7 @@ CREATE INDEX idx_invoices_number ON invoices(invoice_number);`;
                             value={formData.businessName}
                             onChange={(e) => setFormData({ ...formData, businessName: e.target.value })}
                             className="w-full px-5 py-4 bg-white/50 dark:bg-gray-800/50 border border-white dark:border-gray-700/50 rounded-[1.5rem] focus:ring-4 focus:ring-indigo-500/20 outline-none transition-all dark:text-white font-bold"
-                            placeholder={t.placeholderBusinessName}
+                            placeholder={t.placeholderBusinessName} aria-label={t.placeholderBusinessName}
                           />
                           <Building2 className={`absolute top-4 ${isRtl ? 'left-4' : 'right-4'} text-gray-300`} size={20} />
                         </div>
@@ -733,7 +410,7 @@ CREATE INDEX idx_invoices_number ON invoices(invoice_number);`;
                             value={formData.taxRegistrationNumber || ''}
                             onChange={(e) => setFormData({ ...formData, taxRegistrationNumber: e.target.value })}
                             className="w-full px-5 py-4 bg-white/50 dark:bg-gray-800/50 border border-white dark:border-gray-700/50 rounded-[1.5rem] focus:ring-4 focus:ring-indigo-500/20 outline-none transition-all dark:text-white font-bold font-mono"
-                            placeholder={isRtl ? 'أدخل الرقم الضريبي الرسمي للشركة' : 'Enter registered VAT/tax registration ID'}
+                            placeholder={isRtl ? 'أدخل الرقم الضريبي الرسمي للشركة' : 'Enter registered VAT/tax registration ID'} aria-label={isRtl ? 'أدخل الرقم الضريبي الرسمي للشركة' : 'Enter registered VAT/tax registration ID'}
                           />
                           <FileText className={`absolute top-4 ${isRtl ? 'left-4' : 'right-4'} text-gray-300`} size={20} />
                         </div>
@@ -747,7 +424,7 @@ CREATE INDEX idx_invoices_number ON invoices(invoice_number);`;
                             value={formData.businessPhone || ''}
                             onChange={(e) => setFormData({ ...formData, businessPhone: e.target.value })}
                             className="w-full px-5 py-4 bg-white/50 dark:bg-gray-800/50 border border-white dark:border-gray-700/50 rounded-[1.5rem] focus:ring-4 focus:ring-indigo-500/20 outline-none transition-all dark:text-white font-bold"
-                            placeholder="e.g. +962 7 XXX XXXX"
+                            placeholder="e.g. +962 7 XXX XXXX" aria-label="e.g. +962 7 XXX XXXX"
                           />
                           <Phone className={`absolute top-4 ${isRtl ? 'left-4' : 'right-4'} text-gray-300`} size={20} />
                         </div>
@@ -761,7 +438,7 @@ CREATE INDEX idx_invoices_number ON invoices(invoice_number);`;
                             value={formData.businessEmail || ''}
                             onChange={(e) => setFormData({ ...formData, businessEmail: e.target.value })}
                             className="w-full px-5 py-4 bg-white/50 dark:bg-gray-800/50 border border-white dark:border-gray-700/50 rounded-[1.5rem] focus:ring-4 focus:ring-indigo-500/20 outline-none transition-all dark:text-white font-bold"
-                            placeholder="info@business.com"
+                            placeholder="info@business.com" aria-label="info@business.com"
                           />
                           <Mail className={`absolute top-4 ${isRtl ? 'left-4' : 'right-4'} text-gray-300`} size={20} />
                         </div>
@@ -775,7 +452,7 @@ CREATE INDEX idx_invoices_number ON invoices(invoice_number);`;
                             value={formData.businessAddress || ''}
                             onChange={(e) => setFormData({ ...formData, businessAddress: e.target.value })}
                             className="w-full px-5 py-4 bg-white/50 dark:bg-gray-800/50 border border-white dark:border-gray-700/50 rounded-[1.5rem] focus:ring-4 focus:ring-indigo-500/20 outline-none transition-all dark:text-white font-bold"
-                            placeholder={isRtl ? 'عمان، الأردن - الفرع الرئيسي' : 'Amman, Jordan - Main HQ'}
+                            placeholder={isRtl ? 'عمان، الأردن - الفرع الرئيسي' : 'Amman, Jordan - Main HQ'} aria-label={isRtl ? 'عمان، الأردن - الفرع الرئيسي' : 'Amman, Jordan - Main HQ'}
                           />
                           <MapPin className={`absolute top-4 ${isRtl ? 'left-4' : 'right-4'} text-gray-300`} size={20} />
                         </div>
@@ -821,7 +498,7 @@ CREATE INDEX idx_invoices_number ON invoices(invoice_number);`;
                               className="hidden" 
                             />
                           </label>
-                          <p className="text-[10px] text-slate-450 dark:text-slate-500 font-semibold leading-relaxed">
+                          <p className="text-[10px] text-slate-400 dark:text-slate-500 font-semibold leading-relaxed">
                             {isRtl 
                               ? 'سيظهر هذا الشعار تلقائياً في الجزء العلوي للمطبوعات وفواتير العملاء. الصيغ المدعومة (PNG, JPG, SVG) بحد أقصى 2 ميغابايت.'
                               : 'This logo will automatically print at the header of all official sales and purchase invoices. Max file size: 2MB.'
@@ -891,7 +568,7 @@ CREATE INDEX idx_invoices_number ON invoices(invoice_number);`;
                     <div className="space-y-4">
                       <label className="text-sm font-black text-gray-400 uppercase ml-1">{t.currencySelect}</label>
                       <div className="grid grid-cols-3 gap-2">
-                        {(['JOD', 'USD', 'ILS'] as const).map((curr) => (
+                        {POS_CURRENCY_CODES.map((curr) => (
                           <button
                             key={curr}
                             type="button"
@@ -902,7 +579,7 @@ CREATE INDEX idx_invoices_number ON invoices(invoice_number);`;
                                 : 'border-transparent bg-gray-100 dark:bg-gray-800 text-gray-500 hover:bg-gray-200'
                             }`}
                           >
-                            {curr === 'JOD' ? t.jodLabel : curr === 'USD' ? t.usdLabel : t.ilsLabel}
+                            {curr} ({CURRENCY_SYMBOLS[curr]})
                           </button>
                         ))}
                       </div>
@@ -923,7 +600,7 @@ CREATE INDEX idx_invoices_number ON invoices(invoice_number);`;
                             <div className="w-10 h-6 bg-slate-200 dark:bg-slate-700 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[4px] after:left-[4px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all dark:border-slate-600 peer-checked:bg-indigo-600"></div>
                           </label>
                         </div>
-                        <p className="text-[10px] text-slate-500 dark:text-slate-405 leading-relaxed font-arabic">
+                        <p className="text-[10px] text-slate-500 dark:text-slate-400 leading-relaxed font-arabic">
                           {isRtl 
                             ? 'قم بتفعيل هذا الخيار لإدخال وتثبيت أسعار صرف مخصصة للعملات بدلاً من الاعتماد التلقائي على جلب الأسعار اللحظية من الإنترنت.' 
                             : 'Enable this setting to enforce static manual exchange rates instead of live online queries.'}
@@ -1249,6 +926,7 @@ CREATE INDEX idx_invoices_number ON invoices(invoice_number);`;
                           <option value="IQD">IQD (د.ع)</option>
                           <option value="SAR">SAR (ر.س)</option>
                           <option value="LYD">LYD (د.ل)</option>
+                          <option value="EGP">EGP (ج.م)</option>
                         </select>
                       </div>
                       <div className="md:col-span-1">
@@ -1265,34 +943,86 @@ CREATE INDEX idx_invoices_number ON invoices(invoice_number);`;
                         <label className="text-xs font-black text-gray-400 uppercase block mb-1">{isRtl ? 'سبب المعايرة' : 'Reason'}</label>
                         <input
                           type="text"
-                          placeholder={isRtl ? 'مثال: جرد شهري' : 'e.g. Monthly count'}
+                          placeholder={isRtl ? 'مثال: جرد شهري' : 'e.g. Monthly count'} aria-label={isRtl ? 'مثال: جرد شهري' : 'e.g. Monthly count'}
                           value={recalibrateData.reason}
                           onChange={(e) => setRecalibrateData({ ...recalibrateData, reason: e.target.value })}
                           className="w-full bg-white dark:bg-gray-900 rounded-xl px-4 py-3 border border-gray-200 dark:border-gray-700 font-bold dark:text-white"
                         />
                       </div>
                     </div>
-                    <div className="mt-4 flex justify-end">
-                      <button
-                        type="button"
-                        onClick={async () => {
-                          if (!recalibrateData.amount || isNaN(Number(recalibrateData.amount)) || Number(recalibrateData.amount) < 0) {
-                            toast.error(isRtl ? "الرجاء إدخال رصيد صحيح وغير سالب" : "Please enter a valid, non-negative balance");
-                            return;
-                          }
-                          try {
-                            const cur = recalibrateData.currency || 'JOD';
-                            await recalibrateVault(Number(recalibrateData.amount), cur, recalibrateData.reason);
-                            setRecalibrateData({ amount: '', currency: 'JOD' as Currency, reason: '' });
-                          } catch (err) {
-                            console.error(err);
-                          }
-                        }}
-                        className="px-6 py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-black uppercase transition-all shadow-md active:scale-95"
-                      >
-                        {isRtl ? "تنفيذ إعادة المعايرة" : "Execute Recalibration"}
-                      </button>
-                    </div>
+                    {(() => {
+                      const cur = recalibrateData.currency || 'JOD';
+                      const current = roundMoney((readVaultBalances(vault) as Record<string, number>)[cur] || 0, cur);
+                      const target = roundMoney(Number(recalibrateData.amount) || 0, cur);
+                      const diff = roundMoney(target - current, cur);
+                      if (!recalibrateConfirming) {
+                        return (
+                          <div className="mt-4 flex justify-end">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (recalibrateData.amount === '' || isNaN(Number(recalibrateData.amount)) || Number(recalibrateData.amount) < 0) {
+                                  toast.error(isRtl ? "الرجاء إدخال رصيد صحيح وغير سالب" : "Please enter a valid, non-negative balance");
+                                  return;
+                                }
+                                if (!recalibrateData.reason.trim()) {
+                                  toast.error(isRtl ? 'اكتب سبب المعايرة؛ يُحفظ في سجل التدقيق.' : 'Enter a reason; it is kept in the audit record.');
+                                  return;
+                                }
+                                setRecalibrateConfirming(true);
+                              }}
+                              className="px-6 py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-black uppercase transition-all shadow-md active:scale-95"
+                            >
+                              {isRtl ? "مراجعة المعايرة" : "Review recalibration"}
+                            </button>
+                          </div>
+                        );
+                      }
+                      return (
+                        <div role="alertdialog" className="mt-4 p-4 rounded-2xl border border-amber-300 dark:border-amber-500/40 bg-amber-50 dark:bg-amber-500/10 space-y-3">
+                          <p className="text-sm font-black text-amber-900 dark:text-amber-200">
+                            {isRtl ? 'تأكيد تعديل رصيد الخزنة — لا يمكن التراجع عنه تلقائياً' : 'Confirm vault balance change — this cannot be undone automatically'}
+                          </p>
+                          <div className="grid grid-cols-3 gap-2 text-xs font-bold text-gray-700 dark:text-gray-200">
+                            <div>{isRtl ? 'الرصيد الحالي' : 'Current'}<br /><span className="font-mono">{formatMoney(current, cur)}</span></div>
+                            <div>{isRtl ? 'الرصيد الجديد' : 'New'}<br /><span className="font-mono">{formatMoney(target, cur)}</span></div>
+                            <div>{isRtl ? 'الفرق' : 'Difference'}<br /><span className={`font-mono ${diff < 0 ? 'text-rose-600' : 'text-emerald-600'}`}>{diff > 0 ? '+' : ''}{formatMoney(diff, cur)}</span></div>
+                          </div>
+                          <p className="text-[11px] text-gray-600 dark:text-gray-300">
+                            {isRtl ? `السبب: ${recalibrateData.reason}` : `Reason: ${recalibrateData.reason}`}
+                          </p>
+                          <div className="flex justify-end gap-2">
+                            <button
+                              type="button"
+                              disabled={recalibrating}
+                              onClick={() => setRecalibrateConfirming(false)}
+                              className="px-4 py-2 rounded-xl text-xs font-black bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-200"
+                            >
+                              {isRtl ? 'إلغاء' : 'Cancel'}
+                            </button>
+                            <button
+                              type="button"
+                              disabled={recalibrating}
+                              onClick={async () => {
+                                setRecalibrating(true);
+                                try {
+                                  await recalibrateVault(target, cur, recalibrateData.reason.trim());
+                                  setRecalibrateData({ amount: '', currency: 'JOD' as Currency, reason: '' });
+                                  setRecalibrateConfirming(false);
+                                } catch (err) {
+                                  console.error(err); // the provider already told the user
+                                } finally {
+                                  setRecalibrating(false);
+                                }
+                              }}
+                              className="px-4 py-2 rounded-xl text-xs font-black bg-amber-600 hover:bg-amber-700 text-white disabled:opacity-60"
+                            >
+                              {recalibrating ? (isRtl ? 'جارٍ التنفيذ…' : 'Applying…') : (isRtl ? 'تأكيد التعديل' : 'Confirm change')}
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })()}
                     <p className="text-[10px] text-gray-500 mt-2 italic">{t.recalibrateDescription}</p>
                   </div>
 

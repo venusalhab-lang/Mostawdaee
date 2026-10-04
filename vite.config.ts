@@ -36,7 +36,17 @@ export default defineConfig(({mode}) => {
         workbox: {
           maximumFileSizeToCacheInBytes: 4000000,
           navigateFallback: './index.html',
-          navigateFallbackDenylist: [/^\/api/, /^\/auth/]
+          navigateFallbackDenylist: [/^\/api/, /^\/auth/],
+          runtimeCaching: [
+            {
+              urlPattern: ({ request }) => request.destination === 'font',
+              handler: 'CacheFirst',
+              options: {
+                cacheName: 'fonts',
+                expiration: { maxEntries: 40, maxAgeSeconds: 60 * 60 * 24 * 365 },
+              },
+            },
+          ],
         },
         manifest: {
           name: 'مستودعي - Mostawdaee',

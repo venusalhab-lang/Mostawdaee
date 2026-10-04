@@ -44,6 +44,7 @@ const FALLBACK_RATES: TickerItem[] = [
 export default function CurrencyTicker({ isRtl, style }: CurrencyTickerProps) {
   const [rates, setRates] = useState<TickerItem[]>(FALLBACK_RATES);
   const [loading, setLoading] = useState(false);
+  const [isLive, setIsLive] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<string>(() => (typeof navigator !== 'undefined' && navigator.language?.startsWith('ar') ? 'أسعار مخزّنة (غير محدّثة)' : 'Cached rates (not live)'));
 
   const fetchRates = async () => {
@@ -79,11 +80,13 @@ export default function CurrencyTicker({ isRtl, style }: CurrencyTickerProps) {
         }));
 
         setRates(liveItems);
+        setIsLive(true);
         const formatTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
         setLastUpdated(formatTime);
       }
     } catch (error) {
       console.warn('Currency ticker API error, employing fallback rates:', error);
+      setIsLive(false);
     }
   };
 
@@ -141,18 +144,18 @@ export default function CurrencyTicker({ isRtl, style }: CurrencyTickerProps) {
       className="w-full bg-[#070d1d] text-white border-b border-indigo-950/40 py-2 px-4 flex items-center justify-between text-xs font-sans relative overflow-hidden select-none z-20 h-9 sm:h-10 shadow-[inset_0_-1px_3px_rgba(0,0,0,0.4)]"
       id="live-currency-exchange-ticker"
     >
-      {/* 1. Static Label "LIVE RATES" */}
+      {/* 1. Source label: live only when the last fetch succeeded */}
       <div 
-        className={`flex items-center gap-1.5 px-3 py-1 bg-gradient-to-r from-indigo-600 via-indigo-700 to-purple-650 text-white rounded-lg font-black text-[10px] tracking-wider z-10 shadow-md relative shrink-0 ${
+        className={`flex items-center gap-1.5 px-3 py-1 bg-gradient-to-r from-indigo-600 via-indigo-700 to-purple-600 text-white rounded-lg font-black text-[10px] tracking-wider z-10 shadow-md relative shrink-0 ${
           isRtl ? 'ml-4' : 'mr-4'
         }`}
       >
         <div className="relative flex h-1.5 w-1.5">
-          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75"></span>
-          <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-cyan-400"></span>
+          {isLive && <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75"></span>}
+          <span className={`relative inline-flex rounded-full h-1.5 w-1.5 ${isLive ? 'bg-cyan-400' : 'bg-amber-400'}`}></span>
         </div>
         <span className="font-arabic uppercase leading-none">
-          {isRtl ? 'مباشر العملات' : 'LIVE RATES'}
+          {isLive ? (isRtl ? 'أسعار مباشرة' : 'LIVE RATES') : (isRtl ? 'أسعار تقريبية' : 'APPROX. RATES')}
         </span>
       </div>
 

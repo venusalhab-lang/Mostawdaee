@@ -24,7 +24,11 @@ import { toast } from 'sonner';
 import { TactileButton } from './ui/TactileButton';
 import { useSuccessCelebration } from '../hooks/useSuccessCelebration';
 import { sounds } from '../lib/sounds';
-import { CURRENCY_SYMBOLS, POS_CURRENCY_CODES, buildUsdUnitRates, convertMoney, formatMoney, readCachedLiveRates } from '../lib/exchangeRates';
+import { matchesQuery, phoneMatches } from '../lib/search';
+import { useScreenSearch } from '../lib/screenSearch';
+import { CURRENCY_SYMBOLS, buildUsdUnitRates, convertMoney, formatMoney, isPosCurrency, readCachedLiveRates } from '../lib/exchangeRates';
+import { usePreferredCurrency } from './CurrencyContext';
+import CurrencyPicker from './CurrencyPicker';
 import { roundForCurrency } from '../lib/vaultMath';
 
 interface Props {
@@ -70,13 +74,13 @@ function EmployeeCard({ emp, index, t, isRtl, settings, onEdit, onDelete, onPayS
           <button 
             onClick={(e) => { e.stopPropagation(); onEdit(emp); }}
             className="p-2 bg-gray-50 dark:bg-gray-700 hover:bg-indigo-50 dark:hover:bg-indigo-900/50 text-gray-400 hover:text-indigo-600 rounded-lg transition-all"
-          >
+           aria-label={isRtl ? 'تعديل' : 'Edit'}>
             <Edit2 size={16} />
           </button>
           <button 
             onClick={(e) => { e.stopPropagation(); onDelete(emp.id); }}
             className="p-2 bg-gray-50 dark:bg-gray-700 hover:bg-rose-50 dark:hover:bg-rose-900/50 text-gray-400 hover:text-rose-600 rounded-lg transition-all"
-          >
+           aria-label={isRtl ? 'حذف' : 'Delete'}>
             <Trash2 size={16} />
           </button>
         </div>
@@ -91,11 +95,8 @@ function EmployeeCard({ emp, index, t, isRtl, settings, onEdit, onDelete, onPayS
         <div className="grid grid-cols-2 gap-4 pt-4 border-t border-gray-50 dark:border-gray-700">
           <div className="space-y-1">
             <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest">{t.salary}</p>
-            <div className="flex items-center gap-1 text-gray-900 dark:text-gray-100 font-bold">
-              <span className="text-[10px] text-emerald-500 font-black">
-                {CURRENCY_SYMBOLS[settings.currency || 'JOD'] || settings.currency}
-              </span>
-              <span className="font-mono">{emp.salary.toLocaleString()}</span>
+            <div className="text-gray-900 dark:text-gray-100 font-bold font-mono">
+              {formatMoney(emp.salary, isPosCurrency(emp.currency) ? emp.currency : (isPosCurrency(settings.currency) ? settings.currency : 'JOD'), isRtl ? 'ar' : 'en-US')}
             </div>
           </div>
           <div className="space-y-1 text-right">
@@ -141,6 +142,10 @@ function EmployeeCard({ emp, index, t, isRtl, settings, onEdit, onDelete, onPayS
 
 export default function EmployeeManagement({ language, settings }: Props) {
   const { employees, payrollRecords, saveEmployee, deleteEmployee, savePayrollRecord, payPayroll, deletePayrollRecord } = useFirebase();
+  const { preferredCurrency } = usePreferredCurrency();
+  const systemCurrency: Currency = isPosCurrency(preferredCurrency)
+    ? preferredCurrency
+    : (isPosCurrency(settings.currency) ? settings.currency : 'JOD');
   const { celebrationClass, triggerCelebration } = useSuccessCelebration();
   const [activeTab, setActiveTab] = useState<'employees' | 'payroll'>('employees');
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -168,16 +173,21 @@ export default function EmployeeManagement({ language, settings }: Props) {
     role: '',
     contact: '',
     salary: 0,
+    currency: systemCurrency,
     status: 'active'
   });
 
   const t = translations[language];
   const isRtl = language === 'ar';
 
-  const filteredEmployees = employees.filter(emp => 
-    emp.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    emp.role.toLowerCase().includes(searchQuery.toLowerCase())
+  const filteredEmployees = employees.filter(emp =>
+    matchesQuery([emp.name, emp.role], searchQuery) || phoneMatches(emp.contact, searchQuery)
   );
+
+  useScreenSearch('employees', ({ query }) => {
+    setActiveTab('employees');
+    setSearchQuery(query);
+  });
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -188,12 +198,15 @@ export default function EmployeeManagement({ language, settings }: Props) {
       return;
     }
 
+    const salaryCurrency = isPosCurrency(formData.currency) ? formData.currency : systemCurrency;
+    const currencyLocked = !!editingEmployee && payrollRecords.some(record => record.employeeId === editingEmployee.id);
     const employeeToSave: Employee = {
-      id: editingEmployee?.id || Math.random().toString(36).substring(7),
+      id: editingEmployee?.id || crypto.randomUUID(),
       name: formData.name,
       role: formData.role,
       contact: formData.contact || '',
       salary: Number(formData.salary) || 0,
+      currency: currencyLocked && isPosCurrency(editingEmployee?.currency) ? editingEmployee.currency : salaryCurrency,
       status: formData.status as any,
       hiredDate: editingEmployee?.hiredDate || Date.now()
     };
@@ -209,7 +222,7 @@ export default function EmployeeManagement({ language, settings }: Props) {
   const handlePaySalary = (emp: Employee) => {
     sounds.playClick();
     setSelectedPayEmployee(emp);
-    setPayrollCurrency(settings.currency || 'JOD');
+    setPayrollCurrency(isPosCurrency(emp.currency) ? emp.currency : systemCurrency);
     
     // Auto-prepopulate Month/Year as YYYY-MM
     const today = new Date();
@@ -221,17 +234,8 @@ export default function EmployeeManagement({ language, settings }: Props) {
     setPayrollStatus('paid');
   };
 
-  const currencySymbol = (code: Currency) => {
-    switch (code) {
-      case 'JOD': return 'د.أ';
-      case 'USD': return '$';
-      case 'ILS': return '₪';
-      case 'IQD': return 'ع.د';
-      case 'SAR': return 'ر.س';
-      case 'LYD': return 'ل.د';
-      default: return code;
-    }
-  };
+  const money = (amount: number, code?: string) =>
+    formatMoney(amount, code || settings.currency || 'JOD', isRtl ? 'ar' : 'en-US');
 
   // Totals are kept per currency (never summed across currencies)
   const payrollTotalsText = (status: 'paid' | 'pending'): string => {
@@ -244,12 +248,15 @@ export default function EmployeeManagement({ language, settings }: Props) {
     return parts.length ? parts.join('  •  ') : formatMoney(0, settings.currency || 'JOD', isRtl ? 'ar' : 'en-US');
   };
 
-  // Employee salaries are stored in the business currency; paying in another currency converts the basic salary.
+  const salaryCurrencyOf = (emp: { currency?: string }): Currency =>
+    isPosCurrency(emp.currency) ? emp.currency : systemCurrency;
+
+  // The stored salary is in the employee's currency. Paying in another currency converts that amount.
   const baseSalaryIn = (emp: Employee, target: Currency): number => {
-    const from = (settings.currency || 'JOD') as Currency;
+    const from = salaryCurrencyOf(emp);
     const salary = Number(emp.salary) || 0;
     if (from === target) return salary;
-    const converted = convertMoney(salary, from as any, target as any, buildUsdUnitRates(settings, readCachedLiveRates()));
+    const converted = convertMoney(salary, from, target, buildUsdUnitRates(settings, readCachedLiveRates()));
     return roundForCurrency(converted, target);
   };
 
@@ -258,8 +265,7 @@ export default function EmployeeManagement({ language, settings }: Props) {
     if (msg.startsWith('Insufficient vault funds')) {
       return isRtl ? 'رصيد الخزنة بهذه العملة غير كافٍ لصرف الراتب. أضف رصيداً للخزنة أولاً.' : 'Not enough balance in the vault for this currency. Deposit funds first.';
     }
-    if (msg === 'Payroll already paid') return isRtl ? 'هذا الراتب مصروف مسبقاً.' : 'This payroll was already paid.';
-    if (msg.startsWith('No active session')) return isRtl ? 'سجّل الدخول بحساب حقيقي لصرف الرواتب (وضع الضيف للمعاينة فقط).' : 'Sign in with a real account to pay salaries (guest mode is preview only).';
+    if (msg === 'Payroll already paid') return isRtl ? 'راتب هذا الموظف لهذا الشهر مصروف مسبقاً.' : "This employee's salary for this month was already paid.";
     return t.error;
   };
 
@@ -270,11 +276,17 @@ export default function EmployeeManagement({ language, settings }: Props) {
     try {
       const netSalary = roundForCurrency(baseSalaryIn(selectedPayEmployee, payrollCurrency) + (Number(payrollAllowances) || 0) - (Number(payrollDeductions) || 0), payrollCurrency);
 
+      const monthYear = payrollMonthYear || `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
+      // Records saved before ids were per month are matched by employee and month.
+      if (payrollRecords.some((r) => r.employeeId === selectedPayEmployee.id && r.monthYear === monthYear && r.paymentStatus === 'paid')) {
+        throw new Error('Payroll already paid');
+      }
       const payrollToSave: PayrollRecord = {
-        id: Math.random().toString(36).substring(7),
+        // One payroll per employee per month: a second payment for the same month is refused.
+        id: `${selectedPayEmployee.id}_${monthYear}`,
         employeeId: selectedPayEmployee.id,
         employeeName: selectedPayEmployee.name,
-        monthYear: payrollMonthYear || `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`,
+        monthYear,
         allowances: Number(payrollAllowances) || 0,
         deductions: Number(payrollDeductions) || 0,
         netSalary: netSalary,
@@ -298,7 +310,7 @@ export default function EmployeeManagement({ language, settings }: Props) {
       toast.success(payrollStatus === 'paid' ? t.paymentRecorded : (isRtl ? 'تم تسجيل مسير الراتب بانتظار الصرف' : 'Payroll saved as pending payment'));
       setSelectedPayEmployee(null);
     } catch (error: any) {
-      toast.error(payrollErrorMessage(error));
+      if (!error?.notified) toast.error(payrollErrorMessage(error));
     } finally {
       setIsPaying(false);
     }
@@ -313,7 +325,7 @@ export default function EmployeeManagement({ language, settings }: Props) {
       triggerCelebration();
       toast.success(isRtl ? 'تم صرف الراتب وتحديث الحالة بنجاح' : 'Salary processed and status updated successfully!');
     } catch (error: any) {
-      toast.error(payrollErrorMessage(error));
+      if (!error?.notified) toast.error(payrollErrorMessage(error));
     } finally {
       setIsPaying(false);
     }
@@ -336,7 +348,7 @@ export default function EmployeeManagement({ language, settings }: Props) {
     }
   };
   const resetForm = () => {
-    setFormData({ name: '', role: '', contact: '', salary: 0, status: 'active' });
+    setFormData({ name: '', role: '', contact: '', salary: 0, currency: systemCurrency, status: 'active' });
     setEditingEmployee(null);
   };
 
@@ -355,7 +367,7 @@ export default function EmployeeManagement({ language, settings }: Props) {
         subtitle={contextMenuTarget?.role}
         language={language}
         details={[
-          { label: t.salary, value: formatMoney(contextMenuTarget?.salary || 0, settings.currency || 'JOD') },
+          { label: t.salary, value: formatMoney(contextMenuTarget?.salary || 0, contextMenuTarget ? salaryCurrencyOf(contextMenuTarget) : systemCurrency) },
           { label: t.employeeStatus, value: contextMenuTarget ? t[contextMenuTarget.status as keyof typeof t] : '' },
           { label: t.contact, value: contextMenuTarget?.contact || 'N/A' },
           { label: t.date, value: contextMenuTarget ? new Date(contextMenuTarget.hiredDate).toLocaleDateString() : '' }
@@ -404,7 +416,7 @@ export default function EmployeeManagement({ language, settings }: Props) {
           </div>
 
           <TactileButton
-            onClick={() => setIsModalOpen(true)}
+            onClick={() => { resetForm(); setIsModalOpen(true); }}
           >
             <UserPlus size={20} />
             {t.addEmployee}
@@ -419,7 +431,7 @@ export default function EmployeeManagement({ language, settings }: Props) {
             <Search size={20} className={`absolute top-1/2 -translate-y-1/2 ${isRtl ? 'right-4' : 'left-4'} text-gray-400`} />
             <input
               type="text"
-              placeholder={activeTab === 'employees' ? t.searchPlaceholder : (isRtl ? 'البحث باسم الموظف أو الفترة...' : 'Search by employee or period...')}
+              placeholder={activeTab === 'employees' ? t.searchPlaceholder : (isRtl ? 'البحث باسم الموظف أو الفترة...' : 'Search by employee or period...')} aria-label={activeTab === 'employees' ? t.searchPlaceholder : (isRtl ? 'البحث باسم الموظف أو الفترة...' : 'Search by employee or period...')}
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               className={`w-full ${isRtl ? 'pr-12 pl-4' : 'pl-12 pr-4'} py-3 bg-white dark:bg-gray-800 border border-gray-100 dark:border-gray-700 rounded-2xl focus:ring-2 focus:ring-indigo-500 outline-none shadow-sm dark:text-white transition-all`}
@@ -440,7 +452,15 @@ export default function EmployeeManagement({ language, settings }: Props) {
             </div>
             <div className="lg:col-span-3 salary-card-layout glass-card-test">
               <h3>{isRtl ? 'إجمالي الرواتب الأساسية' : 'Total Basic Salaries'}</h3>
-              <p>{formatMoney(employees.reduce((acc, emp) => acc + (Number(emp.salary) || 0), 0), settings.currency || 'JOD', isRtl ? 'ar' : 'en-US')}</p>
+              <p>{(() => {
+                const totals: Record<string, number> = {};
+                employees.forEach((emp) => {
+                  const code = salaryCurrencyOf(emp);
+                  totals[code] = (totals[code] || 0) + (Number(emp.salary) || 0);
+                });
+                const parts = Object.entries(totals).filter(([, amount]) => amount !== 0).map(([code, amount]) => money(amount, code));
+                return parts.length ? parts.join('  •  ') : money(0, systemCurrency);
+              })()}</p>
             </div>
           </>
         ) : (
@@ -496,7 +516,7 @@ export default function EmployeeManagement({ language, settings }: Props) {
         <motion.div
           initial={{ opacity: 0, y: 10 }}
           animate={{ opacity: 1, y: 0 }}
-          className="bg-white dark:bg-gray-800 rounded-3xl border border-gray-150 dark:border-gray-700 shadow-sm overflow-hidden"
+          className="bg-white dark:bg-gray-800 rounded-3xl border border-gray-100 dark:border-gray-700 shadow-sm overflow-hidden"
         >
           <div className="overflow-x-auto">
             <table className="w-full text-left border-collapse" dir={isRtl ? 'rtl' : 'ltr'}>
@@ -535,13 +555,13 @@ export default function EmployeeManagement({ language, settings }: Props) {
                         {record.monthYear}
                       </td>
                       <td className="py-4 px-6 text-center text-emerald-600 dark:text-emerald-400 font-mono font-bold">
-                        +{currencySymbol(record.currency || settings.currency || 'JOD')}{record.allowances.toLocaleString()}
+                        +{money(record.allowances, record.currency)}
                       </td>
                       <td className="py-4 px-6 text-center text-rose-500 dark:text-rose-400 font-mono font-bold">
-                        -{currencySymbol(record.currency || settings.currency || 'JOD')}{record.deductions.toLocaleString()}
+                        -{money(record.deductions, record.currency)}
                       </td>
                       <td className="py-4 px-6 text-center text-indigo-600 dark:text-indigo-400 font-mono font-black text-md">
-                        {formatMoney(record.netSalary, record.currency || settings.currency || 'JOD', isRtl ? 'ar' : 'en-US')}
+                        {money(record.netSalary, record.currency)}
                       </td>
                       <td className="py-4 px-6 text-center text-xs text-gray-400 font-mono">
                         {new Date(record.paymentDate).toLocaleDateString()}
@@ -568,7 +588,7 @@ export default function EmployeeManagement({ language, settings }: Props) {
                           type="button"
                           onClick={() => handleDeletePayroll(record.id)}
                           className="p-1.5 text-gray-400 hover:text-rose-500 rounded-lg hover:bg-rose-50 dark:hover:bg-rose-950/30 transition-all cursor-pointer"
-                        >
+                         aria-label={isRtl ? 'حذف' : 'Delete'}>
                           <Trash2 size={16} />
                         </button>
                       </td>
@@ -623,26 +643,46 @@ export default function EmployeeManagement({ language, settings }: Props) {
                     />
                   </div>
 
-                  <div className="grid grid-cols-2 gap-4">
-                    <div className="space-y-1.5">
-                      <label className="text-sm font-bold text-gray-700 dark:text-gray-300">{t.role}</label>
-                      <input
-                        required
-                        type="text"
-                        value={formData.role}
-                        onChange={(e) => setFormData({...formData, role: e.target.value})}
-                        className="w-full px-5 py-3.5 bg-gray-50 dark:bg-gray-900 border border-gray-100 dark:border-gray-700 rounded-2xl focus:ring-2 focus:ring-indigo-500 outline-none dark:text-white"
-                      />
-                    </div>
-                    <div className="space-y-1.5">
-                      <label className="text-sm font-bold text-gray-700 dark:text-gray-300">{t.salary} ({CURRENCY_SYMBOLS[settings.currency || 'JOD'] || settings.currency})</label>
-                      <input
-                        type="number"
-                        value={formData.salary}
-                        onChange={(e) => setFormData({...formData, salary: Number(e.target.value)})}
-                        className="w-full px-5 py-3.5 bg-gray-50 dark:bg-gray-900 border border-gray-100 dark:border-gray-700 rounded-2xl focus:ring-2 focus:ring-indigo-500 outline-none dark:text-white font-mono"
-                      />
-                    </div>
+                  <div className="space-y-1.5">
+                    <label className="text-sm font-bold text-gray-700 dark:text-gray-300">{t.role}</label>
+                    <input
+                      required
+                      type="text"
+                      value={formData.role}
+                      onChange={(e) => setFormData({...formData, role: e.target.value})}
+                      className="w-full px-5 py-3.5 bg-gray-50 dark:bg-gray-900 border border-gray-100 dark:border-gray-700 rounded-2xl focus:ring-2 focus:ring-indigo-500 outline-none dark:text-white"
+                    />
+                  </div>
+                  <div className={payrollRecords.some(record => record.employeeId === editingEmployee?.id) ? 'pointer-events-none opacity-60' : ''}>
+                    <CurrencyPicker
+                      value={isPosCurrency(formData.currency) ? formData.currency : systemCurrency}
+                      onChange={(code) => setFormData({ ...formData, currency: code })}
+                      isRtl={isRtl}
+                      label={isRtl ? 'عملة الراتب' : 'Salary currency'}
+                    />
+                  </div>
+                  {payrollRecords.some(record => record.employeeId === editingEmployee?.id) && (
+                    <p className="text-[11px] text-amber-600">
+                      {isRtl ? 'لا يمكن تغيير عملة الراتب بعد وجود مسير لهذا الموظف.' : 'Salary currency cannot change after a payroll record exists.'}
+                    </p>
+                  )}
+                  <div className="space-y-1.5">
+                    <label className="text-sm font-bold text-gray-700 dark:text-gray-300">
+                      {t.salary} ({CURRENCY_SYMBOLS[isPosCurrency(formData.currency) ? formData.currency : systemCurrency]})
+                    </label>
+                    <input
+                      type="number"
+                      min={0}
+                      step="any"
+                      value={formData.salary}
+                      onChange={(e) => setFormData({...formData, salary: Number(e.target.value)})}
+                      className="w-full px-5 py-3.5 bg-gray-50 dark:bg-gray-900 border border-gray-100 dark:border-gray-700 rounded-2xl focus:ring-2 focus:ring-indigo-500 outline-none dark:text-white font-mono"
+                    />
+                    <p className="text-[11px] text-gray-400">
+                      {isRtl
+                        ? 'المبلغ بهذه العملة. إذا صُرف الراتب بعملة أخرى يُحوَّل الراتب الأساسي بسعر الصرف، وتُكتب العلاوات بعملة الصرف.'
+                        : 'The amount is in this currency. Paying in another currency converts the basic salary at the exchange rate. Allowances are entered in the payout currency.'}
+                    </p>
                   </div>
 
                   <div className="space-y-1.5">
@@ -747,7 +787,7 @@ export default function EmployeeManagement({ language, settings }: Props) {
                     type="month"
                     value={payrollMonthYear}
                     onChange={(e) => setPayrollMonthYear(e.target.value)}
-                    className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-950 border border-gray-150 dark:border-gray-800 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none text-sm dark:text-white text-center font-bold"
+                    className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-950 border border-gray-100 dark:border-gray-800 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none text-sm dark:text-white text-center font-bold"
                   />
                 </div>
 
@@ -763,7 +803,7 @@ export default function EmployeeManagement({ language, settings }: Props) {
                       min="0"
                       value={payrollAllowances}
                       onChange={(e) => setPayrollAllowances(Number(e.target.value) || 0)}
-                      className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-950 border border-gray-150 dark:border-gray-800 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none font-mono text-sm dark:text-white font-bold"
+                      className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-950 border border-gray-100 dark:border-gray-800 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none font-mono text-sm dark:text-white font-bold"
                     />
                   </div>
 
@@ -778,26 +818,18 @@ export default function EmployeeManagement({ language, settings }: Props) {
                       min="0"
                       value={payrollDeductions}
                       onChange={(e) => setPayrollDeductions(Number(e.target.value) || 0)}
-                      className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-950 border border-gray-150 dark:border-gray-800 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none font-mono text-sm dark:text-white font-bold"
+                      className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-950 border border-gray-100 dark:border-gray-800 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none font-mono text-sm dark:text-white font-bold"
                     />
                   </div>
                 </div>
 
                 {/* Currency Selector */}
-                <div className="space-y-1">
-                  <label className="text-xs font-bold text-gray-500 dark:text-gray-400">
-                    {isRtl ? 'نوع العملة' : 'Currency'}
-                  </label>
-                  <select
-                    value={payrollCurrency}
-                    onChange={(e) => setPayrollCurrency(e.target.value as Currency)}
-                    className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-950 border border-gray-150 dark:border-gray-800 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none text-sm dark:text-white font-bold"
-                  >
-                    {POS_CURRENCY_CODES.map((curr) => (
-                      <option key={curr} value={curr}>{curr}</option>
-                    ))}
-                  </select>
-                </div>
+                <CurrencyPicker
+                  value={payrollCurrency}
+                  onChange={setPayrollCurrency}
+                  isRtl={isRtl}
+                  label={isRtl ? 'عملة صرف الراتب' : 'Payroll currency'}
+                />
 
                 {/* Payment Status Switcher */}
                 <div className="space-y-1">
@@ -811,7 +843,7 @@ export default function EmployeeManagement({ language, settings }: Props) {
                       className={`py-2 rounded-xl text-xs font-bold transition-all border ${
                         payrollStatus === 'paid'
                           ? 'border-emerald-500 bg-emerald-50/50 dark:bg-emerald-950/20 text-emerald-600 dark:text-emerald-400'
-                          : 'border-gray-150 dark:border-gray-800 bg-white/30 dark:bg-gray-950/30 text-gray-400'
+                          : 'border-gray-100 dark:border-gray-800 bg-white/30 dark:bg-gray-950/30 text-gray-400'
                       }`}
                     >
                       {isRtl ? 'صرف فوري وخصم من الخزنة' : 'Paid Immediately'}
@@ -822,7 +854,7 @@ export default function EmployeeManagement({ language, settings }: Props) {
                       className={`py-2 rounded-xl text-xs font-bold transition-all border ${
                         payrollStatus === 'pending'
                           ? 'border-amber-500 bg-amber-50/50 dark:bg-amber-950/20 text-amber-600 dark:text-amber-400'
-                          : 'border-gray-150 dark:border-gray-800 bg-white/30 dark:bg-gray-950/30 text-gray-400'
+                          : 'border-gray-100 dark:border-gray-800 bg-white/30 dark:bg-gray-950/30 text-gray-400'
                       }`}
                     >
                       {isRtl ? 'تعليق في المسير (Unpaid)' : 'Pending / Unpaid'}
@@ -831,20 +863,27 @@ export default function EmployeeManagement({ language, settings }: Props) {
                 </div>
 
                 {/* Detailed Invoice Breakdown */}
-                <div className="p-4 bg-gray-50 dark:bg-gray-950 border border-gray-150/50 dark:border-gray-800/80 rounded-2xl space-y-2 mt-4">
+                <div className="p-4 bg-gray-50 dark:bg-gray-950 border border-gray-100/50 dark:border-gray-800/80 rounded-2xl space-y-2 mt-4">
                   <div className="flex justify-between text-xs font-bold text-gray-500 dark:text-gray-400">
                     <span>{isRtl ? 'الراتب الأساسي' : 'Basic Salary'}</span>
                     <span className="font-mono">
                       {formatMoney(baseSalaryIn(selectedPayEmployee, payrollCurrency), payrollCurrency, isRtl ? 'ar' : 'en-US')}
                     </span>
                   </div>
+                  {salaryCurrencyOf(selectedPayEmployee) !== payrollCurrency && (
+                    <p className="text-[11px] text-slate-400">
+                      {isRtl
+                        ? `محوّل من ${money(selectedPayEmployee.salary, salaryCurrencyOf(selectedPayEmployee))} بسعر الصرف الحالي.`
+                        : `Converted from ${money(selectedPayEmployee.salary, salaryCurrencyOf(selectedPayEmployee))} at the current rate.`}
+                    </p>
+                  )}
                   <div className="flex justify-between text-xs font-bold text-emerald-600 dark:text-emerald-400">
                     <span>{isRtl ? 'علاوات وإضافات (+)' : 'Allowances (+)'}</span>
-                    <span className="font-mono">+{payrollAllowances}</span>
+                    <span className="font-mono">+{money(payrollAllowances, payrollCurrency)}</span>
                   </div>
                   <div className="flex justify-between text-xs font-bold text-rose-500 dark:text-rose-400">
                     <span>{isRtl ? 'استقطاعات وخصومات (-)' : 'Deductions (-)'}</span>
-                    <span className="font-mono">-{payrollDeductions}</span>
+                    <span className="font-mono">-{money(payrollDeductions, payrollCurrency)}</span>
                   </div>
                   <div className="border-t border-gray-200 dark:border-gray-800/80 pt-2 flex justify-between items-center text-sm font-black text-indigo-600 dark:text-indigo-400">
                     <span>{isRtl ? 'صافي المبلغ النهائي' : 'Estimated Net Pay'}</span>

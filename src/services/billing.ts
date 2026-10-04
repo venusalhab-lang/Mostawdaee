@@ -1,7 +1,7 @@
 /**
  * Google Play Billing Service
  * Integration with cordova-plugin-purchase (compatible with Capacitor applications)
- * Supports continuous initialization, subscription upgrades, and multi-currency top-ups.
+ * Activation is always verified by our server against the Google Play Developer API.
  */
 
 export interface DigitalProduct {
@@ -75,7 +75,7 @@ export function initializeBilling(
   const CdvPurchase = (window as any).CdvPurchase;
 
   if (!CdvPurchase) {
-    console.info('[Google Play Billing] CdvPurchase not found on window object. Running in browser Simulation Mode.');
+    console.info('[Google Play Billing] Not running in the Android app; billing is unavailable.');
     return;
   }
 
@@ -161,44 +161,51 @@ export function initializeBilling(
   }
 }
 
-/**
- * 2. Trigger Google's Native Payment Sheet or Simulated Dialog
- * 
- * @param productId Product / Subscription identifier to buy
- * @param simulatedCallback Browser preview fallback to trigger database updates right away
- */
-export async function makePurchase(
-  productId: string,
-  simulatedCallback?: (tx: ProcessedTransaction) => void
-): Promise<boolean> {
+/** Opens Google's native payment sheet. Purchases only exist in the Android app. */
+export async function makePurchase(productId: string): Promise<boolean> {
   const matchingProduct = PLAY_STORE_PRODUCTS.find(p => p.id === productId);
   if (!matchingProduct) {
     throw new Error(`Product metadata not found for item code: ${productId}`);
   }
 
   const CdvPurchase = (window as any).CdvPurchase;
-
-  // Native flow trigger
-  if (CdvPurchase && CdvPurchase.store) {
-    try {
-      const { store, Platform } = CdvPurchase;
-      const productObj = store.get(productId, Platform.GOOGLE_PLAY);
-      const offer = productObj?.getOffer?.();
-      if (!productObj || !offer) {
-        throw new Error(`Google Play billing could not retrieve product ${productId}. Make sure the subscription is active in the Play Console and the app is installed from a Play test track.`);
-      }
-
-      // Fires the native Google Play payment sheet (cordova-plugin-purchase v13: orders go through an Offer)
-      const error = await offer.order();
-      if (error) {
-        throw new Error(error.message || 'Google Play order failed');
-      }
-      return true;
-    } catch (e: any) {
-      console.error('[Google Play Billing] Failed ordering via Google Play Billing Store:', e);
-      throw new Error(e.message || 'Google Play Billing order dispatch failed');
-    }
-  } else {
+  if (!CdvPurchase?.store) {
     throw new Error('Google Play Billing is only available in the native Android app.');
   }
+  const { store, Platform } = CdvPurchase;
+  const productObj = store.get(productId, Platform.GOOGLE_PLAY);
+  const offer = productObj?.getOffer?.();
+  if (!productObj || !offer) {
+    throw new Error(`Google Play billing could not retrieve product ${productId}. Make sure the subscription is active in the Play Console and the app is installed from a Play test track.`);
+  }
+  // cordova-plugin-purchase v13: orders go through an Offer
+  const error = await offer.order();
+  if (error) {
+    throw new Error(error.message || 'Google Play order failed');
+  }
+  return true;
+}
+
+/** Purchase tokens Google Play reports as owned on this device (after initializeBilling). */
+export function ownedPurchaseTokens(): string[] {
+  const store = (window as any).CdvPurchase?.store;
+  if (!store) return [];
+  const tokens = new Set<string>();
+  for (const receipt of store.localReceipts || []) {
+    for (const tx of receipt.transactions || []) {
+      const ownsPremium = (tx.products || []).some((p: any) => PLAY_STORE_PRODUCTS.some((known) => known.id === p.id));
+      const token = tx.nativePurchase?.purchaseToken || tx.purchaseToken;
+      if (ownsPremium && token) tokens.add(token);
+    }
+  }
+  return [...tokens];
+}
+
+/** Asks Google Play for this Google account's purchases again (reinstall, new phone). */
+export async function restorePurchases(): Promise<string[]> {
+  const store = (window as any).CdvPurchase?.store;
+  if (!store) throw new Error('Google Play Billing is only available in the native Android app.');
+  const error = await store.restorePurchases();
+  if (error) throw new Error(error.message || 'Google Play restore failed');
+  return ownedPurchaseTokens();
 }

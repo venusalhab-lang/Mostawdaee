@@ -36,7 +36,8 @@ import { useFirebase } from './FirebaseProvider';
 import { motion } from 'motion/react';
 import { toast } from 'sonner';
 import { Invoice, Product, Currency } from '../types';
-import { getSupabaseClient } from '../services/supabase';
+import { POS_CURRENCY_CODES, buildUsdUnitRates, convertMoney, currencyDecimals, formatMoney, readCachedLiveRates, roundMoney } from '../lib/exchangeRates';
+import { lineUnitCost, saleInvoiceProfit, summarizeProfits } from '../lib/profits';
 
 const sanitizeText = (text: string | null | undefined, fallbackId?: string): string => {
   if (!text) {
@@ -95,6 +96,12 @@ class SimplePDFBuilder {
     this.profitability = profitability;
     this.isAr = isAr;
     this.convertPrice = convertPriceFn;
+  }
+
+  private formatAmount(amount: number): string {
+    const digits = currencyDecimals(this.selectedCurrency);
+    const num = amount.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits });
+    return `${num} ${this.selectedCurrency}`;
   }
 
   private escapePdfText(text: string): string {
@@ -186,13 +193,13 @@ class SimplePDFBuilder {
     const colWidth = this.contentWidth / 3;
 
     this.addText("GROSS ACCUMULATED REVENUE", this.leftMargin + 6, this.currentY + 24, 7, true, "0.28 0.33 0.41 rg");
-    this.addText(`${this.totals.sales.toLocaleString('en-US', { minimumFractionDigits: 2 })} ${this.selectedCurrency}`, this.leftMargin + 6, this.currentY + 10, 11, true, "0.145 0.388 0.922 rg");
+    this.addText(this.formatAmount(this.totals.sales), this.leftMargin + 6, this.currentY + 10, 11, true, "0.145 0.388 0.922 rg");
 
     this.addText("COST OF GOODS SOLD", this.leftMargin + colWidth + 6, this.currentY + 24, 7, true, "0.28 0.33 0.41 rg");
-    this.addText(`${this.totals.cost.toLocaleString('en-US', { minimumFractionDigits: 2 })} ${this.selectedCurrency}`, this.leftMargin + colWidth + 6, this.currentY + 10, 11, true, "0.76 0.25 0.05 rg");
+    this.addText(this.formatAmount(this.totals.cost), this.leftMargin + colWidth + 6, this.currentY + 10, 11, true, "0.76 0.25 0.05 rg");
 
     this.addText("NET OPERATING MARGINS", this.leftMargin + (colWidth * 2) + 6, this.currentY + 24, 7, true, "0.28 0.33 0.41 rg");
-    this.addText(`${this.totals.net.toLocaleString('en-US', { minimumFractionDigits: 2 })} (${this.totals.margin.toFixed(1)}%)`, this.leftMargin + (colWidth * 2) + 6, this.currentY + 10, 11, true, "0.02 0.59 0.41 rg");
+    this.addText(`${this.formatAmount(this.totals.net)} (${this.totals.margin.toFixed(1)}%)`, this.leftMargin + (colWidth * 2) + 6, this.currentY + 10, 11, true, "0.02 0.59 0.41 rg");
 
     this.currentY -= 50;
 
@@ -202,12 +209,12 @@ class SimplePDFBuilder {
     this.addRect(this.leftMargin, this.currentY, this.contentWidth, 32, "0.945 0.96 0.98 rg");
     
     const heroName = safeAscii(this.profitability.hero ? this.profitability.hero.name : 'No sales item registered for selected range', 'Standard Product');
-    const heroProfit = this.profitability.hero ? `${this.profitability.hero.profit.toFixed(2)} ${this.selectedCurrency}` : '0.00';
+    const heroProfit = this.profitability.hero ? this.formatAmount(this.profitability.hero.profit) : this.formatAmount(0);
     this.addText("Hero Product (Top Contributor):", this.leftMargin + 6, this.currentY + 22, 8, true, "0.06 0.09 0.16 rg");
     this.addText(`${heroName.substring(0, 80)} - Generated Contribution Profit of: ${heroProfit}`, this.leftMargin + 6, this.currentY + 14, 8, false, "0.06 0.09 0.16 rg");
 
     const drainName = safeAscii(this.profitability.drain ? this.profitability.drain.name : 'No underperforming items detected', 'Standard Product');
-    const drainProfit = this.profitability.drain ? `${this.profitability.drain.profit.toFixed(2)} ${this.selectedCurrency}` : '0.00';
+    const drainProfit = this.profitability.drain ? this.formatAmount(this.profitability.drain.profit) : this.formatAmount(0);
     this.addText("Underperformer Product (Lowest Margin/Drain):", this.leftMargin + 6, this.currentY + 6, 8, true, "0.06 0.09 0.16 rg");
     this.addText(`${drainName.substring(0, 80)} - Generated Contribution Profit of: ${drainProfit}`, this.leftMargin + 6, this.currentY - 2, 8, false, "0.06 0.09 0.16 rg");
 
@@ -270,7 +277,7 @@ class SimplePDFBuilder {
       this.addText(totalAmount.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 2 }), 430, cellTextY, 7.5, false, "0.15 0.20 0.25 rg");
       
       if (isSale) {
-        this.addText(profitConverted.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 2 }), 505, cellTextY, 7.5, true, "0.02 0.59 0.41 rg");
+        this.addText(this.formatAmount(profitConverted), 505, cellTextY, 7.5, true, "0.02 0.59 0.41 rg");
       } else {
         this.addText("-", 505, cellTextY, 7.5, false, "0.4 0.45 0.5 rg");
       }
@@ -389,6 +396,7 @@ interface ProfitInvoice {
   totalAmount: number;
   computedCost: number; 
   computedProfit: number; 
+  unknownCostLines: number;
 }
 
 export default function ProfitsDashboard({ language = 'en', currency = 'JOD', onClose }: ProfitsDashboardProps) {
@@ -396,9 +404,6 @@ export default function ProfitsDashboard({ language = 'en', currency = 'JOD', on
   const { invoices = [], products = [], loading: firebaseLoading, settings } = useFirebase();
 
   // Loading, Local Refresh and Database Sync states (Starting clean and empty)
-  const [supabaseLoading, setSupabaseLoading] = useState<boolean>(true);
-  const [supabaseInvoices, setSupabaseInvoices] = useState<ProfitInvoice[] | null>(null);
-  const [localSyncing, setLocalSyncing] = useState<boolean>(false);
   
   // Date Filters (Today, This Week, This Month, All Time)
   const [timeRange, setTimeRange] = useState<'today' | 'weekly' | 'monthly' | 'all'>('monthly');
@@ -407,20 +412,10 @@ export default function ProfitsDashboard({ language = 'en', currency = 'JOD', on
   const [selectedCurrency, setSelectedCurrency] = useState<string>(currency || 'JOD');
 
   // Multi-currency exchange rate tables relative to base USD (1.0)
-  const exchangeRates = useMemo<Record<string, number>>(() => {
-    const usdToIls = Number(settings?.exchangeRateUSD_ILS) || 3.70;
-    const jodToIls = Number(settings?.exchangeRateJOD_ILS) || 5.22;
-    const jodToUsd = Number(settings?.exchangeRateJOD_USD) || 1.41;
-
-    return {
-      USD: 1.0,
-      ILS: usdToIls,
-      JOD: 1.0 / jodToUsd, 
-      SAR: 3.75,
-      IQD: 1450.0,
-      LYD: 4.80
-    };
-  }, [settings]);
+  const exchangeRates = useMemo(
+    () => buildUsdUnitRates(settings, readCachedLiveRates()),
+    [settings],
+  );
 
   // Translate according to system language
   const isAr = language === 'ar';
@@ -434,19 +429,18 @@ export default function ProfitsDashboard({ language = 'en', currency = 'JOD', on
     thisMonth: isAr ? "هذا الشهر" : "This Month",
     allHistory: isAr ? "كل السجلات" : "All History",
     currencySwitched: isAr ? "تم تحويل عرض العملة النشط إلى:" : "Active display currency set to:",
-    recalculateTooltip: isAr ? "إعادة حساب وتحليل هوامش الأرباح" : "Recalculate Ledger Margins",
     pdfExport: isAr ? "تصدير كشف PDF" : "PDF Export",
     csvExport: isAr ? "تصدير ملف CSV" : "Export CSV",
     loadingRecords: isAr ? "جاري استرداد السجلات والبيانات المالية الآمنة..." : "Retrieving secure financial records...",
     noDataTitle: isAr ? "لا توجد سجلات معاملات مسجلة" : "No Transaction History Recorded",
     noDataDesc: isAr ? "لم يتم العثور على أي مبيعات، فواتير أو معاملات شراء مطابقة من قاعدة البيانات للفتوة المحددة." : "No matching sales, invoices, or purchase transactions were retrieved from either database during the selected date interval.",
     grossRevenue: isAr ? "إجمالي الإيرادات المتراكمة" : "GROSS ACCUMULATED REVENUE",
-    salesCumulativeDesc: isAr ? "القيمة التراكمية الكلية لمبيعات الفواتير" : "Sales invoice cumulative total value",
+    salesCumulativeDesc: isAr ? "صافي المبيعات بعد الخصم وبدون ضريبة القيمة المضافة" : "Net sales after discount, excluding VAT",
     cogs: isAr ? "تكلفة البضائع المباعة (COGS)" : "COST OF GOODS SOLD",
-    acqCostDesc: isAr ? "تكاليف شراء وحيازة المنتجات الفعلي" : "Calculated acquisition stock cost",
+    acqCostDesc: isAr ? "تكلفة الأصناف المباعة بسعر تكلفتها وقت البيع" : "Cost of the items sold, at their cost when sold",
     netMargin: isAr ? "صافي هوامش الأرباح التشغيلية" : "NET OPERATING MARGINS",
     marginLabel: isAr ? "هامش" : "Margin",
-    netOpsMarginDesc: isAr ? "صافي الهامش الفعلي بعد احتساب التكلفة" : "Net operational margin",
+    netOpsMarginDesc: isAr ? "المبيعات ناقص تكلفة الأصناف المباعة (قبل المصاريف)" : "Sales minus cost of goods sold (before expenses)",
     chartTitle: isAr ? "منحنى الهامش التشغيلي (صافي الأرباح / الزمن)" : "Net Operational Margin Curve (Profits / Time)",
     last15: isAr ? "آخر 15 معاملة مالية" : "Last 15 Transactions",
     noTemporalVariation: isAr ? "لا توجد معاملات كافية لرسم المنحنى حاليًا" : "Not enough temporal variation to render progress curve",
@@ -471,161 +465,42 @@ export default function ProfitsDashboard({ language = 'en', currency = 'JOD', on
     netMarginSelected: isAr ? "صافي الهامش" : "Net Margin",
     saleType: isAr ? "بيع" : "Sale",
     purchaseType: isAr ? "شراء" : "Purchase",
-    toastRecalculateSuccess: isAr ? "تمت إعادة احتساب المعايير وهوامش التشغيل ومزامنتها بنجاح!" : "Operational metrics successfully recalculated and synchronized!",
     toastNoDataExport: isAr ? "لا توجد بيانات للمعاملات للتصدير حاليًا!" : "No data found with the current filter settings to export!",
     toastCsvSuccess: isAr ? "تم تصدير سجل المعاملات بتنسيق Excel بنجاح!" : "Excel-compatible transaction log successfully exported!",
     toastPdfSuccess: isAr ? "تم تصدير مستند الأرباح المعتمد بنجاح!" : "Pristine financial PDF successfully compiled!"
   };
 
   // Dynamic values conversion
-  const convertPrice = (amount: number, fromCurrency: string, targetCurrency: string): number => {
-    const from = (fromCurrency || 'USD').toUpperCase();
-    const target = (targetCurrency || 'USD').toUpperCase();
-    
-    if (from === target) return amount;
-    
-    const fromRate = exchangeRates[from] || 1.0;
-    const targetRate = exchangeRates[target] || 1.0;
-    
-    const amountInUSD = amount / fromRate;
-    const result = amountInUSD * targetRate;
-    return Number(result.toFixed(2));
-  };
+  const convertPrice = (amount: number, fromCurrency: string, targetCurrency: string): number =>
+    convertMoney(amount, (fromCurrency || 'USD').toUpperCase(), (targetCurrency || 'USD').toUpperCase(), exchangeRates);
 
-  const getCurrencySymbol = (curr: string) => {
-    const symbols: Record<string, string> = {
-      USD: '$',
-      JOD: 'JD',
-      ILS: '₪',
-      SAR: 'SR',
-      LYD: 'LD',
-      IQD: 'ID'
-    };
-    return symbols[curr.toUpperCase()] || curr;
-  };
+  const showMoney = (amount: number, code: string) =>
+    formatMoney(amount, code, isAr ? 'ar' : 'en-US');
 
-  // Supabase Integration Hook to fetch transaction list asynchronously on load
-  useEffect(() => {
-    let isMounted = true;
-    async function loadSupabaseInvoices() {
-      setSupabaseLoading(true);
-      try {
-        const client = getSupabaseClient();
-        if (!client) {
-          if (isMounted) {
-            setSupabaseInvoices([]);
-            setSupabaseLoading(false);
-          }
-          return;
-        }
 
-        const { data, error } = await client
-          .from('invoices')
-          .select('*')
-          .order('date', { ascending: false });
+  const defaultCurrency = settings?.currency || 'JOD';
+  const productsById = useMemo(() => new Map((products || []).map((p: Product) => [p.id, p])), [products]);
 
-        if (error) {
-          console.warn('[Supabase load error] Failing back to Firebase Provider context data:', error);
-          if (isMounted) setSupabaseInvoices([]);
-        } else if (data && isMounted) {
-          const parsed: ProfitInvoice[] = data.map((inv: any) => {
-            const isSale = inv.type === 'sale';
-            const total = Number(inv.total_amount || inv.totalAmount || 0);
-            const sub = Number(inv.subtotal || total);
-            const invCurrency = inv.currency || 'JOD';
-
-            // Safe calculation of product costs
-            let computedCost = 0;
-            if (isSale) {
-              computedCost = total * 0.70; // fallback standard 70% threshold
-            } else {
-              computedCost = total; // Expense/purchasing
-            }
-
-            return {
-              id: inv.id,
-              invoiceNumber: inv.invoice_number || inv.invoiceNumber || `INV-${inv.id}`,
-              date: inv.date ? new Date(inv.date).getTime() : Date.now(),
-              customerName: inv.customer_name || inv.customerName || inv.supplier_name || 'Walk-In Customer',
-              type: (inv.type || 'sale') as 'sale' | 'purchase',
-              currency: invCurrency,
-              subtotal: sub,
-              totalAmount: total,
-              computedCost,
-              computedProfit: isSale ? Math.max(0, total - computedCost) : 0
-            };
-          });
-          setSupabaseInvoices(parsed);
-        }
-      } catch (err) {
-        console.warn('Network exception when loading Supabase:', err);
-        if (isMounted) setSupabaseInvoices([]);
-      } finally {
-        if (isMounted) setSupabaseLoading(false);
-      }
-    }
-
-    loadSupabaseInvoices();
-    return () => { isMounted = false; };
-  }, []);
-
-  // Real-time synchronization fallback helper
-  const handleRefresh = async () => {
-    setLocalSyncing(true);
-    setTimeout(() => {
-      setLocalSyncing(false);
-      toast.success(t.toastRecalculateSuccess || 'Operational metrics successfully recalculated!');
-    }, 600);
-  };
-
-  // Reconcile and merge Supabase and Firebase data safely
   const mergedInvoices = useMemo<ProfitInvoice[]>(() => {
-    // If Supabase data is fetched and valid, prioritize it
-    if (supabaseInvoices && supabaseInvoices.length > 0) {
-      return supabaseInvoices;
-    }
-
-    // Default Fallback: Process Firebase Invoices
     return (invoices || []).map((inv: Invoice) => {
       const isSale = inv.type === 'sale';
-      const total = inv.totalAmount || 0;
-      const sub = inv.subtotal || total;
-      const invCurrency = inv.currency || 'JOD';
-
-      // Safe calculation of product costs based on Firebase product registry
-      let computedCost = 0;
-      if (isSale) {
-        if (inv.items && Array.isArray(inv.items)) {
-          inv.items.forEach((item) => {
-            const qty = item.quantity || 1;
-            const product = (products || []).find(
-              (p: Product) => p.id === item.productId || p.name === item.description
-            );
-            const costPrice = product ? (product.unitCost || product.costPrice || product.baseCostPrice || 0) : 0;
-            const itemCost = costPrice || (item.unitPrice * 0.70);
-            computedCost += itemCost * qty;
-          });
-        } else {
-          computedCost = total * 0.70;
-        }
-      } else {
-        computedCost = total;
-      }
-
+      const total = Number(inv.totalAmount) || 0;
+      const p = isSale ? saleInvoiceProfit(inv, productsById, exchangeRates, defaultCurrency) : null;
       return {
         id: inv.id,
-        invoiceNumber: inv.invoiceNumber || '0000',
-        date: inv.date || Date.now(),
-        customerName: inv.customerName || inv.supplierName || 'Standard Client',
+        invoiceNumber: inv.invoiceNumber || '',
+        date: inv.date || 0,
+        customerName: inv.customerName || inv.supplierName || '',
         type: inv.type || 'sale',
-        currency: invCurrency,
-        subtotal: sub,
+        currency: inv.currency || defaultCurrency,
+        subtotal: p ? p.revenue : total,
         totalAmount: total,
-        computedCost,
-        computedProfit: isSale ? Math.max(0, total - computedCost) : 0
+        computedCost: p ? p.cost : total,
+        computedProfit: p ? p.profit : 0,
+        unknownCostLines: p ? p.unknownCostLines : 0,
       };
     });
-  }, [supabaseInvoices, invoices, products]);
+  }, [invoices, productsById, exchangeRates, defaultCurrency]);
 
   // DATE FILTERING LOGIC
   const filteredInvoices = useMemo<ProfitInvoice[]>(() => {
@@ -658,39 +533,11 @@ export default function ProfitsDashboard({ language = 'en', currency = 'JOD', on
     });
   }, [mergedInvoices, timeRange]);
 
-  // STRICT CALCULATION USING .REDUCE() AS SPECIFIED IN REQUIREMENT 4
   const totals = useMemo(() => {
-    const defaultTotals = { sales: 0, cost: 0, net: 0, margin: 0 };
-    if (!filteredInvoices || !Array.isArray(filteredInvoices) || filteredInvoices.length === 0) {
-      return defaultTotals;
-    }
-    try {
-      return filteredInvoices.reduce((acc, inv) => {
-        if (!inv) return acc;
-        const totalAmount = inv.totalAmount ?? 0;
-        const computedCost = inv.computedCost ?? 0;
-        const currency = inv.currency || 'JOD';
-        const type = inv.type || 'sale';
-
-        const convertedTotal = convertPrice(totalAmount, currency, selectedCurrency);
-        const convertedCost = convertPrice(computedCost, currency, selectedCurrency);
-        
-        if (type === 'sale') {
-          acc.sales += convertedTotal;
-          acc.cost += convertedCost;
-          acc.net += Math.max(0, convertedTotal - convertedCost);
-        } else {
-          acc.cost += convertedTotal; // Direct purchases representation of stock cost
-        }
-        
-        acc.margin = acc.sales > 0 ? (acc.net / acc.sales) * 100 : 0;
-        return acc;
-      }, { sales: 0, cost: 0, net: 0, margin: 0 });
-    } catch (e) {
-      console.error("Error calculating totals:", e);
-      return defaultTotals;
-    }
-  }, [filteredInvoices, selectedCurrency, exchangeRates]);
+    const ids = new Set(filteredInvoices.map((f) => f.id));
+    const sum = summarizeProfits((invoices || []).filter((inv) => ids.has(inv.id)), products || [], exchangeRates, selectedCurrency, defaultCurrency);
+    return { sales: sum.revenue, cost: sum.cost, net: sum.profit, margin: sum.margin, unknownCostLines: sum.unknownCostLines, purchases: sum.purchases };
+  }, [filteredInvoices, invoices, products, selectedCurrency, exchangeRates, defaultCurrency]);
 
   // PRODUCT PROFITABILITY MATRIX
   const productProfitability = useMemo(() => {
@@ -722,8 +569,7 @@ export default function ProfitsDashboard({ language = 'en', currency = 'JOD', on
           const displayName = sanitizeText(rawDisplayName, productId !== 'unknown' ? productId : undefined);
           const key = product ? product.id : displayName;
 
-          const costPrice = product ? (product.unitCost || product.costPrice || product.baseCostPrice || 0) : 0;
-          const itemCost = costPrice || ((item.unitPrice || 0) * 0.70);
+          const itemCost = lineUnitCost(item, invCurrency, product, exchangeRates, defaultCurrency) ?? 0;
 
           const totalItemRevenueRaw = (item.unitPrice || 0) * qty;
           const totalItemCostRaw = itemCost * qty;
@@ -791,16 +637,14 @@ export default function ProfitsDashboard({ language = 'en', currency = 'JOD', on
 
     sortedInvs.slice(-15).forEach(inv => {
       const dayLabel = new Date(inv.date).toLocaleDateString('en-US', { day: 'numeric', month: 'short' });
-      const convertedTotal = convertPrice(inv.totalAmount, inv.currency, selectedCurrency);
-      const convertedCost = convertPrice(inv.computedCost, inv.currency, selectedCurrency);
-      const convertedProfit = inv.type === 'sale' ? Math.max(0, convertedTotal - convertedCost) : 0;
-      
+      const convertedProfit = inv.type === 'sale' ? convertPrice(inv.computedProfit, inv.currency, selectedCurrency) : 0;
+
       days[dayLabel] = (days[dayLabel] || 0) + convertedProfit;
     });
 
     return Object.entries(days).map(([day, profit]) => ({
       day,
-      Profit: Number(profit.toFixed(2))
+      Profit: roundMoney(profit, selectedCurrency)
     }));
   }, [filteredInvoices, selectedCurrency, exchangeRates]);
 
@@ -817,7 +661,7 @@ export default function ProfitsDashboard({ language = 'en', currency = 'JOD', on
       const isSale = inv.type === 'sale';
       const convertedTotal = convertPrice(inv.totalAmount, inv.currency, selectedCurrency);
       const convertedCost = convertPrice(inv.computedCost, inv.currency, selectedCurrency);
-      const convertedProfit = isSale ? Math.max(0, convertedTotal - convertedCost) : 0;
+      const convertedProfit = isSale ? convertPrice(inv.computedProfit, inv.currency, selectedCurrency) : 0;
       
       const dateStr = new Date(inv.date).toLocaleDateString('en-US');
       const typeStr = isSale ? 'Sale / Income' : 'Purchase / Operational Cost';
@@ -833,9 +677,9 @@ export default function ProfitsDashboard({ language = 'en', currency = 'JOD', on
         escapeCsv(sanitizeText(inv.customerName, inv.invoiceNumber)),
         escapeCsv(typeStr),
         escapeCsv(inv.currency),
-        convertedTotal.toFixed(2),
-        convertedCost.toFixed(2),
-        convertedProfit.toFixed(2)
+        showMoney(convertedTotal, selectedCurrency),
+        showMoney(convertedCost, selectedCurrency),
+        showMoney(convertedProfit, selectedCurrency)
       ].join(',');
     });
 
@@ -844,9 +688,9 @@ export default function ProfitsDashboard({ language = 'en', currency = 'JOD', on
       `Export Timestamp: ${new Date().toLocaleString('en-US')}`,
       `Filter Interval: ${timeRange.toUpperCase()}`,
       `Unified Currency: ${selectedCurrency}`,
-      `Gross Cumulative Sales: ${totals.sales.toFixed(2)} ${selectedCurrency}`,
-      `Operational Inventory Costs (COGS): ${totals.cost.toFixed(2)} ${selectedCurrency}`,
-      `Net Cumulative Profit Margin: ${totals.net.toFixed(2)} ${selectedCurrency} (${totals.margin.toFixed(1)}%)`,
+      `Gross Cumulative Sales: ${showMoney(totals.sales, selectedCurrency)}`,
+      `Operational Inventory Costs (COGS): ${showMoney(totals.cost, selectedCurrency)}`,
+      `Net Cumulative Profit Margin: ${showMoney(totals.net, selectedCurrency)} (${totals.margin.toFixed(1)}%)`,
       "",
       headers.join(','),
       ...rows
@@ -895,7 +739,7 @@ export default function ProfitsDashboard({ language = 'en', currency = 'JOD', on
 
 
 
-  const isDataLoading = firebaseLoading || (supabaseLoading && supabaseInvoices === null);
+  const isDataLoading = firebaseLoading;
 
   return (
     <div 
@@ -920,7 +764,7 @@ export default function ProfitsDashboard({ language = 'en', currency = 'JOD', on
             <button 
               onClick={onClose}
               className="p-2 hover:bg-slate-800 text-slate-400 hover:text-white rounded-lg transition-transform hover:scale-105"
-              title={isAr ? "إغلاق لوحة التحكم" : "Close Dashboard"}
+              title={isAr ? "إغلاق لوحة التحكم" : "Close Dashboard"} aria-label={isAr ? "إغلاق لوحة التحكم" : "Close Dashboard"}
             >
               <X className="w-6 h-6" />
             </button>
@@ -961,7 +805,7 @@ export default function ProfitsDashboard({ language = 'en', currency = 'JOD', on
             
             {/* Currency Selector Buttons with math conversions */}
             <div className="flex items-center gap-1 bg-white p-1 rounded-lg border border-slate-200 shadow-sm">
-              {['JOD', 'ILS', 'USD'].map(curr => (
+              {POS_CURRENCY_CODES.map(curr => (
                 <button
                   key={curr}
                   onClick={() => {
@@ -979,15 +823,6 @@ export default function ProfitsDashboard({ language = 'en', currency = 'JOD', on
               ))}
             </div>
 
-            {/* Sync Refresh Button */}
-            <button
-              onClick={handleRefresh}
-              disabled={localSyncing}
-              className="p-2.5 bg-white border border-slate-200 rounded-lg text-slate-600 hover:text-slate-900 hover:border-slate-300 shadow-sm hover:shadow-md transition-all disabled:opacity-50"
-              title={t.recalculateTooltip}
-            >
-              <RefreshCw className={`w-4 h-4 ${localSyncing ? 'animate-spin text-blue-600' : ''}`} />
-            </button>
 
 
 
@@ -1028,6 +863,24 @@ export default function ProfitsDashboard({ language = 'en', currency = 'JOD', on
             </div>
           ) : (
             <>
+              {(totals.unknownCostLines > 0 || totals.purchases > 0) && (
+                <div className="space-y-2">
+                  {totals.unknownCostLines > 0 && (
+                    <p className="text-xs font-semibold text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-4 py-2.5">
+                      {isAr
+                        ? `${totals.unknownCostLines} سطر مبيع بلا سعر تكلفة مسجّل، فحُسبت تكلفته صفراً والربح المعروض أعلى من الحقيقي. أضف سعر التكلفة للأصناف من شاشة المخزون.`
+                        : `${totals.unknownCostLines} sold line(s) have no cost recorded, so they count as zero cost and profit is overstated. Add unit costs in Inventory.`}
+                    </p>
+                  )}
+                  {totals.purchases > 0 && (
+                    <p className="text-xs text-slate-500">
+                      {isAr ? 'مشتريات الفترة (لا تُخصم من الربح لأنها تدخل المخزون):' : 'Purchases in this period (not deducted from profit; they go into stock):'}{' '}
+                      <span className="font-bold text-slate-700">{showMoney(totals.purchases, selectedCurrency)}</span>
+                    </p>
+                  )}
+                </div>
+              )}
+
               {/* Premium Light-Theme KPI Scoreboard Grid */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                 
@@ -1040,7 +893,7 @@ export default function ProfitsDashboard({ language = 'en', currency = 'JOD', on
                   <div className="space-y-2">
                     <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider block">{t.grossRevenue}</span>
                     <h2 className="text-2xl font-black text-slate-900 tracking-tight">
-                      {getCurrencySymbol(selectedCurrency)} {totals.sales.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      {showMoney(totals.sales, selectedCurrency)}
                     </h2>
                     <p className="text-xs text-slate-400">
                       {t.salesCumulativeDesc}
@@ -1061,7 +914,7 @@ export default function ProfitsDashboard({ language = 'en', currency = 'JOD', on
                   <div className="space-y-2">
                     <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider block">{t.cogs}</span>
                     <h2 className="text-2xl font-black text-slate-900 tracking-tight">
-                      {getCurrencySymbol(selectedCurrency)} {totals.cost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      {showMoney(totals.cost, selectedCurrency)}
                     </h2>
                     <p className="text-xs text-slate-400">
                       {t.acqCostDesc}
@@ -1081,11 +934,11 @@ export default function ProfitsDashboard({ language = 'en', currency = 'JOD', on
                 >
                   <div className="space-y-2">
                     <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider block">{t.netMargin}</span>
-                    <h2 className="text-2xl font-black text-blue-600 tracking-tight">
-                      {getCurrencySymbol(selectedCurrency)} {totals.net.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    <h2 className={`text-2xl font-black tracking-tight ${totals.net < 0 ? 'text-rose-600' : 'text-blue-600'}`}>
+                      {showMoney(totals.net, selectedCurrency)}
                     </h2>
                     <div className="flex items-center gap-1.5">
-                      <span className="font-sans text-xs font-bold px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded animate-pulse">
+                      <span className={`font-sans text-xs font-bold px-2 py-0.5 rounded ${totals.net < 0 ? 'bg-rose-100 text-rose-800' : 'bg-emerald-100 text-emerald-800'}`}>
                         {t.marginLabel} {totals.margin.toFixed(1)}%
                       </span>
                       <span className="text-xs text-slate-400">{t.netOpsMarginDesc}</span>
@@ -1165,7 +1018,7 @@ export default function ProfitsDashboard({ language = 'en', currency = 'JOD', on
                           <div className="flex items-center justify-between pt-1">
                             <span className="text-xs text-slate-500">{t.cumulativeProfitLabel}</span>
                             <span className="text-sm font-black text-teal-700">
-                              {getCurrencySymbol(selectedCurrency)} {productProfitability.hero.profit.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                              {showMoney(productProfitability.hero.profit, selectedCurrency)}
                             </span>
                           </div>
                         </>
@@ -1177,7 +1030,7 @@ export default function ProfitsDashboard({ language = 'en', currency = 'JOD', on
                     {/* Underperforming item */}
                     <div className="bg-orange-50/50 border border-orange-100 rounded-xl p-4 space-y-1.5 text-right">
                       <div className="flex items-center justify-between">
-                        <span className="text-xs font-bold text-orange-950 uppercase tracking-wider bg-orange-100 px-2 py-0.5 rounded text-orange-850">{t.lowestContributor}</span>
+                        <span className="text-xs font-bold text-orange-950 uppercase tracking-wider bg-orange-100 px-2 py-0.5 rounded text-orange-800">{t.lowestContributor}</span>
                         <div className="flex items-center gap-1 text-orange-600">
                           <AlertTriangle className="w-3.5 h-3.5" />
                           <span className="text-[10px] font-bold">{t.underperformer}</span>
@@ -1189,7 +1042,7 @@ export default function ProfitsDashboard({ language = 'en', currency = 'JOD', on
                           <div className="flex items-center justify-between pt-1">
                             <span className="text-xs text-slate-500">{t.cumulativeProfitLabel}</span>
                             <span className="text-sm font-black text-orange-700">
-                              {getCurrencySymbol(selectedCurrency)} {productProfitability.drain.profit.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                              {showMoney(productProfitability.drain.profit, selectedCurrency)}
                             </span>
                           </div>
                         </>
@@ -1206,7 +1059,7 @@ export default function ProfitsDashboard({ language = 'en', currency = 'JOD', on
                           <div key={idx} className="flex items-center justify-between text-xs py-1 px-1.5 hover:bg-slate-50 rounded">
                             <span className="text-slate-600 font-medium truncate max-w-xs">{idx + 1}. {item.name}</span>
                             <span className="text-slate-800 font-bold">
-                              {getCurrencySymbol(selectedCurrency)} {item.profit.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                              {showMoney(item.profit, selectedCurrency)}
                             </span>
                           </div>
                         ))}
@@ -1220,7 +1073,7 @@ export default function ProfitsDashboard({ language = 'en', currency = 'JOD', on
 
               {/* TABLE REVERSION TO ENGLISH (REQUIREMENT 3: Standard clean table columns in English) */}
               <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-                <div className="px-5 py-4 bg-slate-50 border-b border-slate-150 flex flex-col sm:flex-row items-center justify-between gap-3">
+                <div className="px-5 py-4 bg-slate-50 border-b border-slate-100 flex flex-col sm:flex-row items-center justify-between gap-3">
                   <div className="flex items-center gap-2">
                     <Database className="w-4 h-4 text-slate-500" />
                     <h3 className="text-sm font-bold text-slate-800 uppercase tracking-wider">{t.ledgerTitle}</h3>
@@ -1271,15 +1124,15 @@ export default function ProfitsDashboard({ language = 'en', currency = 'JOD', on
                             </td>
                             <td className="py-3 px-5 font-bold text-slate-400">{inv.currency}</td>
                             <td className="py-3 px-5 text-right font-black text-slate-700">
-                              {inv.totalAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                              {showMoney(inv.totalAmount, inv.currency || selectedCurrency)}
                             </td>
                             <td className="py-3 px-5 text-right text-slate-500">
-                              {costPriceConverted.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                              {showMoney(costPriceConverted, selectedCurrency)}
                             </td>
                             <td className="py-3 px-5 text-right">
                               {isSale ? (
                                 <span className="font-extrabold text-blue-600">
-                                  + {profitValConverted.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                  + {showMoney(profitValConverted, selectedCurrency)}
                                 </span>
                               ) : (
                                 <span className="text-slate-400">-</span>

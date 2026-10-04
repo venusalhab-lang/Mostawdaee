@@ -74,7 +74,7 @@ export default function CommandPalette({ isOpen, onClose, language, products, on
             <input
               ref={inputRef}
               type="text"
-              placeholder={t.commandSearchPlaceholder}
+              placeholder={t.commandSearchPlaceholder} aria-label={t.commandSearchPlaceholder}
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               className="flex-1 bg-transparent border-none outline-none text-xl text-gray-900 dark:text-white placeholder-gray-400"
@@ -82,7 +82,7 @@ export default function CommandPalette({ isOpen, onClose, language, products, on
             <div className="flex items-center gap-1 px-2 py-1 bg-gray-100 dark:bg-gray-900 rounded-lg text-[10px] font-bold text-gray-400">
               <Command size={10} /> K
             </div>
-            <button onClick={onClose} className="p-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-xl transition-colors">
+            <button onClick={onClose} className="p-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-xl transition-colors" aria-label={isRtl ? 'إغلاق' : 'Close'}>
               <X size={20} className="text-gray-400" />
             </button>
           </div>

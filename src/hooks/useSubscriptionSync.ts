@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect, useRef } from 'react';
 // @ts-ignore
 import { getSubscription, getProfileById } from '../supabaseClient';
 import { useAuth } from '../components/AuthContext';
+import { subscriptionWindow } from '../lib/subscriptionAccess';
 
 export interface Subscription {
   user_id: string;
@@ -17,7 +18,7 @@ export function useSubscriptionSync(passedUser?: any, passedIsGuest?: boolean) {
   const [loading, setLoading] = useState<boolean>(true);
   const [subscription, setSubscription] = useState<Subscription | null>(null);
   const [profile, setProfile] = useState<any>(null);
-  const [daysRemaining, setDaysRemaining] = useState<number>(365);
+  const [daysRemaining, setDaysRemaining] = useState<number>(0);
   const [hasOnboarded, setHasOnboarded] = useState<boolean>(true);
   // True when the status could not be verified (slow/offline network) and nothing is cached
   const [checkFailed, setCheckFailed] = useState<boolean>(false);
@@ -114,37 +115,33 @@ export function useSubscriptionSync(passedUser?: any, passedIsGuest?: boolean) {
     refreshSubscription();
   }, [supabaseUser?.id, supabaseUser?.uid, isGuest]); // key on the user id, not object identity
 
-  // Compute live subscription checks with strict 25-day free trial boundary
-  const trialStart = subscription?.trial_start_date ? new Date(subscription.trial_start_date).getTime() : Date.now();
-  const trialDurationMs = 25 * 24 * 60 * 60 * 1000;
-  const trialExpiryTime = trialStart + trialDurationMs;
-  const trialDaysLeft = Math.max(0, Math.ceil((trialExpiryTime - Date.now()) / (1000 * 60 * 60 * 24)));
-  
-  // Treat guest preview separately from an actual trial subscription
-  const isGuestPreview = !!isGuest;
-  const isTrialActive = (subscription?.subscription_status === 'trial' && trialDaysLeft > 0);
-
-  // The custom premium attribute allows automatic sync between mobile purchases and PC session verification
-  const isPremiumActive = 
-    (subscription?.subscription_status === 'active' && new Date(subscription.expiry_date).getTime() > Date.now()) ||
-    profile?.is_premium === true ||
-    profile?.is_premium === 'true' ||
-    profile?.role === 'premium' ||
-    profile?.user_role === 'premium' ||
-    profile?.subscription_status === 'active';
+  // Paid access is an active row with a future expiry. Trial access is 25 days from trial_start.
+  // Profile flags do not unlock the app: a missing expiry must not invent a year of premium.
+  const access = subscription
+    ? subscriptionWindow({
+        status: subscription.subscription_status,
+        trialStart: subscription.trial_start_date,
+        expiry: subscription.expiry_date,
+      })
+    : null;
+  const isTrialActive = access?.kind === 'trial';
+  const isPremiumActive = access?.kind === 'paid';
+  const trialDaysLeft = isTrialActive ? access.daysRemaining : 0;
 
   const isSubscribed = isPremiumActive || isTrialActive;
-  const isExpired = !isSubscribed && !(checkFailed && !subscription);
+  // Fail closed: no verified window means no access. The lock screen tells "unverified" apart from "ended".
+  const isExpired = !isSubscribed;
+  const lockReason: 'trial' | 'paid' | 'unverified' = !subscription
+    ? 'unverified'
+    : subscription.subscription_status === 'trial' ? 'trial' : 'paid';
 
-  // Set standard days remaining based on active mode
-  const resolvedDaysRemaining = isPremiumActive 
-    ? (subscription?.expiry_date ? Math.max(0, Math.ceil((new Date(subscription.expiry_date).getTime() - Date.now()) / (1000 * 60 * 60 * 24))) : 365)
-    : (isGuest ? 365 : (subscription?.subscription_status === 'trial' ? trialDaysLeft : 0));
+  const resolvedDaysRemaining = access && access.kind !== 'expired' ? access.daysRemaining : 0;
 
   return {
     loading,
     isSubscribed,
     isExpired,
+    lockReason,
     isTrialActive,
     isPremiumActive,
     trialDaysLeft,

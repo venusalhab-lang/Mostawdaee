@@ -5,7 +5,7 @@ import type { Currency, Invoice, VaultTransaction } from '../types';
  * The vault keeps one independent balance per currency, so no currency is ever
  * mixed with another one.
  */
-export const VAULT_CURRENCIES: Currency[] = ['JOD', 'ILS', 'USD', 'IQD', 'SAR', 'LYD'];
+export const VAULT_CURRENCIES: Currency[] = ['JOD', 'ILS', 'USD', 'IQD', 'SAR', 'LYD', 'EGP'];
 
 /** Error-message prefix used when an expense exceeds the available balance of its currency. */
 export const INSUFFICIENT_VAULT_FUNDS = 'Insufficient vault funds';
@@ -20,6 +20,7 @@ export interface VaultDoc {
   balanceIQD: number;
   balanceSAR: number;
   balanceLYD: number;
+  balanceEGP: number;
   lastUpdated: number;
 }
 
@@ -37,6 +38,7 @@ export function readVaultBalances(data: any): VaultBalances {
     IQD: num(data?.balanceIQD),
     SAR: num(data?.balanceSAR),
     LYD: num(data?.balanceLYD),
+    EGP: num(data?.balanceEGP),
   };
 }
 
@@ -49,6 +51,7 @@ export function buildVaultDoc(balances: VaultBalances, lastUpdated = Date.now())
     balanceIQD: balances.IQD,
     balanceSAR: balances.SAR,
     balanceLYD: balances.LYD,
+    balanceEGP: balances.EGP,
     lastUpdated,
   };
 }
@@ -76,13 +79,16 @@ export function applyVaultDelta(
 export type VaultEntryPlan = Omit<VaultTransaction, 'id' | 'timestamp' | 'balanceAfter'>;
 
 /**
- * Describes the vault movement an invoice must generate.
- * - cash / card / wallet sale  -> income now
- * - credit (آجل) sale          -> NO vault movement (cash comes in later as a customer payment)
- * - purchase                   -> expense now
+ * Describes the cash-vault movement an invoice must generate.
+ * - cash sale / purchase       -> income / expense now
+ * - card / wallet              -> none: the money is in the bank or wallet, not the cash box
+ * - credit (آجل) sale          -> none: cash comes in later as a customer payment
+ * `includeNonCash` reproduces invoices saved before card/wallet were excluded, so deleting them reverses what they posted.
  */
-export function planInvoiceVaultEntry(invoice: Invoice): VaultEntryPlan | null {
+export function planInvoiceVaultEntry(invoice: Invoice, opts: { includeNonCash?: boolean } = {}): VaultEntryPlan | null {
   if (invoice.type === 'sale' && invoice.paymentMethod === 'credit') return null;
+  const nonCash = invoice.paymentMethod === 'card' || invoice.paymentMethod === 'wallet';
+  if (nonCash && !opts.includeNonCash) return null;
 
   const currency = (invoice.currency || 'JOD') as Currency;
   const ref = invoice.invoiceNumber || invoice.id;
