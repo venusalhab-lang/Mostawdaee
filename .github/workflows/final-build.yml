@@ -44,8 +44,14 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '21'
       - run: npm ci
+      - name: Require the phone API origin
+        run: |
+          if [ -z "$VITE_API_BASE_URL" ]; then
+            echo "::error::VITE_API_BASE_URL is empty. The installed app could not reach the server for subscriptions and the assistant."
+            exit 1
+          fi
       - name: Build web app
         run: npm run build
       - name: Sync Capacitor Android project
@@ -63,7 +69,7 @@ jobs:
 
       - name: Build signed AAB
         working-directory: android
-        run: ./gradlew clean bundleRelease --no-daemon
+        run: ./gradlew clean bundleRelease --no-daemon -PversionCode=$((100 + ${{ github.run_number }}))
 
       - name: Upload AAB
         uses: actions/upload-artifact@v4

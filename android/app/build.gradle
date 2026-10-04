@@ -8,7 +8,8 @@ android {
         applicationId "com.mostawdaee.app"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 5
+        // CI passes -PversionCode so every uploaded bundle gets a higher code than the last.
+        versionCode((project.findProperty("versionCode") ?: "5").toString().toInteger())
         versionName "1.0.4"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }

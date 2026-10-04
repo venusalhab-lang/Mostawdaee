@@ -55,7 +55,6 @@
 			<key>CFBundleURLSchemes</key>
 			<array>
 				<string>com.mostawdaee.app</string>
-				<string>com.hamza.mostawdaee</string>
 			</array>
 		</dict>
 	</array>
