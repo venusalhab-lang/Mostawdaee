@@ -1,6 +1,6 @@
 import { apiUrl } from './apiBase';
 
-export const POS_CURRENCY_CODES = ['JOD', 'ILS', 'USD', 'IQD', 'SAR', 'LYD', 'EGP'] as const;
+export const POS_CURRENCY_CODES = ['JOD', 'ILS', 'USD', 'IQD', 'SAR', 'AED', 'LYD', 'EGP'] as const;
 export type PosCurrency = (typeof POS_CURRENCY_CODES)[number];
 
 export const CURRENCY_SYMBOLS: Record<string, string> = {
@@ -9,6 +9,7 @@ export const CURRENCY_SYMBOLS: Record<string, string> = {
   USD: '$',
   IQD: 'د.ع',
   SAR: 'ر.س',
+  AED: 'د.إ',
   LYD: 'د.ل',
   EGP: 'ج.م',
 };
@@ -18,6 +19,7 @@ export const CURRENCY_DECIMALS: Record<string, number> = {
   USD: 2,
   ILS: 2,
   SAR: 2,
+  AED: 2,
   JOD: 3,
   LYD: 3,
   EGP: 2,

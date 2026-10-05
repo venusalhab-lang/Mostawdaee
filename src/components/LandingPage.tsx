@@ -17,6 +17,7 @@ import {
 import Logo from './Logo';
 import { Language } from '../types';
 import { translations } from '../translations';
+import PrivacyPolicyBody from './PrivacyPolicyBody';
 
 interface Props {
   language?: Language;
@@ -427,37 +428,9 @@ export default function LandingPage({ language = 'ar', onEnter = () => {}, darkM
                     </div>
                   )
                 ) : (
-                  isRtl ? (
-                    <div className="space-y-6">
-                      <div className="space-y-2">
-                        <h4 className="font-bold text-sm text-indigo-600 dark:text-indigo-400">1. جمع البيانات ومعالجتها</h4>
-                        <p className="text-gray-600 dark:text-gray-300">نحن نلتزم بمعايير صارمة لحماية البيانات. يجمع التطبيق فقط البيانات الفنية الأساسية المطلوبة لتحسين العرض ثلاثي الأبعاد وأداء التطبيق (مثل نوع الجهاز، إصدار نظام التشغيل، ومقاييس الأداء). لا يتم جمع أي بيانات شخصية حساسة دون موافقتك الصريحة.</p>
-                      </div>
-                      <div className="space-y-2">
-                        <h4 className="font-bold text-sm text-indigo-600 dark:text-indigo-400">2. أمن البيانات وتشفيرها</h4>
-                        <p className="text-gray-600 dark:text-gray-300">يتم تشفير جميع البيانات المنقولة بين التطبيق وخوادمنا الآمنة بالكامل باستخدام بروتوكولات تشفير متقدمة تتماشى مع معايير الصناعة لمنع أي وصول غير مصرح به.</p>
-                      </div>
-                      <div className="space-y-2">
-                        <h4 className="font-bold text-sm text-indigo-600 dark:text-indigo-400">3. الامتثال التنظيمي</h4>
-                        <p className="text-gray-600 dark:text-gray-300">تم تصميم سياسة الخصوصية هذه لتتوافق مع قوانين حماية البيانات والخصوصية الرقمية المعمول بها. نحن نضمن تخزين معلوماتك بشكل آمن وعدم مشاركتها مع أي أطراف ثالثة دون مسوغ قانوني مبرر.</p>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="space-y-6">
-                      <div className="space-y-2">
-                        <h4 className="font-bold text-sm text-indigo-600 dark:text-indigo-400">1. Data Collection and Processing</h4>
-                        <p className="text-gray-600 dark:text-gray-300">We adhere to strict data protection standards. The application only collects essential technical data required to optimize the 3D rendering and application performance (such as device type, OS version, and performance metrics). No sensitive personal data is gathered without your explicit consent.</p>
-                      </div>
-                      <div className="space-y-2">
-                        <h4 className="font-bold text-sm text-indigo-600 dark:text-indigo-400">2. Data Security & Encryption</h4>
-                        <p className="text-gray-600 dark:text-gray-300">All data transmitted between the application and our secure servers is fully encrypted using advanced industry-standard cryptographic protocols to prevent unauthorized access.</p>
-                      </div>
-                      <div className="space-y-2">
-                        <h4 className="font-bold text-sm text-indigo-600 dark:text-indigo-400">3. Regulatory Compliance</h4>
-                        <p className="text-gray-600 dark:text-gray-300">This Privacy Policy is designed to comply with applicable data protection and digital privacy laws. We ensure that your information is stored securely and is never shared with third parties without legal justification.</p>
-                      </div>
-                    </div>
-                  )
+                  <div className="-m-6 sm:-m-8">
+                    <PrivacyPolicyBody ar={isRtl} />
+                  </div>
                 )}
               </div>
 

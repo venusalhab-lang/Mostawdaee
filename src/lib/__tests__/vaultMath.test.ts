@@ -40,8 +40,22 @@ describe('vaultMath balances', () => {
     expect(applyVaultDelta({ balanceJOD: 5 }, 'JOD', -7.5).balanceAfter).toBe(-2.5);
   });
 
+  it('keeps a separate UAE dirham balance rounded to fils', () => {
+    let doc: any = applyVaultDelta({ balanceJOD: 10 }, 'AED', 100.005).doc;
+    doc = applyVaultDelta(doc, 'AED', -0.1).doc;
+    expect(doc.balanceAED).toBe(99.91);
+    const b = readVaultBalances(doc);
+    expect(b.AED).toBe(99.91);
+    expect(b.JOD).toBe(10);
+    expect(b.SAR).toBe(0);
+  });
+
+  it('reads vaults saved before the dirham existed as zero dirhams', () => {
+    expect(readVaultBalances({ balanceJOD: 5, balanceSAR: 7 }).AED).toBe(0);
+  });
+
   it('runs a full multi-currency scenario', () => {
-    let L: any = buildVaultDoc({ JOD: 100, ILS: 0, USD: 50, IQD: 0, SAR: 0, LYD: 0, EGP: 0 });
+    let L: any = buildVaultDoc({ JOD: 100, ILS: 0, USD: 50, IQD: 0, SAR: 0, AED: 0, LYD: 0, EGP: 0 });
     L = applyVaultDelta(L, 'JOD', 25.5).doc;
     L = applyVaultDelta(L, 'JOD', -40).doc;
     L = applyVaultDelta(L, 'USD', -10).doc;
@@ -75,6 +89,12 @@ describe('planInvoiceVaultEntry', () => {
     expect(plan?.type).toBe('expense');
     expect(plan?.amount).toBe(1001);
     expect(plan?.currency).toBe('IQD');
+  });
+
+  it('dirham cash sales enter the dirham balance only', () => {
+    const plan = planInvoiceVaultEntry({ ...baseInvoice, currency: 'AED', totalAmount: 49.995 });
+    expect(plan?.currency).toBe('AED');
+    expect(plan?.amount).toBe(50);
   });
 
   it('sale followed by its reversal returns the balance to zero', () => {

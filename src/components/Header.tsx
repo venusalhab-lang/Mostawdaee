@@ -25,6 +25,7 @@ const CURRENCIES = [
   { code: 'ILS', symbol: '₪', label: 'شيكل في فلسطين', sub: 'New Israeli Shekel', color: 'text-sky-500 bg-sky-50 dark:bg-sky-950/40 border border-sky-200/20' },
   { code: 'SAR', symbol: 'ر.س', label: 'ريال سعودي', sub: 'Saudi Riyal', color: 'text-teal-600 bg-teal-50 dark:bg-teal-950/40 border border-teal-200/20' },
   { code: 'IQD', symbol: 'د.ع', label: 'دينار عراقي', sub: 'Iraqi Dinar', color: 'text-indigo-600 bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-200/20' },
+  { code: 'AED', symbol: 'د.إ', label: 'درهم إماراتي', sub: 'UAE Dirham', color: 'text-cyan-600 bg-cyan-50 dark:bg-cyan-950/40 border border-cyan-200/20' },
   { code: 'LYD', symbol: 'د.ل', label: 'دينار ليبي', sub: 'Libyan Dinar', color: 'text-purple-600 bg-purple-50 dark:bg-purple-950/40 border border-purple-200/20' },
   { code: 'EGP', symbol: 'ج.م', label: 'جنيه مصري', sub: 'Egyptian Pound', color: 'text-rose-600 bg-rose-50 dark:bg-rose-950/40 border border-rose-200/20' },
   { code: 'DEFAULT', symbol: '⚙️', label: 'افتراضي النظام', sub: 'System Default', color: 'text-slate-500 bg-slate-50 dark:bg-slate-900 border border-slate-200' }

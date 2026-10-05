@@ -34,8 +34,6 @@ import { Search } from 'lucide-react';
 import GlobalSearch from './GlobalSearch';
 import { useDeviceType } from '../hooks/useDeviceType';
 import { sounds } from '../lib/sounds';
-import { isAdminEmail } from '../lib/adminAccess';
-
 interface SidebarProps {
   language: Language;
   onLanguageToggle: () => void;
@@ -86,7 +84,7 @@ export default function Sidebar({
   const holdTimerRef = useRef<NodeJS.Timeout | null>(null);
   const progressIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
-  const { user } = useFirebase();
+  const { user, canOpenScreen } = useFirebase();
   const searchInputRef = useRef<HTMLInputElement>(null);
 
   // Expand criteria: Expanded if mobile view, or if hovered, or if locked by logo toggle
@@ -117,10 +115,6 @@ export default function Sidebar({
     return () => window.removeEventListener('keydown', onShortcut);
   }, [isMobile, isExpanded]);
 
-  // Strict admin check for displaying the Control Panel link.
-  // Requirement: only show the admin dashboard link for the exact master email.
-  const isAdminUser = (userEmail: string | null | undefined): boolean => isAdminEmail(userEmail);
-
   const menuItems: MenuItem[] = [
     { id: 'dashboard', icon: LayoutDashboard, label: t.dashboard },
     { id: 'pos', icon: Barcode, label: t.pos },
@@ -136,16 +130,11 @@ export default function Sidebar({
     { id: 'profits-dashboard', icon: TrendingUp, label: isRtl ? "سجل الأرباح" : "Profits Log" },
     { id: 'landed-cost', icon: Calculator, label: isRtl ? "تكلفة الاستيراد" : "Landed Cost" },
     { id: 'google-drive', icon: Cloud, label: isRtl ? "النسخ الاحتياطي والأمان" : "Backup & Security" },
-    { id: 'admin-dashboard', icon: Shield, label: isRtl ? "لوحة التحكم والمشتركين" : "Control Panel & Subscribers" },
+    { id: 'admin-dashboard', icon: Shield, label: isRtl ? "لوحة فريق مستودعي" : "Mostawdaee Console" },
     { id: 'settings', icon: Settings, label: t.settings },
   ];
 
-  const filteredMenuItems = menuItems.filter(item => {
-    if (item.id === 'admin-dashboard') {
-      return isAdminUser(user?.email);
-    }
-    return true;
-  });
+  const filteredMenuItems = menuItems.filter(item => canOpenScreen(item.id));
 
   // Toggle Lock State
   const handleLogoToggleLock = (e: React.MouseEvent) => {

@@ -20,6 +20,7 @@ import { useAuth } from './AuthContext';
 import { supabase } from '../supabaseClient';
 import { APP_NAME_EN, appName } from '../lib/brand';
 import { NATIVE_OAUTH_REDIRECT } from '../lib/nativeAuth';
+import PrivacyPolicyBody from './PrivacyPolicyBody';
 
 interface Props {
   language?: 'en' | 'ar';
@@ -565,71 +566,8 @@ export default function Auth({ language = 'ar', onLanguageToggle = () => {}, onL
                 </button>
               </div>
 
-              {/* Content Body */}
-              <div className="p-6 overflow-y-auto space-y-6 text-sm text-gray-600 leading-relaxed max-h-[60vh]">
-                <p className="text-xs text-gray-400 font-medium">
-                  {isRtl ? "تاريخ آخر تحديث: ٨ يونيو ٢٠٢٦" : "Last updated: June 8, 2026"}
-                </p>
-
-                {/* Section 1 */}
-                <div className="space-y-2">
-                  <div className="flex items-center gap-2 text-gray-900 font-bold text-sm">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-                    <h4>
-                      {isRtl ? "١. المعلومات التي نجمعها" : "1. Information We Collect"}
-                    </h4>
-                  </div>
-                  <p className="ps-3.5 text-gray-600">
-                    {isRtl 
-                      ? "نحن نجمع فقط معلومات الملف الشخصي الأساسية (مثل اسمك وبريدك الإلكتروني) عندما تقوم بتسجيل الدخول باستخدام حساب Google الخاص بك لإنشاء حسابك وإدارته."
-                      : "We only collect basic profile information (such as your name and email address) when you log in using your Google Account to create and manage your account."}
-                  </p>
-                </div>
-
-                {/* Section 2 */}
-                <div className="space-y-2">
-                  <div className="flex items-center gap-2 text-gray-900 font-bold text-sm">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-                    <h4>
-                      {isRtl ? "٢. كيف نستخدم معلوماتك" : "2. How We Use Your Information"}
-                    </h4>
-                  </div>
-                  <p className="ps-3.5 text-gray-600">
-                    {isRtl 
-                      ? "تستخدم معلوماتك بدقة لتقديم خدمات إدارة المستودعات والمحاسبة والحفاظ عليها وتأمينها داخل التطبيق. نحن لا نبيع ولا نشارك بياناتك مع أطراف ثالثة."
-                      : "Your information is strictly used to provide, maintain, and secure your warehouse management and accounting services within the app. We do not sell or share your data with third parties."}
-                  </p>
-                </div>
-
-                {/* Section 3 */}
-                <div className="space-y-2">
-                  <div className="flex items-center gap-2 text-gray-900 font-bold text-sm">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-                    <h4>
-                      {isRtl ? "٣. أمن البيانات" : "3. Data Security"}
-                    </h4>
-                  </div>
-                  <p className="ps-3.5 text-gray-600">
-                    {isRtl 
-                      ? "نقوم بتطبيق تدابير آمنة لحماية بياناتك الشخصية وضمان بقاء بيانات متجرك ومستودعك آمنة."
-                      : "We implement secure measures to protect your personal data and ensure your store and warehouse data remains safe."}
-                  </p>
-                </div>
-
-                {/* Section 4 */}
-                <div className="space-y-2">
-                  <div className="flex items-center gap-2 text-gray-900 font-bold text-sm">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-                    <h4>
-                      {isRtl ? "٤. اتصل بنا" : "4. Contact Us"}
-                    </h4>
-                  </div>
-                  <p className="ps-3.5 text-gray-600">
-                    {isRtl 
-                      ? "إذا كان لديك أي أسئلة حول سياسة الخصوصية هذه، يرجى الاتصال بنا من خلال قنوات الدعم الرسمية لدينا."
-                      : "If you have any questions about this Privacy Policy, please contact us through our official support channels."}
-                  </p>
-                </div>
+              <div className="max-h-[60vh] overflow-y-auto">
+                <PrivacyPolicyBody ar={isRtl} />
               </div>
 
               {/* Footer */}

@@ -43,6 +43,7 @@ const CURRENCY_NAMES: Record<Currency, { ar: string; en: string }> = {
   USD: { ar: 'دولار أمريكي', en: 'US Dollar' },
   IQD: { ar: 'دينار عراقي', en: 'Iraqi Dinar' },
   SAR: { ar: 'ريال سعودي', en: 'Saudi Riyal' },
+  AED: { ar: 'درهم إماراتي', en: 'UAE Dirham' },
   LYD: { ar: 'دينار ليبي', en: 'Libyan Dinar' },
   EGP: { ar: 'جنيه مصري', en: 'Egyptian Pound' },
 };

@@ -12,6 +12,10 @@ import { formatMoney } from '../lib/exchangeRates';
 import { snapshotLineCosts, weightedAverageCost } from '../lib/profits';
 import { planStockReversal, quantitiesByProduct } from '../lib/invoiceReversal';
 import { QueuedInvoice, canQueueOffline, enqueueInvoice, isOfflineError, localSaleShortages, readQueue, writeQueue } from '../lib/offlineQueue';
+import { type Workspace, currentWorkspace, ensureWorkspace, refreshWorkspace, subscribeWorkspace } from '../lib/workspace';
+import { type WorkspaceAction, can as roleCan, canOpenScreen as roleCanOpenScreen } from '../lib/roles';
+import type { PlatformRole } from '../lib/platformStaff';
+import { fetchPlatformRole } from '../lib/adminSubscriptionApi';
 import { INSUFFICIENT_VAULT_FUNDS, applyVaultDelta, buildVaultDoc, planInvoiceVaultEntry, readVaultBalances, roundForCurrency } from '../lib/vaultMath';
 
 // Recursively strips any properties with 'undefined' values, since Firestore errors if passed 'undefined'.
@@ -88,6 +92,26 @@ interface FirebaseContextType {
   logUserActivity: (action: string, details: string, category: 'product' | 'invoice' | 'settings' | 'employee' | 'customer' | 'warehouse' | 'vault' | 'payroll') => Promise<void>;
   login: () => Promise<void>;
   logout: () => Promise<void>;
+  /** The store this account works in; null until it is known for the signed-in user. */
+  workspace: Workspace | null;
+  isStoreOwner: boolean;
+  can: (action: WorkspaceAction) => boolean;
+  canOpenScreen: (screen: string) => boolean;
+  /** Role in the founder's platform team, whatever store the account works in; null for merchants. */
+  platformRole: PlatformRole | null;
+}
+
+// Display preferences a member keeps on this device; the store profile itself belongs to the owner.
+const MEMBER_PREFERENCE_KEYS = ['defaultLanguage', 'darkMode', 'theme', 'enableAnimations', 'aiVerbosity'] as const;
+
+function isMember(): boolean {
+  const role = currentWorkspace()?.role;
+  return !!role && role !== 'owner';
+}
+
+function withMemberPreferences(uid: string, storeSettings: AppSettings): AppSettings {
+  if (!isMember()) return storeSettings;
+  return { ...storeSettings, ...readUserCache<Partial<AppSettings>>(uid, 'member_prefs', {}) };
 }
 
 const FirebaseContext = createContext<FirebaseContextType | undefined>(undefined);
@@ -104,10 +128,20 @@ function syncRejectionMessage(code: string | undefined): string | null {
       ? 'انتهت جلسة الدخول. سجّل الدخول مرة أخرى لحفظ التغييرات.'
       : 'Your session has ended. Sign in again to save changes.';
   }
+  if (code === 'subscription-required' && isMember()) {
+    return ar
+      ? 'اشتراك المتجر منتهٍ، فلم يُحفظ هذا التغيير. تواصل مع مالك المتجر لتجديده.'
+      : "The store's subscription has ended, so this change was not saved. Ask the store owner to renew.";
+  }
   if (code === 'subscription-required') {
     return ar
       ? 'انتهى الاشتراك، فلم يُحفظ هذا التغيير. جدّد الاشتراك من الإعدادات لمتابعة العمل.'
       : 'Your subscription has ended, so this change was not saved. Renew from Settings to continue.';
+  }
+  if (code === 'role-denied') {
+    return ar
+      ? 'صلاحياتك في هذا المتجر لا تسمح بهذا التغيير، فلم يُحفظ. اطلب من مالك المتجر أو المدير تنفيذه.'
+      : 'Your role in this store does not allow this change, so it was not saved. Ask the owner or a manager.';
   }
   if (code === 'permission-denied') {
     return ar
@@ -309,6 +343,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [loading, setLoading] = useState(true);
   const lastUidRef = useRef<string | null>(null);
   const [settings, setSettings] = useState<AppSettings | null>(null);
+  const [workspace, setWorkspace] = useState<Workspace | null>(currentWorkspace());
+  const [platformRole, setPlatformRole] = useState<{ uid: string; role: PlatformRole | null } | null>(null);
   const latestSettingsRef = useRef<AppSettings | null>(null);
   latestSettingsRef.current = settings;
   const [products, setProducts] = useState<Product[]>([]);
@@ -436,6 +472,35 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     };
   }, []);
 
+  useEffect(() => subscribeWorkspace(setWorkspace), []);
+
+  useEffect(() => {
+    if (!user) return;
+    const uid = user.uid;
+    let known: string | null = null;
+    const key = (ws: Workspace) => `${ws.ownerId}:${ws.role}`;
+    void ensureWorkspace(uid).then((ws) => { known = key(ws); });
+    // Another device may add, remove or re-role this account; its books must never mix with another store's.
+    const recheck = () => {
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+      void refreshWorkspace(uid).then((ws) => {
+        if (ws.source !== 'server' || ws.userId !== uid) return;
+        if (known && key(ws) !== known) {
+          clearUserCache(uid);
+          window.location.reload();
+          return;
+        }
+        known = key(ws);
+      });
+    };
+    window.addEventListener('online', recheck);
+    window.addEventListener('focus', recheck);
+    return () => {
+      window.removeEventListener('online', recheck);
+      window.removeEventListener('focus', recheck);
+    };
+  }, [user?.uid]);
+
   useEffect(() => {
     if (!user) {
       setLoading(false);
@@ -544,13 +609,14 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const unsubscribeSettings = onSnapshot(settingsRef, (snap) => {
       if (!isMounted) return;
       if (snap.exists()) {
-        const snapData = snap.data() as AppSettings;
+        const snapData = withMemberPreferences(uid, snap.data() as AppSettings);
         setSettings(snapData);
         try {
           writeUserCache(uid, 'settings', snapData);
         } catch (e) {
           console.error("Local caching failed", e);
         }
+        if (isMember()) return;
 
         // Trigger safe reactive sync to Supabase database
         syncProfileToSupabase(
@@ -580,7 +646,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           };
           repairUserName();
         }
-      } else {
+      } else if (!isMember()) {
         // Initial defaults if none exist
         const writeDefaults = async () => {
           let finalUserName = user.displayName || '';
@@ -1006,6 +1072,14 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   };
 
   const saveSettings = async (newSettings: AppSettings) => {
+    if (user?.uid && isMember()) {
+      const prefs = Object.fromEntries(MEMBER_PREFERENCE_KEYS.map((key) => [key, newSettings[key]]));
+      writeUserCache(user.uid, 'member_prefs', prefs);
+      const next = { ...(settings || newSettings), ...prefs } as AppSettings;
+      setSettings(next);
+      writeUserCache(user.uid, 'settings', next);
+      return;
+    }
     setSettings(newSettings);
     if (user?.uid) {
       writeUserCache(user.uid, 'settings', newSettings);
@@ -2052,6 +2126,20 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
   };
 
+  const activeWorkspace = user && workspace?.userId === user.uid ? workspace : null;
+  const storeRole = activeWorkspace?.role ?? 'owner';
+  const activePlatformRole = user && platformRole?.uid === user.uid ? platformRole.role : null;
+
+  useEffect(() => {
+    if (!user || user.isAnonymous) return;
+    let cancelled = false;
+    const uid = user.uid;
+    void fetchPlatformRole(user as any).then((role) => {
+      if (!cancelled) setPlatformRole({ uid, role });
+    });
+    return () => { cancelled = true; };
+  }, [user?.uid, (user as any)?.email_confirmed_at]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Stable context value: consumers re-render only when real data changes, not on every
   // provider render (the actions only close over the state listed in the deps below).
   const contextValue = useMemo<FirebaseContextType>(() => ({ 
@@ -2094,10 +2182,18 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       recalibrateVault,
       logUserActivity,
       login, 
-      logout 
+      logout,
+      workspace: activeWorkspace,
+      isStoreOwner: storeRole === 'owner',
+      can: (action: WorkspaceAction) => roleCan(storeRole, action),
+      canOpenScreen: (screen: string) => screen === 'admin-dashboard'
+        ? !!activePlatformRole
+        : roleCanOpenScreen(storeRole, screen),
+      platformRole: activePlatformRole,
 }), [
     user, loading, settings, products, invoices, employees, payrollRecords, customers,
-    customerTransactions, vaultTransactions, stockMovements, warehouses, vault, auditLogs,
+    customerTransactions, vaultTransactions, stockMovements, warehouses, vault, auditLogs, activeWorkspace,
+    activePlatformRole,
   ]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (

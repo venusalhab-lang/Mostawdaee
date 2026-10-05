@@ -15,14 +15,16 @@ interface Props {
   expiryDate?: string | null;
   onRefresh: () => Promise<void>;
   onLogout: () => void;
+  /** Set when this account works in someone else's store: only the owner can renew. */
+  member?: { storeName: string; ownerEmail: string; onLeave: () => Promise<void> } | null;
 }
 
 const PRODUCT_ID = 'mostawdaee_premium_100';
 
-export default function SubscriptionExpired({ language, onLanguageToggle, reason, expiryDate, onRefresh, onLogout }: Props) {
+export default function SubscriptionExpired({ language, onLanguageToggle, reason, expiryDate, onRefresh, onLogout, member }: Props) {
   const isRtl = language === 'ar';
   const isNative = Capacitor.isNativePlatform();
-  const [busy, setBusy] = useState<null | 'buy' | 'restore' | 'check'>(null);
+  const [busy, setBusy] = useState<null | 'buy' | 'restore' | 'check' | 'leave'>(null);
 
   const title = reason === 'unverified'
     ? (isRtl ? 'تعذّر التحقق من الاشتراك' : 'Subscription could not be verified')
@@ -30,7 +32,12 @@ export default function SubscriptionExpired({ language, onLanguageToggle, reason
       ? (isRtl ? 'انتهت الفترة التجريبية' : 'Your free trial has ended')
       : (isRtl ? 'انتهى الاشتراك' : 'Your subscription has ended');
 
-  const subtitle = reason === 'unverified'
+  const storeLabel = member?.storeName || (isRtl ? 'المتجر' : 'the store');
+  const subtitle = member && reason !== 'unverified'
+    ? (isRtl
+      ? `اشتراك «${storeLabel}» غير فعّال، فتوقف العمل فيه مؤقتاً. تواصل مع مالك المتجر${member.ownerEmail ? ` (${member.ownerEmail})` : ''} لتجديده، ثم اضغط «إعادة التحقق».`
+      : `The subscription of "${storeLabel}" is not active, so work there is paused. Ask the store owner${member.ownerEmail ? ` (${member.ownerEmail})` : ''} to renew, then press "Check again".`)
+    : reason === 'unverified'
     ? (isRtl
       ? 'لم نتمكن من الوصول إلى الخادم للتأكد من حالة اشتراكك. تحقق من الاتصال ثم أعد المحاولة. بياناتك محفوظة ولم يُحذف شيء.'
       : 'We could not reach the server to confirm your subscription. Check your connection and try again. Your data is safe.')
@@ -42,7 +49,7 @@ export default function SubscriptionExpired({ language, onLanguageToggle, reason
     sounds.playClick();
     setBusy('check');
     try {
-      await syncPaidSubscription().catch(() => {});
+      if (!member) await syncPaidSubscription().catch(() => {});
       await onRefresh();
     } catch {
       toast.error(isRtl ? 'تعذّر الاتصال بالخادم.' : 'Could not reach the server.');
@@ -101,6 +108,17 @@ export default function SubscriptionExpired({ language, onLanguageToggle, reason
     }
   };
 
+  const leave = async () => {
+    if (!member) return;
+    sounds.playClick();
+    setBusy('leave');
+    try {
+      await member.onLeave();
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const formattedExpiry = expiryDate && Number.isFinite(Date.parse(expiryDate))
     ? new Date(expiryDate).toLocaleDateString(isRtl ? 'ar' : 'en-US', { day: 'numeric', month: 'long', year: 'numeric' })
     : null;
@@ -138,7 +156,7 @@ export default function SubscriptionExpired({ language, onLanguageToggle, reason
           )}
         </div>
 
-        {reason !== 'unverified' && (
+        {reason !== 'unverified' && !member && (
           isNative ? (
             <div className="space-y-3">
               <button
@@ -186,9 +204,15 @@ export default function SubscriptionExpired({ language, onLanguageToggle, reason
           </button>
         </div>
 
+        {member && (
+          <button type="button" onClick={leave} disabled={busy !== null} className={`w-full ${secondary}`}>
+            <span>{busy === 'leave' ? (isRtl ? 'جاري المغادرة...' : 'Leaving...') : (isRtl ? `مغادرة «${storeLabel}» والعودة إلى حسابي` : `Leave "${storeLabel}" and return to my account`)}</span>
+          </button>
+        )}
+
         <div className="text-center">
           <a
-            href="mailto:support@mostawdaee.com?subject=Subscription"
+            href="mailto:venusalhab@gmail.com?subject=Subscription"
             className="text-[11px] text-indigo-400 hover:underline font-bold inline-flex items-center gap-1"
           >
             <HelpCircle size={12} />

@@ -3,6 +3,7 @@ import { useState, useCallback, useEffect, useRef } from 'react';
 import { getSubscription, getProfileById } from '../supabaseClient';
 import { useAuth } from '../components/AuthContext';
 import { subscriptionWindow } from '../lib/subscriptionAccess';
+import { ensureWorkspace } from '../lib/workspace';
 
 export interface Subscription {
   user_id: string;
@@ -66,13 +67,19 @@ export function useSubscriptionSync(passedUser?: any, passedIsGuest?: boolean) {
         console.warn("[SubscriptionSync] Could not load user profile metadata:", pErr);
       }
 
+      // Members work under the store owner's subscription, never their own.
+      const workspace = await ensureWorkspace(userId);
+      const readSubscription = workspace.role === 'owner'
+        ? () => getSubscription(userId)
+        : () => Promise.resolve(workspace.subscription);
+
       // 2. Implement a 3.5-second query safety timeout for getSubscription
       const queryWithTimeout = new Promise<any>((resolve, reject) => {
         const timeoutId = setTimeout(() => {
           reject(new Error('subscription_query_timeout'));
         }, 3500);
 
-        getSubscription(userId)
+        readSubscription()
           .then((res) => {
             clearTimeout(timeoutId);
             resolve(res);

@@ -60,6 +60,7 @@ const QUICK_CASH: Record<string, number[]> = {
   USD: [10, 20, 50, 100],
   ILS: [20, 50, 100, 200],
   SAR: [10, 50, 100, 500],
+  AED: [10, 50, 100, 200],
   JOD: [5, 10, 20, 50],
   LYD: [5, 10, 20, 50],
   EGP: [50, 100, 200, 500],
@@ -74,7 +75,8 @@ export default function POSSystem({ language }: POSSystemProps) {
   const t = translations[language];
   const isRtl = language === 'ar';
   
-  const { products, saveInvoice, settings, saveProduct, warehouses, user } = useFirebase();
+  const { products, saveInvoice, settings, saveProduct, warehouses, user, can } = useFirebase();
+  const canManageCatalog = can('manage_catalog');
   const storeCurrency = isPosCurrency(settings?.currency) ? settings.currency : 'JOD';
   const [posCurrency, setPosCurrency] = useState<PosCurrency>(() => {
     try {
@@ -637,6 +639,7 @@ export default function POSSystem({ language }: POSSystemProps) {
         toast.info(isRtl ? 'تم تركيز ماسح الباركود' : 'Barcode scanner focused');
       } else if (e.key === 'F7') {
         e.preventDefault();
+        if (!canManageCatalog) return;
         setQuickRegForm({
           sku: '',
           name: '',
@@ -757,6 +760,14 @@ export default function POSSystem({ language }: POSSystemProps) {
     }
 
     // 3. Fallback to Fast Registration Modal if completely unfound or API fails
+    if (!apiProductFound && !canManageCatalog) {
+      playBeep('error');
+      setBarcodeInput('');
+      toast.error(isRtl
+        ? `الرمز "${query}" غير مسجل في المخزون. اطلب من المدير إضافة الصنف.`
+        : `SKU "${query}" is not in inventory. Ask a manager to add the product.`);
+      return;
+    }
     if (!apiProductFound) {
       playBeep('error');
       setQuickRegForm({
@@ -948,6 +959,7 @@ export default function POSSystem({ language }: POSSystemProps) {
       USD: '$',
       IQD: 'د.ع',
       SAR: 'ر.س',
+      AED: 'د.إ',
       LYD: 'د.ل',
       EGP: 'ج.م',
     };
@@ -1216,7 +1228,7 @@ export default function POSSystem({ language }: POSSystemProps) {
             <span>{isRtl ? 'وضع البيع المباشر' : 'Direct POS Sales'}</span>
           </button>
           
-          <button 
+          {can('back_office') && <button 
             type="button"
             onClick={() => {
               setPosMode('purchase');
@@ -1231,7 +1243,7 @@ export default function POSSystem({ language }: POSSystemProps) {
           >
             <Truck size={15} />
             <span>{isRtl ? 'وضع توريد البضائع' : 'Stock Supply Mode'}</span>
-          </button>
+          </button>}
         </div>
       </div>
 
@@ -1297,6 +1309,7 @@ export default function POSSystem({ language }: POSSystemProps) {
                 🔍 {isRtl ? 'البحث بالاسم' : 'Lookup Item'}
               </button>
 
+              {canManageCatalog && <>
               <span className="h-4 w-[1px] bg-slate-200 dark:bg-white/10" />
 
               <button
@@ -1319,6 +1332,7 @@ export default function POSSystem({ language }: POSSystemProps) {
               >
                 ✨ {isRtl ? 'تسجيل منتج سريع (F7)' : 'Quick Register (F7)'}
               </button>
+              </>}
             </div>
           </div>
 

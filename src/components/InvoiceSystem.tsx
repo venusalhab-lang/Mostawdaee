@@ -55,7 +55,7 @@ interface InvoiceSystemProps {
 export default function InvoiceSystem({ language, initialView = 'list' }: InvoiceSystemProps) {
   const t = translations[language];
   const isRtl = language === 'ar';
-  const { products, invoices, saveInvoice, settings, user, customers } = useFirebase();
+  const { products, invoices, saveInvoice, settings, user, customers, can } = useFirebase();
   const { preferredCurrency } = usePreferredCurrency();
   const activeCurrency = preferredCurrency === 'DEFAULT' ? (settings?.currency || 'JOD') : preferredCurrency;
 
@@ -675,12 +675,12 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
                       >
                         {t.sale}
                       </button>
-                      <button
+                      {can('back_office') && <button
                         onClick={() => { setInvoiceType('purchase'); setInvoiceItems([]); setPaymentMethod('cash'); setSelectedCustomerId(''); }}
                         className={`px-4 py-2 rounded-xl text-xs font-black transition-all ${invoiceType === 'purchase' ? 'bg-white dark:bg-gray-700 text-emerald-600 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`}
                       >
                         {t.purchase}
-                      </button>
+                      </button>}
                     </div>
                   </div>
 

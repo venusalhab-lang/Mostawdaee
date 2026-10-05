@@ -4,9 +4,12 @@ import {
   Sparkles, Palette, Zap, Moon, Sun, Monitor, 
   ShieldCheck, Bell, Database, Download, RefreshCw, Upload,
   Type, Volume2, Info, Copy, Check, FileText, DatabaseZap, CheckSquare, AlertTriangle,
-  Phone, MapPin, Mail, Crown
+  Phone, MapPin, Mail, Crown, Users, LifeBuoy, UserCog
 } from 'lucide-react';
 import SubscriptionSettings from './SubscriptionSettings';
+import AccountSettings from './AccountSettings';
+import { TeamManager } from './TeamSettings';
+import SupportCenter from './SupportCenter';
 import { Language, AppSettings, Currency } from '../types';
 import { CURRENCY_SYMBOLS, POS_CURRENCY_CODES, formatMoney, roundMoney } from '../lib/exchangeRates';
 import { readVaultBalances } from '../lib/vaultMath';
@@ -17,6 +20,8 @@ import { useFirebase } from './FirebaseProvider';
 import { toast } from 'sonner';
 import { db } from '../services/firebase';
 import { doc, setDoc } from '../lib/supabaseDocs';
+import { restoreVaultBalance, vaultRestoreMessage } from '../lib/vaultRestore';
+import { buildStoreBackup, isStoreBackup, restoreStoreBackup } from '../lib/storeBackup';
 
 interface Props {
   language: Language;
@@ -25,7 +30,10 @@ interface Props {
   onSaveSettings: (settings: AppSettings) => Promise<void> | void;
 }
 
-type SettingsSection = 'profile' | 'visuals' | 'inventory' | 'notifications' | 'subscription' | 'system';
+type SettingsSection = 'profile' | 'visuals' | 'inventory' | 'notifications' | 'subscription' | 'team' | 'support' | 'account' | 'system';
+
+// These sections save their own changes; inside the settings form their forms would also submit it.
+const SELF_CONTAINED_SECTIONS = new Set<SettingsSection>(['subscription', 'team', 'support', 'account']);
 
 export default function Settings({ language, onLanguageToggle, settings, onSaveSettings }: Props) {
   const t = translations[language];
@@ -142,25 +150,19 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
     { id: 'inventory', label: t.safetyLogic, icon: ShieldCheck },
     { id: 'notifications', label: t.notifications, icon: Bell },
     { id: 'subscription', label: language === 'ar' ? 'الاشتراك' : 'Subscription', icon: Crown },
+    { id: 'team', label: language === 'ar' ? 'الفريق' : 'Team', icon: Users },
+    { id: 'support', label: language === 'ar' ? 'الدعم الفني' : 'Support', icon: LifeBuoy },
+    { id: 'account', label: language === 'ar' ? 'الحساب والخصوصية' : 'Account & privacy', icon: UserCog },
     { id: 'system', label: t.systemManagement, icon: Database },
   ];
 
   const handleExportData = () => {
-    const payload = {
-      products,
-      invoices,
-      employees,
-      payrollRecords,
-      customers,
-      customerTransactions,
-      vaultTransactions,
-      warehouses,
-      vault,
+    const payload = buildStoreBackup({
+      creator: user?.email,
       settings: formData,
-      timestamp: Date.now(),
-      creator: user?.email || 'Anonymous',
-      app: 'Mostawdaee System'
-    };
+      products, invoices, employees, payrollRecords, customers, customerTransactions,
+      vaultTransactions, warehouses, vault,
+    });
 
     const data = JSON.stringify(payload, null, 2);
     const blob = new Blob([data], { type: 'application/json' });
@@ -182,8 +184,7 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
         const text = event.target?.result as string;
         const backupData = JSON.parse(text);
 
-        // Validation check
-        if (!backupData || (backupData.app !== 'Mostawdaee System' && !backupData.products && !backupData.settings)) {
+        if (!isStoreBackup(backupData)) {
           toast.error(isRtl ? "هذا الملف غير متوافق مع نظام مستودعي الذكي!" : "Invalid file structure! Not a valid Mostawdaee System backup.");
           return;
         }
@@ -204,72 +205,12 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
     try {
       toast.info(isRtl ? "جاري البدء في استعادة البيانات المحلية..." : "Starting local system restore...");
 
-      // 1. Settings
-      if (selectedBackupForLocalRestore.settings) {
-        await saveSettings(selectedBackupForLocalRestore.settings);
-        setFormData(selectedBackupForLocalRestore.settings);
-      }
-
-      // 2. Warehouses
-      if (Array.isArray(selectedBackupForLocalRestore.warehouses)) {
-        for (const wh of selectedBackupForLocalRestore.warehouses) {
-          await saveWarehouse(wh);
-        }
-      }
-
-      // 3. Products
-      if (Array.isArray(selectedBackupForLocalRestore.products)) {
-        for (const prod of selectedBackupForLocalRestore.products) {
-          await saveProduct(prod, { skipMovement: true });
-        }
-      }
-
-      // 4. Invoices
-      if (Array.isArray(selectedBackupForLocalRestore.invoices)) {
-        for (const item of selectedBackupForLocalRestore.invoices) {
-          await saveInvoice(item, { restoreOnly: true });
-        }
-      }
-
-      // 5. Employees
-      if (Array.isArray(selectedBackupForLocalRestore.employees)) {
-        for (const emp of selectedBackupForLocalRestore.employees) {
-          await saveEmployee(emp);
-        }
-      }
-
-      // 6. Payroll Records
-      if (Array.isArray(selectedBackupForLocalRestore.payrollRecords)) {
-        for (const pr of selectedBackupForLocalRestore.payrollRecords) {
-          await savePayrollRecord(pr);
-        }
-      }
-
-      // 7. Customers
-      if (Array.isArray(selectedBackupForLocalRestore.customers)) {
-        for (const cust of selectedBackupForLocalRestore.customers) {
-          await saveCustomer(cust, { restore: true });
-        }
-      }
-
-      // 8. Customer Transactions
-      if (Array.isArray(selectedBackupForLocalRestore.customerTransactions)) {
-        for (const tx of selectedBackupForLocalRestore.customerTransactions) {
-          await saveCustomerTransaction(tx);
-        }
-      }
-
-      // 9. Vault Transactions (using setDoc directly)
-      if (Array.isArray(selectedBackupForLocalRestore.vaultTransactions)) {
-        for (const tx of selectedBackupForLocalRestore.vaultTransactions) {
-          await setDoc(doc(db, 'users', user.uid, 'vault_records', tx.id), tx);
-        }
-      }
-
-      // 10. Vault Balance State direct restoration
-      if (selectedBackupForLocalRestore.vault) {
-        await setDoc(doc(db, 'users', user.uid, 'settings', 'vault'), selectedBackupForLocalRestore.vault);
-      }
+      await restoreStoreBackup(selectedBackupForLocalRestore, {
+        saveSettings, saveWarehouse, saveProduct, saveInvoice, saveEmployee, savePayrollRecord, saveCustomer, saveCustomerTransaction,
+        saveVaultRecord: (tx) => setDoc(doc(db, 'users', user.uid, 'vault_records', tx.id), tx),
+        restoreVault: (v) => restoreVaultBalance(db, user.uid, v),
+      });
+      if (selectedBackupForLocalRestore.settings) setFormData(selectedBackupForLocalRestore.settings);
 
       toast.success(
         isRtl 
@@ -279,7 +220,7 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
       setSelectedBackupForLocalRestore(null);
     } catch (err: any) {
       console.error(err);
-      toast.error(isRtl ? `فشل الاستعادة: ${err.message}` : `Restore failed: ${err.message}`);
+      toast.error(vaultRestoreMessage(err, isRtl) || (isRtl ? `فشل الاستعادة: ${err.message}` : `Restore failed: ${err.message}`));
     } finally {
       setIsLocalRestoreInProgress(false);
     }
@@ -359,6 +300,20 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
 
         {/* Content Area */}
         <main className="lg:col-span-9">
+          {SELF_CONTAINED_SECTIONS.has(activeSection) ? (
+            <motion.div
+              key={activeSection}
+              initial={{ opacity: 0, x: 20 }}
+              animate={{ opacity: 1, x: 0 }}
+              transition={{ type: 'spring', stiffness: 300, damping: 30 }}
+              className="bg-white/40 dark:bg-gray-900/40 backdrop-blur-xl p-8 rounded-[2.5rem] border border-white/20 dark:border-gray-800/50 shadow-2xl space-y-8"
+            >
+              {activeSection === 'subscription' && <SubscriptionSettings language={language} />}
+              {activeSection === 'team' && <TeamManager language={language} />}
+              {activeSection === 'support' && <SupportCenter language={language} />}
+              {activeSection === 'account' && <AccountSettings language={language} />}
+            </motion.div>
+          ) : (
           <form onSubmit={handleSubmit} className="space-y-8">
             <motion.div
               key={activeSection}
@@ -897,8 +852,6 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
                 </div>
               )}
 
-              {activeSection === 'subscription' && <SubscriptionSettings language={language} />}
-
               {activeSection === 'system' && (
                 <div className="space-y-8">
                   <div className="flex items-center gap-3">
@@ -925,6 +878,7 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
                           <option value="USD">USD ($)</option>
                           <option value="IQD">IQD (د.ع)</option>
                           <option value="SAR">SAR (ر.س)</option>
+                          <option value="AED">AED (د.إ)</option>
                           <option value="LYD">LYD (د.ل)</option>
                           <option value="EGP">EGP (ج.م)</option>
                         </select>
@@ -1130,6 +1084,7 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
               </TactileButton>
             </div>
           </form>
+          )}
         </main>
       </div>
 

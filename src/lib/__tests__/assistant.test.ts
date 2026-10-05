@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Customer, Invoice, Product } from '../../types';
-import { buildSystemInstruction, sanitizeAssistantAction, sanitizeContext, sanitizeHistory } from '../assistantContext';
+import { buildSystemInstruction, formatStoreData, sanitizeAssistantAction, sanitizeContext, sanitizeHistory } from '../assistantContext';
 import { answerLocally, buildAssistantContext, detectIntent, summarizeSales, type AssistantData } from '../assistantLocal';
 
 const product = (over: Partial<Product>): Product => ({
@@ -27,9 +27,33 @@ describe('buildSystemInstruction', () => {
     const prompt = buildSystemInstruction({ context, verbosity: 'concise', language: 'ar' });
     expect(prompt).not.toContain('${');
     expect(prompt).toContain('6291041500213');
-    expect(prompt).toContain('"totalDebt":250');
+    expect(prompt).toContain('\nأبو أحمد|250|ILS\n');
     expect(prompt).toContain('default currency JOD');
     expect(prompt).toContain('Reply in Arabic');
+  });
+});
+
+describe('formatStoreData', () => {
+  it('writes amounts exactly, numbers products from 1, and keeps names from breaking a row', () => {
+    const ctx = sanitizeContext({
+      defaultCurrency: 'AED',
+      products: [
+        { id: 'uuid-a', name: 'شاي | أخضر\nممتاز', sku: '62', quantity: 7, unitCost: 1.125, sellingPrice: 2.005, currency: 'AED', status: 'Low Stock' },
+        { id: 'uuid-b', name: 'قهوة', quantity: 0, unitCost: 0, sellingPrice: 10, currency: 'IQD', status: 'Out of Stock' },
+      ],
+      productsTotal: 450,
+      customers: [{ name: 'علي', totalDebt: 1250.5, currency: 'JOD' }],
+      vault: { AED: 99.99 },
+      sales: [{ currency: 'AED', todayTotal: 12.345, todayCount: 2, monthTotal: 900, monthCount: 40 }],
+    });
+    const rows = formatStoreData(ctx).split('\n');
+    expect(rows).toContain('1|شاي أخضر ممتاز|62|7|1.125|2.005|AED|Low Stock');
+    expect(rows).toContain('2|قهوة||0|0|10|IQD|Out of Stock');
+    expect(rows).toContain('products_total: 450 (listed: 2)');
+    expect(rows).toContain('علي|1250.5|JOD');
+    expect(rows).toContain('VAULT: AED 99.99');
+    expect(rows).toContain('AED|12.345|2|900|40');
+    expect(formatStoreData(ctx)).not.toContain('uuid-');
   });
 });
 
@@ -84,9 +108,12 @@ describe('sanitizeAssistantAction', () => {
     expect(action).toEqual({ type: 'add_product', product: { name: 'شاي', quantity: 0 } });
   });
 
-  it('rejects deletes of products that were not in the context', () => {
-    expect(sanitizeAssistantAction({ type: 'delete_product', productId: 'ghost' }, ctx)).toBeNull();
-    expect(sanitizeAssistantAction({ type: 'delete_product', productId: 'p1' }, ctx)).toEqual({ type: 'delete_product', productId: 'p1' });
+  it('maps a delete back to the id of the product it was sent as, and nothing else', () => {
+    expect(sanitizeAssistantAction({ type: 'delete_product', productRef: 1 }, ctx)).toEqual({ type: 'delete_product', productId: 'p1' });
+    for (const productRef of [0, 2, -1, 1.5, 'p1', null]) {
+      expect(sanitizeAssistantAction({ type: 'delete_product', productRef }, ctx)).toBeNull();
+    }
+    expect(sanitizeAssistantAction({ type: 'delete_product', productId: 'p1' }, ctx)).toBeNull();
   });
 
   it('rejects invoices and unknown actions', () => {

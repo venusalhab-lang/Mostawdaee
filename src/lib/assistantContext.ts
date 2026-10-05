@@ -5,7 +5,7 @@ import type { Currency } from '../types';
  * validates the model's proposed action). Keep this file free of browser-only imports.
  */
 
-export const ASSISTANT_CURRENCIES: readonly Currency[] = ['JOD', 'ILS', 'USD', 'IQD', 'SAR', 'LYD', 'EGP'];
+export const ASSISTANT_CURRENCIES: readonly Currency[] = ['JOD', 'ILS', 'USD', 'IQD', 'SAR', 'AED', 'LYD', 'EGP'];
 
 export const ASSISTANT_LIMITS = {
   products: 300,
@@ -140,6 +140,29 @@ export function sanitizeHistory(history: unknown, message: string): AssistantTur
   return turns.slice(-ASSISTANT_LIMITS.historyTurns);
 }
 
+const cell = (value: string) => value.replace(/[|\s]+/g, ' ').trim();
+
+/**
+ * The store data as compact rows. It is resent with every question, so field names are not
+ * repeated per row and products are numbered (ref) instead of carrying their 36-character ids.
+ * Amounts are written exactly as stored.
+ */
+export function formatStoreData(context: AssistantContext): string {
+  const vault = Object.entries(context.vault).map(([code, value]) => `${code} ${value}`).join('; ');
+  return [
+    `products_total: ${context.productsTotal} (listed: ${context.products.length})`,
+    'PRODUCTS ref|name|sku|qty|unit_cost|selling_price|currency|status',
+    ...context.products.map((p, i) =>
+      [i + 1, cell(p.name), cell(p.sku), p.quantity, p.unitCost, p.sellingPrice, p.currency, cell(p.status)].join('|')),
+    `customers_total: ${context.customersTotal} (listed: ${context.customers.length})`,
+    'CUSTOMERS name|debt|currency',
+    ...context.customers.map((c) => [cell(c.name), c.totalDebt, c.currency].join('|')),
+    `VAULT: ${vault || 'no balances'}`,
+    'SALES currency|today_total|today_count|month_total|month_count',
+    ...context.sales.map((s) => [s.currency, s.todayTotal, s.todayCount, s.monthTotal, s.monthCount].join('|')),
+  ].join('\n');
+}
+
 export function buildSystemInstruction(input: {
   context: AssistantContext;
   verbosity: 'concise' | 'detailed';
@@ -163,19 +186,19 @@ export function buildSystemInstruction(input: {
     '',
     'Actions: only when the user explicitly asks to add a product, delete a product, or add a customer, include "action".',
     '- add_product: copy only values the user stated (name, sku, quantity, unitCost, sellingPrice). Leave the others out. Never make up a barcode, quantity or price.',
-    '- delete_product: set productId to the id of an existing product from STORE_DATA. If several match or none match, ask instead of acting.',
+    '- delete_product: set productRef to the ref number of an existing product from PRODUCTS. If several match or none match, ask instead of acting.',
     '- add_customer: name, and phone/currency only if stated.',
     '- The app shows the user a confirmation card; nothing is saved until they confirm. Say that it is waiting for confirmation, not that it is done.',
     '- Invoices, payments, stock changes and vault movements cannot be done from the assistant. Point the user to the matching screen.',
     '',
     `STORE_DATA (default currency ${context.defaultCurrency}):`,
-    JSON.stringify(context),
+    formatStoreData(context),
   ].join('\n');
 }
 
 /**
  * Accepts only well-formed actions. Numbers the user did not state stay undefined, and a
- * delete must point at a product that exists in the context that was sent.
+ * delete must name the ref of a product in the context that was sent; it is mapped back to its id.
  */
 export function sanitizeAssistantAction(raw: any, context: Pick<AssistantContext, 'products'>): AssistantAction | null {
   if (!raw || typeof raw !== 'object') return null;
@@ -195,9 +218,10 @@ export function sanitizeAssistantAction(raw: any, context: Pick<AssistantContext
     };
   }
   if (raw.type === 'delete_product') {
-    const productId = text(raw.productId, 64);
-    if (!productId || !context.products.some((p) => p.id === productId)) return null;
-    return { type: 'delete_product', productId };
+    const ref = Number(raw.productRef);
+    const product = Number.isInteger(ref) && ref >= 1 ? context.products[ref - 1] : undefined;
+    if (!product?.id) return null;
+    return { type: 'delete_product', productId: product.id };
   }
   if (raw.type === 'add_customer') {
     const name = text(raw.customer?.name);

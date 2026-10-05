@@ -1,11 +1,12 @@
 import type { Currency, Invoice, VaultTransaction } from '../types';
+import { currencyDecimals } from './exchangeRates';
 
 /**
  * Single source of truth for vault (الخزنة) arithmetic.
  * The vault keeps one independent balance per currency, so no currency is ever
  * mixed with another one.
  */
-export const VAULT_CURRENCIES: Currency[] = ['JOD', 'ILS', 'USD', 'IQD', 'SAR', 'LYD', 'EGP'];
+export const VAULT_CURRENCIES: Currency[] = ['JOD', 'ILS', 'USD', 'IQD', 'SAR', 'AED', 'LYD', 'EGP'];
 
 /** Error-message prefix used when an expense exceeds the available balance of its currency. */
 export const INSUFFICIENT_VAULT_FUNDS = 'Insufficient vault funds';
@@ -19,6 +20,7 @@ export interface VaultDoc {
   balanceUSD: number;
   balanceIQD: number;
   balanceSAR: number;
+  balanceAED: number;
   balanceLYD: number;
   balanceEGP: number;
   lastUpdated: number;
@@ -37,6 +39,7 @@ export function readVaultBalances(data: any): VaultBalances {
     USD: num(data?.balanceUSD),
     IQD: num(data?.balanceIQD),
     SAR: num(data?.balanceSAR),
+    AED: num(data?.balanceAED),
     LYD: num(data?.balanceLYD),
     EGP: num(data?.balanceEGP),
   };
@@ -50,16 +53,16 @@ export function buildVaultDoc(balances: VaultBalances, lastUpdated = Date.now())
     balanceUSD: balances.USD,
     balanceIQD: balances.IQD,
     balanceSAR: balances.SAR,
+    balanceAED: balances.AED,
     balanceLYD: balances.LYD,
     balanceEGP: balances.EGP,
     lastUpdated,
   };
 }
 
-/** Rounding that matches each currency's real decimals (IQD 0, JOD/LYD 3, others 2). */
+/** Rounding that matches each currency's real decimals (see CURRENCY_DECIMALS). */
 export function roundForCurrency(value: number, currency: Currency): number {
-  const decimals = currency === 'IQD' ? 0 : currency === 'JOD' || currency === 'LYD' ? 3 : 2;
-  const f = Math.pow(10, decimals);
+  const f = Math.pow(10, currencyDecimals(currency));
   return Math.round((value + Number.EPSILON) * f) / f;
 }
 

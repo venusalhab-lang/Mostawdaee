@@ -25,7 +25,6 @@ import { sounds } from './lib/sounds';
 import { Coins, LayoutDashboard, Package, Users, Sparkles, MessageSquare, Plus, Settings as SettingsIcon } from 'lucide-react';
 import QuickActionModal from './components/QuickActionModal';
 import CommandPalette from './components/CommandPalette';
-import AdminProtectedRoute from './components/AdminProtectedRoute';
 import { isVerifiedAdmin } from './lib/adminAccess';
 import { NATIVE_OAUTH_REDIRECT } from './lib/nativeAuth';
 import { claimOAuthCallback, oauthProviderError, readOAuthCallbackParams, urlLooksLikeOAuthCallback } from './lib/completeOAuthSession';
@@ -33,6 +32,10 @@ import { Browser } from '@capacitor/browser';
 import { useSubscriptionSync } from './hooks/useSubscriptionSync';
 import { usePlayBillingSync } from './hooks/usePlayBillingSync';
 import SubscriptionExpired from './components/SubscriptionExpired';
+import { MembershipSettings, PendingInvites } from './components/TeamSettings';
+import { homeScreen } from './lib/roles';
+import { leaveStore, teamErrorMessage } from './lib/workspace';
+import { pendingSalesBlockSwitch, switchStore } from './lib/storeSwitch';
 
 const HomeDesk = lazy(() => import('./components/HomeDesk'));
 const POSSystem = lazy(() => import('./components/POSSystem'));
@@ -68,6 +71,9 @@ export default function App() {
     vault,
     vaultTransactions,
     logout: firebaseLogout,
+    workspace,
+    isStoreOwner,
+    canOpenScreen,
   } = useFirebase();
 
   const [language, setLanguage] = useState<'ar' | 'en'>('ar');
@@ -162,6 +168,12 @@ export default function App() {
       setLastNonAiScreen(activeScreen);
     }
   }, [activeScreen]);
+
+  // Every way of changing screens (menu, search, shortcuts, back button) lands here.
+  const storeRole = workspace?.role ?? 'owner';
+  useEffect(() => {
+    if (!canOpenScreen(activeScreen)) setActiveScreen(homeScreen(storeRole));
+  }, [activeScreen, storeRole]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
@@ -274,6 +286,12 @@ export default function App() {
     }
     if (!(POS_CURRENCY_CODES as readonly string[]).includes(code)) return;
     const next = code as PosCurrency;
+    if (!isStoreOwner) {
+      if (settings?.currency && next !== settings.currency) {
+        toast.info(isRtl ? 'عملة النظام يحددها مالك المتجر.' : 'The store owner sets the system currency.', { id: 'member-currency' });
+      }
+      return;
+    }
     setPreferredCurrency(next);
     if (settings?.currency === next) return;
     const base: AppSettings = settings ?? {
@@ -544,8 +562,8 @@ const signUpWithEmail = async (emailVal: string, passwordVal: string) => {
     refreshToken: async () => {},
   };
 
-  // 1. Loading State Splash
-  if (dbLoading) {
+  // 1. Loading State Splash (members must not glimpse owner screens before their role is known)
+  if (dbLoading || (hasRealSession && !workspace)) {
     return (
       <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center p-4 text-white font-sans selection:bg-indigo-500/20">
         <div className="relative w-16 h-16 mb-6">
@@ -583,6 +601,25 @@ const signUpWithEmail = async (emailVal: string, passwordVal: string) => {
           expiryDate={lockReason === 'trial' ? null : subscription?.expiry_date}
           onRefresh={refreshSubscription}
           onLogout={handleSignOut}
+          member={workspace && workspace.role !== 'owner' ? {
+            storeName: workspace.storeName,
+            ownerEmail: workspace.ownerEmail,
+            onLeave: async () => {
+              if (!user) return;
+              const pending = pendingSalesBlockSwitch(user.uid);
+              if (pending > 0) {
+                toast.error(isRtl
+                  ? `توجد ${pending} عملية بيع على هذا الجهاز لم تُرسل بعد. اتصل بالإنترنت وانتظر إرسالها أولاً.`
+                  : `${pending} sale(s) on this device have not been sent yet. Connect and wait for them first.`);
+                return;
+              }
+              try {
+                await switchStore(user.uid, leaveStore);
+              } catch (error) {
+                toast.error(teamErrorMessage(error, isRtl));
+              }
+            },
+          } : null}
         />
       </AuthContext.Provider>
     );
@@ -603,6 +640,7 @@ const signUpWithEmail = async (emailVal: string, passwordVal: string) => {
 
   // 3. Render screen handler
   const renderScreen = (screenName = activeScreen) => {
+    if (!canOpenScreen(screenName)) return null;
     switch (screenName) {
       case 'dashboard':
         return (
@@ -689,12 +727,9 @@ const signUpWithEmail = async (emailVal: string, passwordVal: string) => {
           </div>
         );
       case 'admin-dashboard':
-        return (
-          <AdminProtectedRoute>
-            <AdminDashboard language={language} />
-          </AdminProtectedRoute>
-        );
+        return <AdminDashboard language={language} />;
       case 'settings':
+        if (!isStoreOwner) return <MembershipSettings language={language} onLanguageToggle={toggleLanguage} />;
         return (
           <Settings 
             language={language} 
@@ -788,6 +823,8 @@ const signUpWithEmail = async (emailVal: string, passwordVal: string) => {
           >
 
 
+            <PendingInvites language={language} />
+
             {/* Render Active Screen Content Stage with premium framer-motion transitions */}
             <div className={activeScreen === 'ai-assistant' ? 'hidden' : 'text-gray-900 dark:text-gray-100 pb-8'}>
               <Suspense
@@ -868,7 +905,7 @@ const signUpWithEmail = async (emailVal: string, passwordVal: string) => {
             <div className="flex-1 flex justify-around items-center">
               
               {/* Item 1: Home (الرئيسية) */}
-              <button
+              {canOpenScreen('dashboard') && <button
                 onClick={() => {
                   sounds.playClick();
                   setActiveScreen('dashboard');
@@ -883,10 +920,10 @@ const signUpWithEmail = async (emailVal: string, passwordVal: string) => {
                 <span className="text-[10px] font-black mt-1">
                   {isRtl ? 'الرئيسية' : 'Home'}
                 </span>
-              </button>
+              </button>}
 
               {/* Item 2: Inventory (المخزون) */}
-              <button
+              {canOpenScreen('inventory') && <button
                 onClick={() => {
                   sounds.playClick();
                   setActiveScreen('inventory');
@@ -901,7 +938,7 @@ const signUpWithEmail = async (emailVal: string, passwordVal: string) => {
                 <span className="text-[10px] font-black mt-1">
                   {isRtl ? 'المخزون' : 'Inventory'}
                 </span>
-              </button>
+              </button>}
 
             </div>
 
@@ -923,7 +960,7 @@ const signUpWithEmail = async (emailVal: string, passwordVal: string) => {
             <div className="flex-1 flex justify-around items-center">
 
               {/* Item 3: Customers (العملاء) */}
-              <button
+              {canOpenScreen('customers') && <button
                 onClick={() => {
                   sounds.playClick();
                   setActiveScreen('customers');
@@ -938,7 +975,7 @@ const signUpWithEmail = async (emailVal: string, passwordVal: string) => {
                 <span className="text-[10px] font-black mt-1">
                   {isRtl ? 'العملاء' : 'Customers'}
                 </span>
-              </button>
+              </button>}
 
               {/* Item 4: Settings (الإعدادات) */}
               <button

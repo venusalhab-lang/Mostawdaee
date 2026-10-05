@@ -1,5 +1,6 @@
 import { supabase } from '../supabaseClient';
 import { isOfflineError } from './offlineQueue';
+import { ensureWorkspace, resetWorkspace } from './workspace';
 
 export const db = { kind: 'supabase-docs' as const };
 
@@ -20,20 +21,29 @@ export interface CollectionRef {
   collection: string;
 }
 
-/** 'cached' re-emits from the in-memory copy; 'reload' reads the whole collection from the server. */
-type Listener = (mode: 'cached' | 'reload') => void;
+/**
+ * 'cached' re-emits from the in-memory copy; 'reload' reads the whole collection from the server;
+ * 'shared' also reads it, but joins a read of the same collection that is already running.
+ */
+type Listener = (mode: 'cached' | 'reload' | 'shared') => void;
 
 const listeners = new Map<string, Set<Listener>>();
 let channel: { unsubscribe: () => void } | null = null;
 let channelUid: string | null = null;
 let channelPending: Promise<void> | null = null;
 let reportedProblem: string | null = null;
+/** True while realtime is subscribed; while it is, the cache is kept current row by row. */
+let channelLive = false;
+let channelWasLive = false;
+let hiddenAt = 0;
+/** A phone may drop the realtime socket in the background without telling us. */
+export const STALE_AFTER_HIDDEN_MS = 60_000;
 
 export const SYNC_PROBLEM_EVENT = 'mostawdaee-sync-problem';
 
 function reportProblem(error: { code?: string }) {
   const code = error?.code;
-  if (code !== 'schema-missing' && code !== 'permission-denied' && code !== 'unauthenticated' && code !== 'subscription-required') return;
+  if (code !== 'schema-missing' && code !== 'permission-denied' && code !== 'role-denied' && code !== 'unauthenticated' && code !== 'subscription-required') return;
   if (reportedProblem === code || typeof window === 'undefined') return;
   reportedProblem = code;
   window.dispatchEvent(new CustomEvent(SYNC_PROBLEM_EVENT, { detail: code }));
@@ -45,9 +55,13 @@ export function resetSync() {
   channel = null;
   channelUid = null;
   channelPending = null;
+  channelLive = false;
+  channelWasLive = false;
   reportedProblem = null;
   listeners.clear();
   collectionCache.clear();
+  inflight.clear();
+  resetWorkspace();
 }
 
 export function doc(_db: unknown, root: string, _uid: string, collection: string, id: string): DocRef {
@@ -71,6 +85,12 @@ function schemaError(error: { message?: string; code?: string; details?: string 
   }
   if (/subscription required/i.test(text)) {
     return Object.assign(new Error('Subscription required'), { code: 'subscription-required' });
+  }
+  if (/role not allowed/i.test(text)) {
+    return Object.assign(new Error('Your role in this store does not allow this change'), { code: 'role-denied' });
+  }
+  if (/vault is newer/i.test(text)) {
+    return Object.assign(new Error('vault is newer'), { code: 'vault-newer' });
   }
   if (/append-only/i.test(text)) {
     return Object.assign(new Error('The activity log cannot be changed'), { code: 'permission-denied' });
@@ -115,6 +135,7 @@ class QuerySnapshot {
   }
 }
 
+/** The store owner whose documents this session reads; members read their owner's books. */
 async function requireUid(): Promise<string> {
   let result: { data: { session: any }; error?: any };
   try {
@@ -131,7 +152,7 @@ async function requireUid(): Promise<string> {
     }
     throw Object.assign(new Error('No active session'), { code: 'unauthenticated' });
   }
-  return uid;
+  return (await ensureWorkspace(uid)).ownerId;
 }
 
 async function fetchDoc(ref: DocRef) {
@@ -208,8 +229,45 @@ async function fetchCollection(name: string) {
   }
 }
 
-function notify(collectionName: string, mode: 'cached' | 'reload' = 'reload') {
+const inflight = new Map<string, Promise<CollectionRow[]>>();
+
+/** Several screens open the same collection at once; they share one download. */
+function sharedFetchCollection(name: string) {
+  let pending = inflight.get(name);
+  if (!pending) {
+    pending = fetchCollection(name).finally(() => inflight.delete(name));
+    inflight.set(name, pending);
+  }
+  return pending;
+}
+
+function notify(collectionName: string, mode: 'cached' | 'reload' | 'shared' = 'reload') {
   listeners.get(collectionName)?.forEach((listener) => listener(mode));
+}
+
+/** Re-reads every open collection once, after realtime may have missed changes. */
+function refreshOpenCollections() {
+  for (const name of [...collectionCache.keys()]) if (!listeners.has(name)) collectionCache.delete(name);
+  for (const name of listeners.keys()) notify(name, 'shared');
+}
+
+let windowWatchInstalled = false;
+
+function installWindowWatch() {
+  if (windowWatchInstalled || typeof window === 'undefined' || typeof document === 'undefined') return;
+  windowWatchInstalled = true;
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') {
+      hiddenAt = Date.now();
+      return;
+    }
+    if (!channelLive || (hiddenAt && Date.now() - hiddenAt > STALE_AFTER_HIDDEN_MS)) refreshOpenCollections();
+    hiddenAt = 0;
+  });
+  window.addEventListener('focus', () => {
+    if (!channelLive) refreshOpenCollections();
+  });
+  window.addEventListener('online', refreshOpenCollections);
 }
 
 async function openChannel() {
@@ -238,7 +296,13 @@ async function openChannel() {
         }
       },
     )
-    .subscribe();
+    .subscribe((status: string) => {
+      channelLive = status === 'SUBSCRIBED';
+      if (!channelLive) return;
+      // Rejoining after a drop: changes made while disconnected never arrived as events.
+      if (channelWasLive) refreshOpenCollections();
+      channelWasLive = true;
+    });
 }
 
 // Every listener calls this at once on login; one shared promise keeps it to a single channel.
@@ -258,14 +322,15 @@ export function onSnapshot(
   onError?: (error: any) => void,
 ) {
   let active = true;
-  const emit = async (mode: 'cached' | 'reload' = 'reload') => {
+  const emit = async (mode: 'cached' | 'reload' | 'shared' = 'reload') => {
     try {
       const cached = mode === 'cached' ? collectionCache.get(ref.collection) : undefined;
       if (ref.kind === 'doc') {
         const row = cached ? cached.get(ref.id) ?? null : await fetchDoc(ref);
         if (active) onNext(new DocumentSnapshot(row));
       } else {
-        const rows = (cached && cachedRows(ref.collection)) || await fetchCollection(ref.collection);
+        const rows = (cached && cachedRows(ref.collection))
+          || await (mode === 'shared' ? sharedFetchCollection(ref.collection) : fetchCollection(ref.collection));
         if (active) onNext(new QuerySnapshot(rows));
       }
     } catch (error) {
@@ -278,14 +343,13 @@ export function onSnapshot(
   const set = listeners.get(ref.collection) || new Set<Listener>();
   set.add(listener);
   listeners.set(ref.collection, set);
-  void emit();
+  installWindowWatch();
+  void emit(channelLive && collectionCache.has(ref.collection) ? 'cached' : 'shared');
   void ensureChannel().catch((error) => onError?.(error));
-  const onFocus = () => { void emit('reload'); };
-  if (typeof window !== 'undefined') window.addEventListener('focus', onFocus);
   return () => {
     active = false;
     set.delete(listener);
-    if (typeof window !== 'undefined') window.removeEventListener('focus', onFocus);
+    if (set.size === 0 && listeners.get(ref.collection) === set) listeners.delete(ref.collection);
   };
 }
 

@@ -1,10 +1,15 @@
-import { useState } from 'react';
-import { Barcode, ClipboardCheck, ShoppingBag, Users } from 'lucide-react';
-import type { AppSettings, Currency, Customer, Invoice, Language, Product, StockMovement, Vault, VaultTransaction } from '../types';
+import { useEffect, useState } from 'react';
+import { Barcode, ChevronLeft, ChevronRight, ClipboardCheck, ShoppingBag, Users } from 'lucide-react';
+import type {
+  AppSettings, Cheque, Currency, Customer, CustomerTransaction, Invoice, Language, PayrollRecord, Product, StockMovement, Vault, VaultTransaction,
+} from '../types';
 import { useFirebase } from './FirebaseProvider';
 import { usePreferredCurrency } from './CurrencyContext';
 import { formatMoney, POS_CURRENCY_CODES } from '../lib/exchangeRates';
 import { readVaultBalances } from '../lib/vaultMath';
+import { loadCheques } from '../lib/chequesStore';
+import { readQueue } from '../lib/offlineQueue';
+import { CHEQUE_HORIZON_DAYS, EXPIRY_HORIZON_DAYS, STALE_DEBT_DAYS, type HomeTask, homeTasks } from '../lib/homeTasks';
 import {
   amountInCurrency,
   asideMoney,
@@ -34,6 +39,7 @@ const CURRENCY_NAMES: Record<string, { ar: string; en: string }> = {
   USD: { ar: 'دولار أمريكي', en: 'US dollar' },
   IQD: { ar: 'دينار عراقي', en: 'Iraqi dinar' },
   SAR: { ar: 'ريال سعودي', en: 'Saudi riyal' },
+  AED: { ar: 'درهم إماراتي', en: 'UAE dirham' },
   LYD: { ar: 'دينار ليبي', en: 'Libyan dinar' },
   EGP: { ar: 'جنيه مصري', en: 'Egyptian pound' },
 };
@@ -47,6 +53,15 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 
 function openScreen(screen: string) {
   window.dispatchEvent(new CustomEvent('change-screen', { detail: screen }));
+}
+
+function openAddProduct() {
+  openScreen('inventory');
+  // Inventory loads on demand, so the open event is repeated until its listener is mounted.
+  // Repeating is safe: the listener only opens the form.
+  for (const delay of [300, 800, 1600]) {
+    window.setTimeout(() => window.dispatchEvent(new CustomEvent('open-add-product')), delay);
+  }
 }
 
 function money(amount: number, currency: string, isRtl: boolean) {
@@ -298,55 +313,208 @@ function MoneyLines({ rows, isRtl, pulse }: { rows: MoneyRow[]; isRtl: boolean; 
   );
 }
 
-function SalesChart({ points, currency }: { points: { day: number; amount: number }[]; currency: string }) {
+function SalesChart({
+  points,
+  currency,
+  locale,
+  today,
+  isRtl,
+}: {
+  points: { day: number; amount: number }[];
+  currency: string;
+  locale: string;
+  today: number;
+  isRtl: boolean;
+}) {
   const max = Math.max(...points.map((point) => point.amount), 0);
-  if (max <= 0) {
-    return null;
-  }
-  const width = 320;
-  const height = 96;
-  const gap = 6;
-  const barWidth = Math.max(4, (width - gap * (points.length - 1)) / Math.max(points.length, 1));
+  const todayStart = startOfLocalDay(today);
+  const byWeekday = points.length <= 8;
   return (
-    <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-28" role="img" aria-label={currency}>
-      {points.map((point, index) => {
-        const barHeight = Math.max(2, (point.amount / max) * (height - 8));
-        const x = index * (barWidth + gap);
-        const y = height - barHeight;
+    <div className="flex items-end gap-1.5" dir="ltr" role="img" aria-label={currency}>
+      {points.map((point) => {
+        const isToday = point.day === todayStart;
+        const ratio = max > 0 ? point.amount / max : 0;
+        const label = new Date(point.day).toLocaleDateString(locale, byWeekday ? { weekday: 'short' } : { day: 'numeric' });
+        const full = new Date(point.day).toLocaleDateString(locale, { weekday: 'long', day: 'numeric', month: 'short' });
+        const amountLabel = point.amount > 0 ? money(point.amount, currency, isRtl) : (isRtl ? 'لا مبيعات' : 'No sales');
         return (
-          <rect
-            key={point.day}
-            x={x}
-            y={y}
-            width={barWidth}
-            height={barHeight}
-            rx={4}
-            className={point.amount > 0 ? 'fill-indigo-500' : 'fill-slate-200 dark:fill-slate-700'}
-          />
+          <div key={point.day} className="flex-1 min-w-0 flex flex-col items-center gap-1.5" title={`${full}: ${amountLabel}`}>
+            <div className="h-24 w-full flex items-end">
+              <div
+                className={`w-full rounded-md ${
+                  point.amount <= 0
+                    ? 'bg-slate-200 dark:bg-slate-700'
+                    : isToday
+                      ? 'bg-indigo-600'
+                      : 'bg-indigo-300 dark:bg-indigo-400/70'
+                }`}
+                style={point.amount > 0 ? { height: `${Math.max(12, ratio * 100)}%` } : { height: '4px' }}
+              />
+            </div>
+            <span className={`w-full truncate text-center text-[10px] leading-none ${
+              isToday ? 'font-black text-indigo-700 dark:text-indigo-300' : 'font-bold text-slate-400'
+            }`}>
+              {label}
+            </span>
+          </div>
         );
       })}
-    </svg>
+    </div>
+  );
+}
+
+const TASKS_SHOWN = 6;
+
+function taskTitle(task: HomeTask, isRtl: boolean): string {
+  switch (task.kind) {
+    case 'pending_uploads': return isRtl ? 'مبيعات على هذا الجهاز لم تُرسل بعد' : 'Sales on this device not sent yet';
+    case 'cheques_in': return isRtl ? `شيكات واردة مستحقة خلال ${CHEQUE_HORIZON_DAYS} أيام` : `Incoming cheques due within ${CHEQUE_HORIZON_DAYS} days`;
+    case 'cheques_out': return isRtl ? `شيكات صادرة مستحقة خلال ${CHEQUE_HORIZON_DAYS} أيام` : `Outgoing cheques due within ${CHEQUE_HORIZON_DAYS} days`;
+    case 'out_of_stock': return isRtl ? 'أصناف نافدة' : 'Out of stock';
+    case 'expiring': return isRtl ? `صلاحية تنتهي خلال ${EXPIRY_HORIZON_DAYS} أيام` : `Expiring within ${EXPIRY_HORIZON_DAYS} days`;
+    case 'payroll_due': return isRtl ? 'رواتب مستحقة لم تُدفع' : 'Salaries due, not paid';
+    case 'stale_debts': return isRtl ? `ديون بلا دفعة منذ ${STALE_DEBT_DAYS} يوماً أو أكثر` : `Debts with no payment for ${STALE_DEBT_DAYS}+ days`;
+    case 'low_stock': return isRtl ? 'أصناف تحت الحد' : 'Low stock';
+  }
+}
+
+function taskNote(task: HomeTask, isRtl: boolean): string {
+  if (task.kind === 'pending_uploads') {
+    return isRtl ? 'تُرسل وحدها عند عودة الاتصال. لا تسجّل الخروج قبل ذلك.' : 'They send on their own once online. Do not sign out before then.';
+  }
+  if (task.overdue === 0) return '';
+  if (task.kind === 'expiring') return isRtl ? `${task.overdue} منتهية الصلاحية` : `${task.overdue} already expired`;
+  return isRtl ? `${task.overdue} متأخر` : `${task.overdue} overdue`;
+}
+
+function TodayTasks({ tasks, isRtl }: { tasks: HomeTask[]; isRtl: boolean }) {
+  const shown = tasks.slice(0, TASKS_SHOWN);
+  const Chevron = isRtl ? ChevronLeft : ChevronRight;
+  return (
+    <section className="rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-white/10 p-5" aria-label={isRtl ? 'مهام اليوم' : "Today's tasks"}>
+      <div className="flex items-center justify-between text-xs font-bold text-slate-400 mb-2">
+        <span>{isRtl ? 'مهام اليوم' : "Today's tasks"}</span>
+        {tasks.length > shown.length && (
+          <span>{isRtl ? `${shown.length} من ${tasks.length}` : `${shown.length} of ${tasks.length}`}</span>
+        )}
+      </div>
+      {shown.length === 0 ? (
+        <p className="text-sm text-slate-500">
+          {isRtl ? 'لا شيء يحتاج تدخلك اليوم.' : 'Nothing needs your attention today.'}
+        </p>
+      ) : (
+        <ul className="divide-y divide-slate-100 dark:divide-white/5">
+          {shown.map((task) => {
+            const note = taskNote(task, isRtl);
+            const detail = [
+              ...task.money.map((row) => money(row.amount, row.currency, isRtl)),
+              task.names.join(isRtl ? '، ' : ', '),
+            ].filter(Boolean).join(' · ');
+            const body = (
+              <>
+                <span
+                  className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${task.severity === 'urgent' ? 'bg-rose-500' : 'bg-amber-400'}`}
+                  aria-hidden="true"
+                />
+                <span className="min-w-0 flex-1">
+                  <span className="flex items-baseline gap-2">
+                    <span className="text-sm font-bold text-slate-800 dark:text-slate-100">{taskTitle(task, isRtl)}</span>
+                    <span className="text-sm font-black font-mono text-slate-500">{task.count}</span>
+                  </span>
+                  {detail && <span className="block text-xs text-slate-500 mt-0.5 truncate font-mono">{detail}</span>}
+                  {note && (
+                    <span className={`block text-xs mt-0.5 ${task.overdue > 0 ? 'text-rose-600 dark:text-rose-400 font-bold' : 'text-slate-400'}`}>
+                      {note}
+                    </span>
+                  )}
+                </span>
+                {task.screen && <Chevron size={16} className="mt-1 shrink-0 text-slate-300" aria-hidden="true" />}
+              </>
+            );
+            return (
+              <li key={task.kind}>
+                {task.screen ? (
+                  <button
+                    type="button"
+                    onClick={() => openScreen(task.screen!)}
+                    className="w-full py-2.5 flex items-start gap-3 text-start hover:bg-slate-50 dark:hover:bg-white/5 rounded-xl -mx-2 px-2"
+                  >
+                    {body}
+                  </button>
+                ) : (
+                  <div className="py-2.5 flex items-start gap-3">{body}</div>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+function FirstSteps({ isRtl }: { isRtl: boolean }) {
+  const action = 'px-4 py-2 rounded-xl bg-slate-900 text-white dark:bg-white dark:text-slate-900 text-sm font-black';
+  return (
+    <section className="rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-white/10 p-5" aria-label={isRtl ? 'البداية' : 'Getting started'}>
+      <p className="text-sm font-bold text-slate-800 dark:text-slate-100">
+        {isRtl ? 'أضف صنفاً، ثم سجّل أول عملية بيع.' : 'Add a product, then record the first sale.'}
+      </p>
+      <div className="mt-3 flex flex-wrap gap-2">
+        <button type="button" onClick={openAddProduct} className={action}>
+          {isRtl ? 'إضافة صنف' : 'Add a product'}
+        </button>
+        <button type="button" onClick={() => openScreen('pos')} className={action}>
+          {isRtl ? 'أول عملية بيع' : 'First sale'}
+        </button>
+      </div>
+    </section>
   );
 }
 
 export default function HomeDesk({ language, settings }: Props) {
   const isRtl = language === 'ar';
   const [range, setRange] = useState<HomeRange>('day');
+  const [cheques, setCheques] = useState<Cheque[] | null>(null);
   const {
+    user,
     products = [],
     transactions = [],
     customers = [],
+    customerTransactions = [],
+    payrollRecords = [],
     vault,
     vaultTransactions = [],
     stockMovements = [],
+    canOpenScreen,
   } = useFirebase() as unknown as {
+    user: { uid?: string } | null;
     products: Product[];
     transactions: Invoice[];
     customers: Customer[];
+    customerTransactions: CustomerTransaction[];
+    payrollRecords: PayrollRecord[];
     vault: Vault | null;
     vaultTransactions: VaultTransaction[];
     stockMovements: StockMovement[];
+    canOpenScreen: (screen: string) => boolean;
   };
+
+  useEffect(() => {
+    const uid = user?.uid;
+    if (!uid) {
+      setCheques([]);
+      return;
+    }
+    let cancelled = false;
+    setCheques(null);
+    loadCheques(uid).then((rows) => {
+      if (!cancelled) setCheques(rows);
+    }).catch(() => {
+      if (!cancelled) setCheques(null);
+    });
+    return () => { cancelled = true; };
+  }, [user?.uid]);
 
   const { preferredCurrency } = usePreferredCurrency();
   const activeCode = preferredCurrency !== 'DEFAULT' && (POS_CURRENCY_CODES as readonly string[]).includes(preferredCurrency)
@@ -393,6 +561,45 @@ export default function HomeDesk({ language, settings }: Props) {
       balanceRows,
     };
   })();
+
+  const tasks = homeTasks({
+    now,
+    storeCurrency,
+    products,
+    globalLowStock: settings.lowStockThreshold,
+    cheques: cheques === null ? null : cheques.map((cheque) => ({
+      type: cheque.type,
+      status: cheque.status,
+      amount: cheque.amount,
+      currency: cheque.currency,
+      dueDate: cheque.dueDate,
+      contactName: cheque.contactName,
+      drawerName: cheque.drawerName,
+    })),
+    customers: customers.map((customer) => ({
+      id: customer.id,
+      name: customer.name,
+      totalDebt: customer.totalDebt,
+      currency: customer.currency,
+      createdAt: customer.createdAt,
+    })),
+    customerTransactions: customerTransactions.map((tx) => ({
+      customerId: tx.customerId,
+      type: tx.type,
+      date: tx.date,
+    })),
+    payroll: canOpenScreen('employees')
+      ? payrollRecords.map((record) => ({
+        employeeName: record.employeeName,
+        netSalary: record.netSalary,
+        currency: record.currency,
+        paymentStatus: record.paymentStatus,
+        paymentDate: record.paymentDate,
+      }))
+      : null,
+    pendingUploads: user?.uid ? readQueue(user.uid).length : 0,
+  });
+  const isNewStore = products.length === 0;
 
   const copy = {
     day: isRtl ? 'اليوم' : 'Today',
@@ -485,6 +692,9 @@ export default function HomeDesk({ language, settings }: Props) {
         </div>
       </div>
 
+      {isNewStore && <FirstSteps isRtl={isRtl} />}
+      {(tasks.length > 0 || !isNewStore) && <TodayTasks tasks={tasks} isRtl={isRtl} />}
+
       <SalesPulseBar
         tone={desk.pulse.tone}
         percent={desk.pulse.percent}
@@ -561,7 +771,9 @@ export default function HomeDesk({ language, settings }: Props) {
             </div>
           </div>
           <p className="text-sm text-slate-500 mt-3">
-            {stockClear ? copy.stockOk : stockProblems.join(' · ')}
+            {products.length === 0
+              ? (isRtl ? 'لا أصناف بعد.' : 'No products yet.')
+              : stockClear ? copy.stockOk : stockProblems.join(' · ')}
           </p>
         </button>
 
@@ -611,7 +823,7 @@ export default function HomeDesk({ language, settings }: Props) {
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
         <section className="lg:col-span-3 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-white/10 p-5">
           <div className="text-xs font-bold text-slate-400 mb-3">{copy.chart}</div>
-          <SalesChart points={desk.points} currency={storeCurrency} />
+          <SalesChart points={desk.points} currency={storeCurrency} locale={locale} today={now} isRtl={isRtl} />
           {desk.points.every((point) => point.amount === 0) && (
             <p className="text-sm text-slate-500">{copy.noChart}</p>
           )}

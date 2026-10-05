@@ -41,8 +41,8 @@ const premiumFeatures = [
   {
     titleAr: 'دعم متعدد العملات',
     titleEn: 'Multi-Currency Support',
-    descAr: 'خزنة وديون ومبيعات منفصلة لكل عملة: JOD وILS وUSD وIQD وSAR وLYD وEGP.',
-    descEn: 'Separate vault, debts and sales per currency: JOD, ILS, USD, IQD, SAR, LYD and EGP.',
+    descAr: 'خزنة وديون ومبيعات منفصلة لكل عملة: JOD وILS وUSD وIQD وSAR وAED وLYD وEGP.',
+    descEn: 'Separate vault, debts and sales per currency: JOD, ILS, USD, IQD, SAR, AED, LYD and EGP.',
     color: 'from-emerald-500 to-teal-400',
   },
   {

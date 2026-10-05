@@ -1,6 +1,6 @@
 -- Cheques register. Run once in the Supabase SQL editor; safe to run again.
 -- Run after supabase_production_setup.sql (writes require public.has_access()).
--- Each account sees only its own cheques. Status changes follow the same rules as src/lib/cheques.ts.
+-- Each store sees only its own cheques; owners and managers work on them, cashiers do not. Status changes follow the same rules as src/lib/cheques.ts.
 
 BEGIN;
 
@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS public.cheques (
     cheque_number TEXT NOT NULL CHECK (length(btrim(cheque_number)) BETWEEN 1 AND 40),
     bank_name TEXT NOT NULL CHECK (length(btrim(bank_name)) BETWEEN 1 AND 120),
     amount NUMERIC(18, 3) NOT NULL CHECK (amount > 0),
-    currency TEXT NOT NULL DEFAULT 'ILS' CHECK (currency IN ('JOD', 'ILS', 'USD', 'IQD', 'SAR', 'LYD', 'EGP')),
+    currency TEXT NOT NULL DEFAULT 'ILS' CHECK (currency IN ('JOD', 'ILS', 'USD', 'IQD', 'SAR', 'AED', 'LYD', 'EGP')),
     due_date DATE NOT NULL,
     type TEXT NOT NULL CHECK (type IN ('incoming', 'outgoing')),
     status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'cashed', 'bounced', 'endorsed', 'returned')),
@@ -29,6 +29,11 @@ CREATE TABLE IF NOT EXISTS public.cheques (
     CONSTRAINT cheques_endorse_incoming_only CHECK (status <> 'endorsed' OR type = 'incoming')
 );
 
+-- CREATE TABLE IF NOT EXISTS keeps an older currency list; replace it so new currencies are accepted.
+ALTER TABLE public.cheques DROP CONSTRAINT IF EXISTS cheques_currency_check;
+ALTER TABLE public.cheques ADD CONSTRAINT cheques_currency_check
+    CHECK (currency IN ('JOD', 'ILS', 'USD', 'IQD', 'SAR', 'AED', 'LYD', 'EGP'));
+
 -- The same cheque cannot be registered twice for one account.
 CREATE UNIQUE INDEX IF NOT EXISTS cheques_unique_per_bank
     ON public.cheques (user_id, type, lower(btrim(bank_name)), btrim(cheque_number));
@@ -39,13 +44,13 @@ REVOKE ALL ON public.cheques FROM anon;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.cheques TO authenticated;
 
 DROP POLICY IF EXISTS cheques_select_own ON public.cheques;
-CREATE POLICY cheques_select_own ON public.cheques FOR SELECT USING (auth.uid() = user_id);
+CREATE POLICY cheques_select_own ON public.cheques FOR SELECT USING ((SELECT public.workspace_owner()) = user_id AND (SELECT public.workspace_can_manage()));
 DROP POLICY IF EXISTS cheques_insert_own ON public.cheques;
-CREATE POLICY cheques_insert_own ON public.cheques FOR INSERT WITH CHECK (auth.uid() = user_id AND public.has_access());
+CREATE POLICY cheques_insert_own ON public.cheques FOR INSERT WITH CHECK ((SELECT public.workspace_owner()) = user_id AND (SELECT public.workspace_can_manage()) AND public.has_access());
 DROP POLICY IF EXISTS cheques_update_own ON public.cheques;
-CREATE POLICY cheques_update_own ON public.cheques FOR UPDATE USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id AND public.has_access());
+CREATE POLICY cheques_update_own ON public.cheques FOR UPDATE USING ((SELECT public.workspace_owner()) = user_id AND (SELECT public.workspace_can_manage())) WITH CHECK ((SELECT public.workspace_owner()) = user_id AND (SELECT public.workspace_can_manage()) AND public.has_access());
 DROP POLICY IF EXISTS cheques_delete_pending_own ON public.cheques;
-CREATE POLICY cheques_delete_pending_own ON public.cheques FOR DELETE USING (auth.uid() = user_id AND status = 'pending' AND public.has_access());
+CREATE POLICY cheques_delete_pending_own ON public.cheques FOR DELETE USING ((SELECT public.workspace_owner()) = user_id AND (SELECT public.workspace_can_manage()) AND status = 'pending' AND public.has_access());
 
 CREATE OR REPLACE FUNCTION public.guard_cheque_writes()
 RETURNS trigger

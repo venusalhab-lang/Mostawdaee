@@ -6,6 +6,7 @@ const NAMES: Record<PosCurrency, { ar: string; en: string }> = {
   USD: { ar: 'دولار أمريكي', en: 'US dollar' },
   IQD: { ar: 'دينار عراقي', en: 'Iraqi dinar' },
   SAR: { ar: 'ريال سعودي', en: 'Saudi riyal' },
+  AED: { ar: 'درهم إماراتي', en: 'UAE dirham' },
   LYD: { ar: 'دينار ليبي', en: 'Libyan dinar' },
   EGP: { ar: 'جنيه مصري', en: 'Egyptian pound' },
 };

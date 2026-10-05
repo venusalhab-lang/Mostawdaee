@@ -39,7 +39,7 @@ ALTER TABLE public.stock_movements ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS "stock_movements_select_own" ON public.stock_movements;
 CREATE POLICY "stock_movements_select_own"
     ON public.stock_movements FOR SELECT
-    USING (auth.uid() = user_id);
+    USING ((SELECT public.workspace_owner()) = user_id AND (SELECT public.workspace_can_manage()));
 
 -- Inserts are done by apply_inventory_audit (security definer), not by the client.
 DROP POLICY IF EXISTS "stock_movements_no_client_insert" ON public.stock_movements;
@@ -61,29 +61,35 @@ CREATE TABLE IF NOT EXISTS public.inventory_audits (
     CONSTRAINT inventory_audits_number_user_uniq UNIQUE (user_id, audit_number)
 );
 
+-- A manager who started an audit can still delete their account; the store keeps the audit.
+ALTER TABLE public.inventory_audits DROP CONSTRAINT IF EXISTS inventory_audits_created_by_fkey;
+ALTER TABLE public.inventory_audits ALTER COLUMN created_by DROP NOT NULL;
+ALTER TABLE public.inventory_audits ADD CONSTRAINT inventory_audits_created_by_fkey
+    FOREIGN KEY (created_by) REFERENCES auth.users(id) ON DELETE SET NULL;
+
 ALTER TABLE public.inventory_audits ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS "inventory_audits_select_own" ON public.inventory_audits;
 CREATE POLICY "inventory_audits_select_own"
     ON public.inventory_audits FOR SELECT
-    USING (auth.uid() = user_id);
+    USING ((SELECT public.workspace_owner()) = user_id AND (SELECT public.workspace_can_manage()));
 
 DROP POLICY IF EXISTS "inventory_audits_insert_draft" ON public.inventory_audits;
 CREATE POLICY "inventory_audits_insert_draft"
     ON public.inventory_audits FOR INSERT
-    WITH CHECK (auth.uid() = user_id AND auth.uid() = created_by AND status = 'draft' AND public.has_access());
+    WITH CHECK ((SELECT public.workspace_owner()) = user_id AND (SELECT public.workspace_can_manage()) AND auth.uid() = created_by AND status = 'draft' AND public.has_access());
 
 -- A client can edit a draft, but only the apply function may mark it completed.
 DROP POLICY IF EXISTS "inventory_audits_update_draft" ON public.inventory_audits;
 CREATE POLICY "inventory_audits_update_draft"
     ON public.inventory_audits FOR UPDATE
-    USING (auth.uid() = user_id AND status = 'draft')
-    WITH CHECK (auth.uid() = user_id AND status = 'draft' AND public.has_access());
+    USING ((SELECT public.workspace_owner()) = user_id AND (SELECT public.workspace_can_manage()) AND status = 'draft')
+    WITH CHECK ((SELECT public.workspace_owner()) = user_id AND (SELECT public.workspace_can_manage()) AND status = 'draft' AND public.has_access());
 
 DROP POLICY IF EXISTS "inventory_audits_delete_draft" ON public.inventory_audits;
 CREATE POLICY "inventory_audits_delete_draft"
     ON public.inventory_audits FOR DELETE
-    USING (auth.uid() = user_id AND status = 'draft' AND public.has_access());
+    USING ((SELECT public.workspace_owner()) = user_id AND (SELECT public.workspace_can_manage()) AND status = 'draft' AND public.has_access());
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.inventory_audits TO authenticated;
 
@@ -115,7 +121,7 @@ CREATE POLICY "inventory_audit_items_select_own"
     USING (
         EXISTS (
             SELECT 1 FROM public.inventory_audits a
-            WHERE a.id = audit_id AND a.user_id = auth.uid()
+            WHERE a.id = audit_id AND a.user_id = (SELECT public.workspace_owner()) AND (SELECT public.workspace_can_manage())
         )
     );
 
@@ -125,7 +131,7 @@ CREATE POLICY "inventory_audit_items_insert_draft"
     WITH CHECK (
         EXISTS (
             SELECT 1 FROM public.inventory_audits a
-            WHERE a.id = audit_id AND a.user_id = auth.uid() AND a.status = 'draft'
+            WHERE a.id = audit_id AND a.user_id = (SELECT public.workspace_owner()) AND (SELECT public.workspace_can_manage()) AND a.status = 'draft'
         ) AND public.has_access()
     );
 
@@ -135,7 +141,7 @@ CREATE POLICY "inventory_audit_items_update_draft"
     USING (
         EXISTS (
             SELECT 1 FROM public.inventory_audits a
-            WHERE a.id = audit_id AND a.user_id = auth.uid() AND a.status = 'draft'
+            WHERE a.id = audit_id AND a.user_id = (SELECT public.workspace_owner()) AND (SELECT public.workspace_can_manage()) AND a.status = 'draft'
         ) AND public.has_access()
     );
 
@@ -145,7 +151,7 @@ CREATE POLICY "inventory_audit_items_delete_draft"
     USING (
         EXISTS (
             SELECT 1 FROM public.inventory_audits a
-            WHERE a.id = audit_id AND a.user_id = auth.uid() AND a.status = 'draft'
+            WHERE a.id = audit_id AND a.user_id = (SELECT public.workspace_owner()) AND (SELECT public.workspace_can_manage()) AND a.status = 'draft'
         ) AND public.has_access()
     );
 
@@ -174,7 +180,7 @@ SECURITY DEFINER
 SET search_path = public
 AS $$
 DECLARE
-    v_uid UUID := auth.uid();
+    v_uid UUID := public.workspace_owner();
     v_audit public.inventory_audits%ROWTYPE;
     v_item public.inventory_audit_items%ROWTYPE;
     v_qty INTEGER;
@@ -187,8 +193,11 @@ DECLARE
     v_missing JSONB := '[]'::JSONB;
     v_updated INTEGER;
 BEGIN
-    IF v_uid IS NULL THEN
+    IF auth.uid() IS NULL THEN
         RAISE EXCEPTION 'AUTH_REQUIRED';
+    END IF;
+    IF NOT public.workspace_can_manage() THEN
+        RAISE EXCEPTION 'role not allowed';
     END IF;
     IF NOT public.has_access() THEN
         RAISE EXCEPTION 'subscription required';

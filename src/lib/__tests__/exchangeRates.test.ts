@@ -3,7 +3,7 @@ import { convertMoney, convertAmount, formatMoney, currencyDecimals, buildUsdUni
 
 describe('exchangeRates', () => {
   it('has the supported currencies', () => {
-    expect([...POS_CURRENCY_CODES]).toEqual(['JOD', 'ILS', 'USD', 'IQD', 'SAR', 'LYD', 'EGP']);
+    expect([...POS_CURRENCY_CODES]).toEqual(['JOD', 'ILS', 'USD', 'IQD', 'SAR', 'AED', 'LYD', 'EGP']);
   });
 
   it('uses the right decimals per currency', () => {
@@ -32,6 +32,17 @@ describe('exchangeRates', () => {
     const rates = buildUsdUnitRates(null, { EGP: 48.2, JOD: 0.709 });
     expect(convertMoney(1, 'USD', 'EGP', rates)).toBe(48.2);
     expect(currencyDecimals('EGP')).toBe(2);
+  });
+
+  it('handles the UAE dirham at its USD peg', () => {
+    expect(currencyDecimals('AED')).toBe(2);
+    expect(formatMoney(1234.5, 'AED', 'en-US')).toBe('1,234.50 د.إ');
+    expect(convertMoney(100, 'USD', 'AED')).toBe(367.25);
+    expect(convertMoney(367.25, 'AED', 'USD')).toBe(100);
+    expect(convertMoney(10, 'AED', 'JOD')).toBe(1.931);
+    const live = buildUsdUnitRates(null, { AED: 3.6727, JOD: 0.709, ILS: 3.7 });
+    expect(convertMoney(1, 'USD', 'AED', live)).toBe(3.67);
+    expect(live.AED).toBe(3.6727);
   });
 
   it('keeps live rates when manual mode is off', () => {

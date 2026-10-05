@@ -1,5 +1,5 @@
 export type Language = 'en' | 'ar';
-export type Currency = 'JOD' | 'USD' | 'ILS' | 'IQD' | 'SAR' | 'LYD' | 'EGP';
+export type Currency = 'JOD' | 'USD' | 'ILS' | 'IQD' | 'SAR' | 'AED' | 'LYD' | 'EGP';
 
 export interface CalculationResults {
   totalFOBCost: number;
@@ -271,6 +271,7 @@ export interface Vault {
   balanceUSD?: number;
   balanceIQD?: number;
   balanceSAR?: number;
+  balanceAED?: number;
   balanceLYD?: number;
   balanceEGP?: number;
   lastUpdated: number;

@@ -1,4 +1,5 @@
 import type { Cheque, ChequeInput, ChequeStatus, Currency } from '../types';
+import { storeOwnerId } from './workspace';
 import { getSupabaseClient } from '../services/supabase';
 import { canTransition, validateChequeInput } from './cheques';
 import { roundMoney } from './exchangeRates';
@@ -122,7 +123,7 @@ export async function createCheque(userId: string, input: ChequeInput): Promise<
   }
   const { data, error } = await getSupabaseClient()!
     .from('cheques')
-    .insert({ ...toRow(input), user_id: userId, status: 'pending' })
+    .insert({ ...toRow(input), user_id: await storeOwnerId(userId), status: 'pending' })
     .select(COLUMNS)
     .single();
   if (error) throw mapError(error);

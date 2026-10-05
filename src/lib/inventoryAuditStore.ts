@@ -1,4 +1,5 @@
 import type { InventoryAudit, InventoryAuditLine, InventoryAuditStatus } from '../types';
+import { storeOwnerId } from './workspace';
 import { auditDifference } from './inventoryAudit';
 import { getSupabaseClient } from '../services/supabase';
 
@@ -147,7 +148,7 @@ export async function saveAuditDraft(
   const { error } = await client.from('inventory_audits').upsert(
     {
       id: draft.id,
-      user_id: uid,
+      user_id: await storeOwnerId(uid),
       audit_number: draft.auditNumber,
       status: 'draft',
       notes: draft.notes || '',

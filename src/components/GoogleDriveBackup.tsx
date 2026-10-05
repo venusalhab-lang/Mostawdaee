@@ -19,6 +19,8 @@ import { toast } from 'sonner';
 import { sounds } from '../lib/sounds';
 import { GoogleAuthProvider, signInWithPopup, auth, googleProvider, db } from '../services/firebase';
 import { doc, setDoc } from '../lib/supabaseDocs';
+import { restoreVaultBalance, vaultRestoreMessage } from '../lib/vaultRestore';
+import { buildStoreBackup, isStoreBackup, restoreStoreBackup } from '../lib/storeBackup';
 
 interface Props {
   language: Language;
@@ -127,21 +129,11 @@ export default function GoogleDriveBackup({ language }: Props) {
     
     setIsBackupInProgress(true);
     try {
-      const payload = {
-        products,
-        invoices,
-        employees,
-        payrollRecords,
-        customers,
-        customerTransactions,
-        warehouses,
-        vault,
-        vaultTransactions,
-        settings,
-        timestamp: Date.now(),
-        creator: user?.email || 'Anonymous',
-        app: 'Mostawdaee System'
-      };
+      const payload = buildStoreBackup({
+        creator: user?.email,
+        settings, products, invoices, employees, payrollRecords, customers, customerTransactions,
+        vaultTransactions, warehouses, vault,
+      });
 
       const dateStr = new Date().toISOString().split('T')[0];
       const timeStr = new Date().toTimeString().split(' ')[0].replace(/:/g, '-');
@@ -166,84 +158,25 @@ export default function GoogleDriveBackup({ language }: Props) {
   // Perform Restore Operations securely
   const handleConfirmRestore = async () => {
     sounds.playClick();
-    if (!selectedBackupForRestore) return;
+    if (!selectedBackupForRestore || !user?.uid) return;
+    const uid = user.uid;
     
     setIsRestoreInProgress(true);
     try {
       toast.info(isRtl ? "جاري تحميل وقراءة ملف النسخة..." : "Retrieving cloud backup stream...");
       const backupData = await downloadBackupFile(selectedBackupForRestore.id);
 
-      if (!backupData || (!backupData.products && !backupData.invoices)) {
-        throw new Error("Invalid or empty backup payload data.");
+      if (!isStoreBackup(backupData)) {
+        throw new Error(isRtl ? "هذا الملف ليس نسخة احتياطية من مستودعي." : "This file is not a Mostawdaee backup.");
       }
 
-      toast.info(isRtl ? "جاري إعادة بناء الجداول والبيانات..." : "Applying schema tables and restoring references...");
+      toast.info(isRtl ? "جاري استعادة السجلات..." : "Restoring records...");
 
-      // 1. Restore settings
-      if (backupData.settings) {
-        await saveSettings(backupData.settings);
-      }
-
-      // 2. Restore Warehouses
-      if (Array.isArray(backupData.warehouses)) {
-        for (const wh of backupData.warehouses) {
-          await saveWarehouse(wh);
-        }
-      }
-
-      // 3. Restore Products
-      if (Array.isArray(backupData.products)) {
-        for (const prod of backupData.products) {
-          await saveProduct(prod, { skipMovement: true });
-        }
-      }
-
-      // 4. Restore Invoices
-      if (Array.isArray(backupData.invoices)) {
-        for (const item of backupData.invoices) {
-          await saveInvoice(item, { restoreOnly: true });
-        }
-      }
-
-      // 5. Restore Employees
-      if (Array.isArray(backupData.employees)) {
-        for (const emp of backupData.employees) {
-          await saveEmployee(emp);
-        }
-      }
-
-      // 6. Restore Payrolls
-      if (Array.isArray(backupData.payrollRecords)) {
-        for (const pr of backupData.payrollRecords) {
-          await savePayrollRecord(pr);
-        }
-      }
-
-      // 7. Restore Customers
-      if (Array.isArray(backupData.customers)) {
-        for (const cust of backupData.customers) {
-          await saveCustomer(cust, { restore: true });
-        }
-      }
-
-      // 7b. Restore the customer ledger (without it debts would have no history)
-      if (Array.isArray(backupData.customerTransactions)) {
-        for (const tx of backupData.customerTransactions) {
-          await saveCustomerTransaction(tx);
-        }
-      }
-
-      // 8. Restore Vault (movements first, then the balance snapshot that goes with them)
-      if (user?.uid) {
-        if (Array.isArray(backupData.vaultTransactions)) {
-          for (const tx of backupData.vaultTransactions) {
-            await setDoc(doc(db, 'users', user.uid, 'vault_records', tx.id), tx);
-          }
-        }
-        if (backupData.vault) {
-          await setDoc(doc(db, 'users', user.uid, 'settings', 'vault'), backupData.vault);
-        }
-      }
+      await restoreStoreBackup(backupData, {
+        saveSettings, saveWarehouse, saveProduct, saveInvoice, saveEmployee, savePayrollRecord, saveCustomer, saveCustomerTransaction,
+        saveVaultRecord: (tx) => setDoc(doc(db, 'users', uid, 'vault_records', tx.id), tx),
+        restoreVault: (v) => restoreVaultBalance(db, uid, v),
+      });
 
       toast.success(
         isRtl 
@@ -252,7 +185,9 @@ export default function GoogleDriveBackup({ language }: Props) {
       );
       setSelectedBackupForRestore(null);
     } catch (err: any) {
-      handleDriveError(err, isRtl ? `فشل عملية استعادة البيانات: ${err.message}` : `Data restore failure: ${err.message}`);
+      const kept = vaultRestoreMessage(err, isRtl);
+      if (kept) toast.error(kept);
+      else handleDriveError(err, isRtl ? `فشل عملية استعادة البيانات: ${err.message}` : `Data restore failure: ${err.message}`);
     } finally {
       setIsRestoreInProgress(false);
     }

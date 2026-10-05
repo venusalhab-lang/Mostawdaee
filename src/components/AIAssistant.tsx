@@ -57,6 +57,9 @@ const NOTICES: Record<string, [string, string]> = {
   subscription_required: ['المساعد الذكي يتطلب اشتراكاً فعّالاً.', 'The smart assistant needs an active subscription.'],
   subscription_check_unavailable: ['تعذّر التحقق من الاشتراك على الخادم.', 'The server could not check the subscription.'],
   rate_limited: ['طلبات كثيرة، انتظر دقيقة ثم أعد المحاولة.', 'Too many requests, wait a minute.'],
+  daily_limit: ['استهلك المتجر أسئلة المساعد الذكي لهذا اليوم، وتتجدد غداً. هذه إجابة من بيانات الجهاز.', "This store has used today's smart assistant questions; they renew tomorrow. This answer comes from the device."],
+  usage_check_unavailable: ['تعذّر التحقق من رصيد أسئلة المساعد الذكي على الخادم.', 'The server could not check the assistant allowance.'],
+  role_not_allowed: ['المساعد الذكي غير متاح لدورك في هذا المتجر.', 'The smart assistant is not available for your role in this store.'],
   unavailable: ['تعذّر الوصول إلى المساعد الذكي.', 'Could not reach the smart assistant.'],
 };
 

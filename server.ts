@@ -1,5 +1,5 @@
 import express from "express";
-import helmet from "helmet";
+import helmet, { contentSecurityPolicy } from "helmet";
 import compression from "compression";
 import path from "path";
 import fs from "fs";
@@ -8,7 +8,8 @@ import dotenv from "dotenv";
 import { createClient } from "@supabase/supabase-js";
 import { GoogleAuth, OAuth2Client } from "google-auth-library";
 import { fileURLToPath } from "url";
-import { isAdminEmail, isVerifiedAdmin } from "./src/lib/adminAccess";
+import { isVerifiedAdmin } from "./src/lib/adminAccess";
+import { type PlatformAction, type PlatformRole, SUPPORT_GRACE_DAYS, isPlatformRole, staffCan } from "./src/lib/platformStaff";
 import {
   MAX_SUBSCRIPTION_GRANT_DAYS,
   SUBSCRIPTION_DAY_MS,
@@ -24,6 +25,14 @@ import {
   sanitizeContext,
   sanitizeHistory,
 } from "./src/lib/assistantContext";
+import {
+  ACCOUNT_DELETION_PATH,
+  PRIVACY_PATH,
+  type PolicyDoc,
+  accountDeletionInfo,
+  privacyPolicy,
+  renderPolicyHtml,
+} from "./src/lib/privacyPolicy";
 
 dotenv.config();
 
@@ -37,6 +46,11 @@ const isProduction = process.env.NODE_ENV === "production" ||
                      !fs.existsSync(path.resolve(process.cwd(), 'src/main.tsx'));
 
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash";
+// Every question resends the store data (up to ~25k tokens), so each store gets a daily allowance.
+const AI_DAILY_QUESTIONS_PER_STORE = (() => {
+  const n = Number(process.env.AI_DAILY_QUESTIONS_PER_STORE);
+  return Number.isInteger(n) && n >= 0 ? n : 20;
+})();
 
 // Lazy initialization of Gemini
 let ai: GoogleGenAI | null = null;
@@ -241,7 +255,7 @@ function presentSubscriber(authUser: any, profile: any, sub: any) {
     email: authUser?.email || "",
     displayName: profile?.user_name || authUser?.user_metadata?.full_name || "",
     businessName: profile?.business_name || authUser?.user_metadata?.business_name || "",
-    role: isVerifiedAdmin(authUser) ? "super_admin" : "user",
+    role: isVerifiedAdmin(authUser) ? "founder" : "user",
     status: access.kind === "paid" ? "active" : access.kind === "trial" ? "trial" : "expired",
     trialStart,
     expiry,
@@ -273,6 +287,7 @@ async function startServer() {
     contentSecurityPolicy: {
       useDefaults: false,
       directives: {
+        "default-src": contentSecurityPolicy.dangerouslyDisableDefaultSrc,
         "frame-ancestors": ["'none'"],
         "object-src": ["'none'"],
         "base-uri": ["'self'"],
@@ -343,6 +358,15 @@ async function startServer() {
   app.get("/api/health", (req, res) => {
     res.json({ status: "ok" });
   });
+
+  // Public pages Google Play links to; they must open without the app or a sign-in.
+  const policyPage = (route: string, build: (ar: boolean) => PolicyDoc) => (req: express.Request, res: express.Response) => {
+    const ar = req.query.lang !== "en";
+    res.type("html").set("Cache-Control", "public, max-age=3600")
+      .send(renderPolicyHtml(build(ar), ar, ar ? `${route}?lang=en` : route));
+  };
+  app.get(PRIVACY_PATH, policyPage(PRIVACY_PATH, privacyPolicy));
+  app.get(ACCOUNT_DELETION_PATH, policyPage(ACCOUNT_DELETION_PATH, accountDeletionInfo));
 
   app.post("/api/subscription/activate", async (req, res) => {
     try {
@@ -441,6 +465,41 @@ async function startServer() {
     }
   });
 
+  // Deletes the signed-in account. An owner's store data cascades with it; a member only leaves the store.
+  // The caller retypes the account email; a Google Play subscription is cancelled in Play, not here.
+  app.post("/api/account/delete", async (req, res) => {
+    try {
+      const user = await getRequestUser(req);
+      if (!user) return res.status(401).json({ code: "sign_in_required", message: "Sign in again to delete the account" });
+      if (!rateLimit(`delete:${user.id}`, 3, 10 * 60_000)) {
+        return res.status(429).json({ code: "rate_limited", message: "Too many requests" });
+      }
+      const typed = typeof req.body?.confirmEmail === "string" ? req.body.confirmEmail.trim().toLowerCase() : "";
+      if (!user.email || typed !== user.email.trim().toLowerCase()) {
+        return res.status(400).json({ code: "confirm_mismatch", message: "The typed email does not match this account" });
+      }
+      if (isVerifiedAdmin(user)) {
+        return res.status(403).json({ code: "founder_account", message: "The founder account cannot be deleted" });
+      }
+      const service = getSupabaseServiceClient();
+      if (!service) return res.status(503).json({ code: "not_configured", message: "Account deletion is not configured on the server" });
+
+      const prepared = await service.rpc("account_delete_prepare", { p_user: user.id });
+      if (prepared.error) {
+        if (/cannot delete the founder/.test(prepared.error.message)) {
+          return res.status(403).json({ code: "founder_account", message: "The founder account cannot be deleted" });
+        }
+        throw new Error(prepared.error.message);
+      }
+      const { error } = await service.auth.admin.deleteUser(user.id);
+      if (error) throw new Error(error.message);
+      return res.json({ ok: true });
+    } catch (error: any) {
+      console.error("[Account delete]", error?.message || error);
+      return res.status(500).json({ code: "delete_failed", message: "The account could not be deleted" });
+    }
+  });
+
   // Google Play Real-time Developer Notifications (Pub/Sub push with an OIDC token).
   app.post("/api/play/rtdn", async (req, res) => {
     const audience = process.env.PLAY_RTDN_AUDIENCE;
@@ -508,14 +567,16 @@ async function startServer() {
     }
   });
 
-  async function requireOwner(req: any, res: any) {
+  // Platform console: the founder and the staff in platform_staff. The database re-checks the role
+  // in every admin_* / support_staff_* function, so a bug here cannot widen anyone's rights.
+  async function requireStaff(req: any, res: any, action: PlatformAction | null) {
     const user = await getRequestUser(req);
     if (!user) {
       res.status(401).json({ message: "يجب تسجيل الدخول" });
       return null;
     }
-    if (!isVerifiedAdmin(user)) {
-      res.status(403).json({ message: "هذه اللوحة لصاحب النظام فقط" });
+    if (!user.email_confirmed_at) {
+      res.status(403).json({ message: "أكّد بريدك الإلكتروني أولاً" });
       return null;
     }
     const service = getSupabaseServiceClient();
@@ -523,37 +584,102 @@ async function startServer() {
       res.status(503).json({ message: "مفتاح الخدمة غير مضبوط على الخادم، ولن يُمنح اشتراك من المتصفح" });
       return null;
     }
-    if (!rateLimit(`admin:${user.id}`, 40, 60_000)) {
+    if (!rateLimit(`admin:${user.id}`, 60, 60_000)) {
       res.status(429).json({ message: "محاولات كثيرة، انتظر دقيقة" });
       return null;
     }
-    return { user, service };
+    let role: PlatformRole | null = isVerifiedAdmin(user) ? "founder" : null;
+    if (!role) {
+      const { data, error } = await service.rpc("platform_role_of", { p_user: user.id });
+      if (error) {
+        console.error("[Admin] staff check failed", error.message);
+        res.status(503).json({ message: "تعذر التحقق من صلاحيات الفريق. شغّل ملف supabase_production_setup.sql" });
+        return null;
+      }
+      role = isPlatformRole(data) ? data : null;
+    }
+    if (!role) {
+      res.status(403).json({ message: "هذه اللوحة لفريق مستودعي فقط" });
+      return null;
+    }
+    if (action && !staffCan(role, action)) {
+      res.status(403).json({ message: "صلاحيتك لا تسمح بهذا الإجراء" });
+      return null;
+    }
+    return { user, service, role };
   }
 
+  // Database refusals arrive as Postgres exception text.
+  const CONSOLE_ERRORS: Array<[RegExp, number, string]> = [
+    [/role not allowed|not platform staff/, 403, "صلاحيتك لا تسمح بهذا الإجراء"],
+    [/could not find the function|PGRST202|does not exist/i, 503, "ميزة الفريق غير مفعّلة بعد. شغّل ملف supabase_production_setup.sql"],
+    [/account not found/, 404, "الحساب غير موجود"],
+    [/ticket not found/, 404, "الطلب غير موجود"],
+    [/staff not found/, 404, "هذا البريد ليس في الفريق"],
+    [/account not confirmed/, 409, "أكّد الموظف بريده في مستودعي أولاً، ثم أكّد تعيينه من هنا"],
+    [/notice not found/, 404, "هذا التنبيه غير موجود"],
+    [/cannot change the founder/, 400, "لا يمكن تغيير حساب المؤسس"],
+    [/invalid email/, 400, "البريد غير صالح"],
+    [/invalid role/, 400, "الدور غير صالح"],
+    [/invalid status/, 400, "الحالة غير صالحة"],
+    [/invalid message/, 400, "الرد فارغ أو أطول من 4000 حرف"],
+    [/staff is full/, 400, "وصل الفريق إلى 50 عضواً"],
+  ];
+  function sendConsoleError(res: any, error: any, label: string, fallback: string) {
+    const text = String(error?.message || error?.code || error || "");
+    const match = CONSOLE_ERRORS.find(([pattern]) => pattern.test(text) || pattern.test(String(error?.code || "")));
+    if (match) return res.status(match[1]).json({ message: match[2] });
+    console.error(`[${label}]`, text);
+    return res.status(500).json({ message: fallback });
+  }
+
+  const TICKET_ID_PATTERN = USER_ID_PATTERN;
+  const STAFF_EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+  app.get("/api/admin/me", async (req, res) => {
+    const staff = await requireStaff(req, res, null);
+    if (!staff) return;
+    return res.json({ role: staff.role, email: staff.user.email });
+  });
+
   app.get("/api/admin/subscribers", async (req, res) => {
-    const owner = await requireOwner(req, res);
-    if (!owner) return;
+    const staff = await requireStaff(req, res, "view_subscribers");
+    if (!staff) return;
     try {
-      const [authUsers, profilesResult, subsResult] = await Promise.all([
-        listAuthUsers(owner.service),
-        owner.service.from("profiles").select("id, user_name, business_name, role"),
-        owner.service.from("user_subscriptions").select("user_id, subscription_status, trial_start_date, expiry_date"),
+      const [authUsers, profilesResult, subsResult, usageResult] = await Promise.all([
+        listAuthUsers(staff.service),
+        staff.service.from("profiles").select("id, user_name, business_name, role"),
+        staff.service.from("user_subscriptions").select("user_id, subscription_status, trial_start_date, expiry_date"),
+        staffCan(staff.role, "view_ai_usage")
+          ? staff.service.rpc("admin_ai_usage", { p_actor: staff.user.id, p_days: 30 })
+          : Promise.resolve({ data: null, error: null }),
       ]);
       if (profilesResult.error) throw profilesResult.error;
       if (subsResult.error) throw subsResult.error;
+      // Usage is informational; the list still loads if the usage function is not installed yet.
+      if (usageResult.error) console.error("[Admin subscribers] usage", usageResult.error.message);
+      const usage = new Map<string, { today: number; period: number }>();
+      for (const row of (Array.isArray(usageResult.data) ? usageResult.data : [])) {
+        usage.set(String(row.owner_id), { today: Number(row.today) || 0, period: Number(row.period) || 0 });
+      }
       const profiles = profilesResult.data || [];
       const subs = subsResult.data || [];
       const seen = new Set<string>();
+      const withUsage = (row: ReturnType<typeof presentSubscriber>) => ({
+        ...row,
+        aiToday: usageResult.data ? usage.get(row.id)?.today ?? 0 : null,
+        ai30d: usageResult.data ? usage.get(row.id)?.period ?? 0 : null,
+      });
       const subscribers = authUsers.map((authUser) => {
         seen.add(authUser.id);
         const profile = profiles.find((row) => row.id === authUser.id);
         const sub = subs.find((row) => row.user_id === authUser.id);
-        return presentSubscriber(authUser, profile, sub);
+        return withUsage(presentSubscriber(authUser, profile, sub));
       });
       for (const profile of profiles) {
         if (seen.has(profile.id)) continue;
         const sub = subs.find((row) => row.user_id === profile.id);
-        subscribers.push(presentSubscriber(null, profile, sub));
+        subscribers.push(withUsage(presentSubscriber(null, profile, sub)));
       }
       subscribers.sort((a, b) => {
         if (a.endsAt === b.endsAt) return a.email.localeCompare(b.email);
@@ -561,7 +687,7 @@ async function startServer() {
         if (!b.endsAt) return -1;
         return a.endsAt < b.endsAt ? -1 : 1;
       });
-      return res.json({ subscribers });
+      return res.json({ subscribers, aiDailyLimit: AI_DAILY_QUESTIONS_PER_STORE });
     } catch (error: any) {
       console.error("[Admin subscribers]", error);
       return res.status(500).json({ message: "تعذر قراءة المشتركين" });
@@ -569,8 +695,8 @@ async function startServer() {
   });
 
   app.post("/api/admin/subscription", async (req, res) => {
-    const owner = await requireOwner(req, res);
-    if (!owner) return;
+    const staff = await requireStaff(req, res, "grant_grace");
+    if (!staff) return;
     const userId = String(req.body?.userId || "");
     const op = String(req.body?.op || "");
     if (!USER_ID_PATTERN.test(userId)) {
@@ -586,14 +712,18 @@ async function startServer() {
     if (op === "extend" && days === null) {
       return res.status(400).json({ message: "حدد عدد أيام التمديد" });
     }
+    const graceOnly = !staffCan(staff.role, "manage_subscriptions");
+    if (graceOnly && (op !== "extend" || days! > SUPPORT_GRACE_DAYS)) {
+      return res.status(403).json({ message: `الدعم الفني يمنح مهلة حتى ${SUPPORT_GRACE_DAYS} أيام فقط` });
+    }
 
     try {
-      const authLookup = await owner.service.auth.admin.getUserById(userId);
+      const authLookup = await staff.service.auth.admin.getUserById(userId);
       if (authLookup.error || !authLookup.data.user) {
         return res.status(404).json({ message: "الحساب غير موجود" });
       }
       const authUser = authLookup.data.user;
-      const { data: existing, error: readError } = await owner.service
+      const { data: existing, error: readError } = await staff.service
         .from("user_subscriptions")
         .select("subscription_status, trial_start_date, expiry_date")
         .eq("user_id", userId)
@@ -615,7 +745,13 @@ async function startServer() {
 
       if (op === "extend") {
         endsAt += days! * SUBSCRIPTION_DAY_MS;
-        if (status === "expired") status = "trial";
+        if (status === "expired" || (status === "active" && current.kind === "expired" && graceOnly)) status = "trial";
+        if (graceOnly) {
+          endsAt = Math.min(endsAt, now + SUPPORT_GRACE_DAYS * SUBSCRIPTION_DAY_MS);
+          if (current.endsAt && endsAt <= current.endsAt) {
+            return res.status(400).json({ message: `لدى هذا الحساب أكثر من ${SUPPORT_GRACE_DAYS} أيام متبقية` });
+          }
+        }
       } else if (op === "mark_paid") {
         status = "active";
         if (days) endsAt += days * SUBSCRIPTION_DAY_MS;
@@ -642,22 +778,18 @@ async function startServer() {
         ? trialStartForEnd(endsAt)
         : (existing?.trial_start_date || authUser.created_at || new Date(now).toISOString());
       const expiry = new Date(endsAt).toISOString();
-      const { error: writeError } = await owner.service.from("user_subscriptions").upsert({
-        user_id: userId,
-        subscription_status: status,
-        trial_start_date: trialStart,
-        expiry_date: expiry,
-        updated_at: new Date().toISOString(),
-      }, { onConflict: "user_id" });
-      if (writeError) throw writeError;
+      const { error: writeError } = await staff.service.rpc("admin_apply_subscription", {
+        p_actor: staff.user.id,
+        p_action: op,
+        p_target: userId,
+        p_status: status,
+        p_trial_start: trialStart,
+        p_expiry: expiry,
+        p_details: { days, expiry: req.body?.expiry ?? null },
+      });
+      if (writeError) return sendConsoleError(res, writeError, "Admin subscription", "تعذر تعديل الاشتراك");
 
-      await owner.service.from("profiles").update({
-        is_premium: status === "active",
-        subscription_status: status,
-        updated_at: new Date().toISOString(),
-      }).eq("id", userId);
-
-      const { data: profile } = await owner.service
+      const { data: profile } = await staff.service
         .from("profiles")
         .select("id, user_name, business_name, role")
         .eq("id", userId)
@@ -673,6 +805,118 @@ async function startServer() {
       console.error("[Admin subscription]", error);
       return res.status(500).json({ message: "تعذر تعديل الاشتراك" });
     }
+  });
+
+  app.get("/api/admin/staff", async (req, res) => {
+    const staff = await requireStaff(req, res, "manage_staff");
+    if (!staff) return;
+    const { data, error } = await staff.service.rpc("admin_staff_list", { p_actor: staff.user.id });
+    if (error) return sendConsoleError(res, error, "Admin staff", "تعذر قراءة الفريق");
+    return res.json({ staff: Array.isArray(data) ? data : [] });
+  });
+
+  app.post("/api/admin/staff", async (req, res) => {
+    const staff = await requireStaff(req, res, "manage_staff");
+    if (!staff) return;
+    const email = String(req.body?.email || "").trim().toLowerCase();
+    const role = String(req.body?.role || "");
+    if (!STAFF_EMAIL_PATTERN.test(email) || email.length > 254) return res.status(400).json({ message: "البريد غير صالح" });
+    if (role !== "operations" && role !== "support") return res.status(400).json({ message: "الدور غير صالح" });
+    const { error } = await staff.service.rpc("admin_staff_set", { p_actor: staff.user.id, p_email: email, p_role: role });
+    if (error) return sendConsoleError(res, error, "Admin staff", "تعذر حفظ العضو");
+    return res.json({ ok: true });
+  });
+
+  app.post("/api/admin/staff/confirm", async (req, res) => {
+    const staff = await requireStaff(req, res, "manage_staff");
+    if (!staff) return;
+    const email = String(req.body?.email || "").trim().toLowerCase();
+    if (!STAFF_EMAIL_PATTERN.test(email)) return res.status(400).json({ message: "البريد غير صالح" });
+    const { error } = await staff.service.rpc("admin_staff_confirm", { p_actor: staff.user.id, p_email: email });
+    if (error) return sendConsoleError(res, error, "Admin staff confirm", "تعذر تأكيد العضو");
+    return res.json({ ok: true });
+  });
+
+  app.post("/api/admin/staff/remove", async (req, res) => {
+    const staff = await requireStaff(req, res, "manage_staff");
+    if (!staff) return;
+    const email = String(req.body?.email || "").trim().toLowerCase();
+    if (!STAFF_EMAIL_PATTERN.test(email)) return res.status(400).json({ message: "البريد غير صالح" });
+    const { error } = await staff.service.rpc("admin_staff_remove", { p_actor: staff.user.id, p_email: email });
+    if (error) return sendConsoleError(res, error, "Admin staff", "تعذر إزالة العضو");
+    return res.json({ ok: true });
+  });
+
+  app.get("/api/admin/audit", async (req, res) => {
+    const staff = await requireStaff(req, res, "view_audit");
+    if (!staff) return;
+    const limit = Math.min(Math.max(Number(req.query.limit) || 200, 1), 500);
+    const { data, error } = await staff.service.rpc("admin_audit_list", { p_actor: staff.user.id, p_limit: limit });
+    if (error) return sendConsoleError(res, error, "Admin audit", "تعذر قراءة السجل");
+    return res.json({ entries: Array.isArray(data) ? data : [] });
+  });
+
+  app.get("/api/admin/notices", async (req, res) => {
+    const staff = await requireStaff(req, res, "view_audit");
+    if (!staff) return;
+    const { data, error } = await staff.service.rpc("admin_open_notices", { p_actor: staff.user.id });
+    if (error) return sendConsoleError(res, error, "Admin notices", "تعذر قراءة التنبيهات");
+    return res.json({ notices: Array.isArray(data) ? data : [] });
+  });
+
+  app.post("/api/admin/notices/ack", async (req, res) => {
+    const staff = await requireStaff(req, res, "view_audit");
+    if (!staff) return;
+    const id = Number(req.body?.id);
+    if (!Number.isInteger(id) || id < 1) return res.status(400).json({ message: "معرّف التنبيه غير صالح" });
+    const { error } = await staff.service.rpc("admin_notice_ack", { p_actor: staff.user.id, p_id: id });
+    if (error) return sendConsoleError(res, error, "Admin notice ack", "تعذر إخفاء التنبيه");
+    return res.json({ ok: true });
+  });
+
+  app.get("/api/admin/tickets", async (req, res) => {
+    const staff = await requireStaff(req, res, "answer_tickets");
+    if (!staff) return;
+    const status = String(req.query.status || "open");
+    if (!["open", "answered", "closed", "all"].includes(status)) return res.status(400).json({ message: "الحالة غير صالحة" });
+    const { data, error } = await staff.service.rpc("support_staff_list", { p_actor: staff.user.id, p_status: status });
+    if (error) return sendConsoleError(res, error, "Admin tickets", "تعذر قراءة الطلبات");
+    return res.json({ tickets: Array.isArray(data) ? data : [] });
+  });
+
+  app.get("/api/admin/tickets/:id", async (req, res) => {
+    const staff = await requireStaff(req, res, "answer_tickets");
+    if (!staff) return;
+    if (!TICKET_ID_PATTERN.test(req.params.id)) return res.status(400).json({ message: "معرّف الطلب غير صالح" });
+    const { data, error } = await staff.service.rpc("support_staff_thread", { p_actor: staff.user.id, p_ticket: req.params.id });
+    if (error) return sendConsoleError(res, error, "Admin ticket", "تعذر قراءة الطلب");
+    return res.json(data);
+  });
+
+  app.post("/api/admin/tickets/:id/reply", async (req, res) => {
+    const staff = await requireStaff(req, res, "answer_tickets");
+    if (!staff) return;
+    if (!TICKET_ID_PATTERN.test(req.params.id)) return res.status(400).json({ message: "معرّف الطلب غير صالح" });
+    const body = String(req.body?.body || "").trim();
+    if (!body || body.length > 4000) return res.status(400).json({ message: "الرد فارغ أو أطول من 4000 حرف" });
+    const { error } = await staff.service.rpc("support_staff_reply", {
+      p_actor: staff.user.id, p_ticket: req.params.id, p_body: body, p_close: req.body?.close === true,
+    });
+    if (error) return sendConsoleError(res, error, "Admin ticket", "تعذر إرسال الرد");
+    return res.json({ ok: true });
+  });
+
+  app.post("/api/admin/tickets/:id/status", async (req, res) => {
+    const staff = await requireStaff(req, res, "answer_tickets");
+    if (!staff) return;
+    if (!TICKET_ID_PATTERN.test(req.params.id)) return res.status(400).json({ message: "معرّف الطلب غير صالح" });
+    const status = String(req.body?.status || "");
+    if (!["open", "answered", "closed"].includes(status)) return res.status(400).json({ message: "الحالة غير صالحة" });
+    const { error } = await staff.service.rpc("support_staff_set_status", {
+      p_actor: staff.user.id, p_ticket: req.params.id, p_status: status,
+    });
+    if (error) return sendConsoleError(res, error, "Admin ticket", "تعذر تغيير الحالة");
+    return res.json({ ok: true });
   });
 
   // Supabase Auth Callback Route
@@ -703,16 +947,26 @@ async function startServer() {
   });
 
   // API Routes
+  const RATE_CACHE_MS = 10 * 60_000;
+  const rateCache = new Map<string, { at: number; data: unknown }>();
+
   app.get("/api/exchange-rate/:base", async (req, res) => {
     const { base } = req.params;
     const baseUpper = (base || "USD").toUpperCase();
     if (!/^[A-Z]{3}$/.test(baseUpper)) {
       return res.status(400).json({ message: "Invalid currency code" });
     }
+    const cached = rateCache.get(baseUpper);
+    if (cached && Date.now() - cached.at < RATE_CACHE_MS) {
+      return res.json(cached.data);
+    }
+    if (!rateLimit(`rates:${req.ip}`, 60, 60_000)) {
+      return res.status(429).json({ message: "Too many requests, please wait a minute" });
+    }
     
     // Built-in offline fallback dictionary
     const fallbackRates: Record<string, Record<string, number>> = {
-      USD: { USD: 1, JOD: 0.709, ILS: 3.70, EGP: 47.50, EUR: 0.92, SAR: 3.75, AED: 3.67, IQD: 1310, LYD: 4.8 },
+      USD: { USD: 1, JOD: 0.709, ILS: 3.70, EGP: 47.50, EUR: 0.92, SAR: 3.75, AED: 3.6725, IQD: 1310, LYD: 4.8 },
       JOD: { JOD: 1, USD: 1.41, ILS: 5.22, EGP: 67.00, EUR: 1.30, SAR: 5.29, AED: 5.18, IQD: 1850, LYD: 6.77 },
       ILS: { ILS: 1, USD: 0.27, JOD: 0.1916, EGP: 12.83, EUR: 0.25, SAR: 1.01, AED: 0.99, IQD: 354, LYD: 1.30 }
     };
@@ -723,6 +977,9 @@ async function startServer() {
         throw new Error(`External service responded with status ${response.status}`);
       }
       const data = await response.json();
+      if (data?.result === "success" && data?.rates && typeof data.rates === "object") {
+        rateCache.set(baseUpper, { at: Date.now(), data });
+      }
       res.json(data);
     } catch (error) {
       console.warn(`[Exchange Proxy] Failed to fetch external rates for ${baseUpper}, serving local fallbacks.`, error);
@@ -750,30 +1007,71 @@ async function startServer() {
     });
   });
 
-  /** Null when the user may use the paid assistant, otherwise the refusal to send. Fails closed. */
-  async function checkAssistantAccess(user: any): Promise<{ status: number; code: string; message: string } | null> {
-    if (isVerifiedAdmin(user)) return null;
+  type AssistantRefusal = { status: number; code: string; message: string };
+
+  /**
+   * The store the request is billed to (members use their owner's subscription), or the refusal
+   * to send. Fails closed.
+   */
+  async function checkAssistantAccess(user: any): Promise<{ refusal: AssistantRefusal } | { ownerId: string }> {
+    if (isVerifiedAdmin(user)) return { ownerId: user.id };
     const service = getSupabaseServiceClient();
     if (!service) {
-      return { status: 503, code: "subscription_check_unavailable", message: "Subscription check is not configured on the server" };
+      return { refusal: { status: 503, code: "subscription_check_unavailable", message: "Subscription check is not configured on the server" } };
+    }
+    let ownerId = user.id;
+    const membership = await service
+      .from("workspace_members")
+      .select("owner_id, role")
+      .eq("member_id", user.id)
+      .eq("status", "active")
+      .maybeSingle();
+    if (!membership.error && membership.data) {
+      if (membership.data.role !== "manager") {
+        return { refusal: { status: 403, code: "role_not_allowed", message: "Your role in this store cannot use the assistant" } };
+      }
+      ownerId = membership.data.owner_id;
     }
     const { data, error } = await service
       .from("user_subscriptions")
       .select("subscription_status, trial_start_date, expiry_date")
-      .eq("user_id", user.id)
+      .eq("user_id", ownerId)
       .maybeSingle();
     if (error) {
-      return { status: 503, code: "subscription_check_unavailable", message: "Could not read the subscription" };
+      return { refusal: { status: 503, code: "subscription_check_unavailable", message: "Could not read the subscription" } };
     }
     const access = subscriptionWindow({
       status: data?.subscription_status || "trial",
-      trialStart: data?.trial_start_date || user.created_at,
+      trialStart: data?.trial_start_date || (ownerId === user.id ? user.created_at : undefined),
       expiry: data?.expiry_date,
     });
     if (access.kind === "expired") {
-      return { status: 402, code: "subscription_required", message: "An active subscription is required" };
+      return { refusal: { status: 402, code: "subscription_required", message: "An active subscription is required" } };
     }
-    return null;
+    return { ownerId };
+  }
+
+  /** Token counts as Gemini reports them, per store per day. A failure here never blocks the answer. */
+  async function recordAssistantUsage(ownerId: string, usage: any) {
+    const service = getSupabaseServiceClient();
+    if (!service || !usage) return;
+    const count = (value: unknown) => (Number.isFinite(Number(value)) ? Math.max(0, Math.floor(Number(value))) : 0);
+    const { error } = await service.rpc("record_ai_usage", {
+      p_owner: ownerId,
+      p_prompt: count(usage.promptTokenCount),
+      p_output: count(usage.candidatesTokenCount),
+      p_thoughts: count(usage.thoughtsTokenCount),
+      p_cached: count(usage.cachedContentTokenCount),
+    });
+    if (error) console.warn("[AI usage] not recorded:", error.message);
+  }
+
+  /** Returns a claimed question when Gemini failed before answering. Empty answers stay counted: their tokens were spent. */
+  async function releaseAssistantClaim(ownerId: string) {
+    const service = getSupabaseServiceClient();
+    if (!service) return;
+    const { error } = await service.rpc("release_ai_request", { p_owner: ownerId });
+    if (error) console.warn("[AI usage] question not returned:", error.message);
   }
 
   app.post("/api/chat", async (req, res) => {
@@ -788,15 +1086,30 @@ async function startServer() {
     if (!rateLimit(`chat:${authUser.id}`, 20, 60_000)) {
       return res.status(429).json({ code: "rate_limited", message: "Too many requests, please wait a minute" });
     }
-    const refusal = await checkAssistantAccess(authUser);
-    if (refusal) {
-      return res.status(refusal.status).json({ code: refusal.code, message: refusal.message });
+    const access = await checkAssistantAccess(authUser);
+    if ("refusal" in access) {
+      return res.status(access.refusal.status).json({ code: access.refusal.code, message: access.refusal.message });
     }
 
     const message = typeof req.body?.message === "string" ? req.body.message.trim() : "";
     if (!message || message.length > ASSISTANT_LIMITS.messageChars) {
       return res.status(400).json({ code: "invalid_message", message: "Message is empty or too long" });
     }
+
+    const claimed = !isVerifiedAdmin(authUser);
+    if (claimed) {
+      const service = getSupabaseServiceClient();
+      const claim = service
+        ? await service.rpc("claim_ai_request", { p_owner: access.ownerId, p_limit: AI_DAILY_QUESTIONS_PER_STORE })
+        : null;
+      if (!claim || claim.error) {
+        return res.status(503).json({ code: "usage_check_unavailable", message: "The daily allowance could not be checked" });
+      }
+      if (claim.data !== true) {
+        return res.status(429).json({ code: "daily_limit", message: "This store has used today's assistant questions", limit: AI_DAILY_QUESTIONS_PER_STORE });
+      }
+    }
+
     const context = sanitizeContext(req.body?.context);
     const verbosity = req.body?.verbosity === "concise" ? "concise" : "detailed";
     const language = req.body?.language === "en" ? "en" : "ar";
@@ -828,7 +1141,7 @@ async function startServer() {
                       sellingPrice: { type: Type.NUMBER },
                     },
                   },
-                  productId: { type: Type.STRING },
+                  productRef: { type: Type.NUMBER, description: "The ref number from PRODUCTS." },
                   customer: {
                     type: Type.OBJECT,
                     properties: {
@@ -846,6 +1159,8 @@ async function startServer() {
         },
       });
 
+      void recordAssistantUsage(access.ownerId, response.usageMetadata);
+
       let parsed: any = null;
       try {
         parsed = JSON.parse(response.text || "");
@@ -859,6 +1174,7 @@ async function startServer() {
       return res.json({ text, action: sanitizeAssistantAction(parsed?.action, context), model: GEMINI_MODEL });
     } catch (error: any) {
       console.warn("[AI chat] Gemini request failed:", error?.message || error);
+      if (claimed) await releaseAssistantClaim(access.ownerId);
       return res.status(502).json({ code: "ai_failed", message: "The AI service did not respond" });
     }
   });
