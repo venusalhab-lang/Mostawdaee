@@ -4,9 +4,10 @@ import {
   Sparkles, Palette, Zap, Moon, Sun, Monitor, 
   ShieldCheck, Bell, Database, Download, RefreshCw, Upload,
   Type, Volume2, Info, Copy, Check, FileText, DatabaseZap, CheckSquare, AlertTriangle,
-  Phone, MapPin, Mail, Crown, Users, LifeBuoy, UserCog
+  Phone, MapPin, Mail, Crown, Users, LifeBuoy, UserCog, FileCheck2
 } from 'lucide-react';
 import SubscriptionSettings from './SubscriptionSettings';
+import EInvoiceSettings from './EInvoiceSettings';
 import AccountSettings from './AccountSettings';
 import { TeamManager } from './TeamSettings';
 import SupportCenter from './SupportCenter';
@@ -30,10 +31,10 @@ interface Props {
   onSaveSettings: (settings: AppSettings) => Promise<void> | void;
 }
 
-type SettingsSection = 'profile' | 'visuals' | 'inventory' | 'notifications' | 'subscription' | 'team' | 'support' | 'account' | 'system';
+type SettingsSection = 'profile' | 'visuals' | 'inventory' | 'notifications' | 'subscription' | 'team' | 'einvoice' | 'support' | 'account' | 'system';
 
 // These sections save their own changes; inside the settings form their forms would also submit it.
-const SELF_CONTAINED_SECTIONS = new Set<SettingsSection>(['subscription', 'team', 'support', 'account']);
+const SELF_CONTAINED_SECTIONS = new Set<SettingsSection>(['subscription', 'team', 'einvoice', 'support', 'account']);
 
 export default function Settings({ language, onLanguageToggle, settings, onSaveSettings }: Props) {
   const t = translations[language];
@@ -114,10 +115,10 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
       const permission = await Notification.requestPermission();
       setNotificationPermission(permission);
       if (permission === "granted") {
-        toast.success(isRtl ? "تم تفعيل الإشعارات الفورية بنجاح! 🔔" : "Direct browser notifications fully enabled! 🔔");
+        toast.success(isRtl ? "فُعّلت إشعارات المتصفح." : "Browser notifications enabled.");
         try {
-          new Notification(isRtl ? "مستودعي الذكي" : "Mostawdaee System", {
-            body: isRtl ? "تم تفعيل الإشارات اللحظية لنظام الرادار والمبيعات بنجاح." : "Instant radar limits and operations tracking successfully configured.",
+          new Notification(isRtl ? "مستودعي" : "Mostawdaee", {
+            body: isRtl ? "يصلك إشعار عندما تقترب كمية صنف من النفاد." : "You'll be notified when an item's quantity is running low.",
           });
         } catch (e) {
           console.error("Could not spawn welcome desktop notification:", e);
@@ -151,6 +152,7 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
     { id: 'notifications', label: t.notifications, icon: Bell },
     { id: 'subscription', label: language === 'ar' ? 'الاشتراك' : 'Subscription', icon: Crown },
     { id: 'team', label: language === 'ar' ? 'الفريق' : 'Team', icon: Users },
+    ...(user ? [{ id: 'einvoice' as const, label: language === 'ar' ? 'الفوترة الوطنية' : 'E-invoicing', icon: FileCheck2 }] : []),
     { id: 'support', label: language === 'ar' ? 'الدعم الفني' : 'Support', icon: LifeBuoy },
     { id: 'account', label: language === 'ar' ? 'الحساب والخصوصية' : 'Account & privacy', icon: UserCog },
     { id: 'system', label: t.systemManagement, icon: Database },
@@ -203,24 +205,26 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
     if (!selectedBackupForLocalRestore || !user) return;
     setIsLocalRestoreInProgress(true);
     try {
-      toast.info(isRtl ? "جاري البدء في استعادة البيانات المحلية..." : "Starting local system restore...");
+      toast.info(isRtl ? "جارٍ البدء في استعادة البيانات المحلية..." : "Starting local system restore...");
 
       await restoreStoreBackup(selectedBackupForLocalRestore, {
         saveSettings, saveWarehouse, saveProduct, saveInvoice, saveEmployee, savePayrollRecord, saveCustomer, saveCustomerTransaction,
         saveVaultRecord: (tx) => setDoc(doc(db, 'users', user.uid, 'vault_records', tx.id), tx),
         restoreVault: (v) => restoreVaultBalance(db, user.uid, v),
-      });
+      }, { invoices, vaultTransactions, customerTransactions });
       if (selectedBackupForLocalRestore.settings) setFormData(selectedBackupForLocalRestore.settings);
 
       toast.success(
         isRtl 
-          ? "تم استعادة كافة البيانات المحلية بنجاح من ملف النسخة الاحتياطية! 🚀" 
-          : "Local system restore completed successfully! 🚀"
+          ? "تمت استعادة البيانات من ملف النسخة الاحتياطية."
+          : "Data was restored from the backup file."
       );
       setSelectedBackupForLocalRestore(null);
     } catch (err: any) {
       console.error(err);
-      toast.error(vaultRestoreMessage(err, isRtl) || (isRtl ? `فشل الاستعادة: ${err.message}` : `Restore failed: ${err.message}`));
+      toast.error(vaultRestoreMessage(err, isRtl) || (isRtl
+        ? 'توقفت الاستعادة قبل اكتمالها. تحقق من الاتصال ومن أن الملف نسخة احتياطية من مستودعي، ثم أعد المحاولة.'
+        : 'The restore stopped before finishing. Check your connection and that the file is a Mostawdaee backup, then try again.'));
     } finally {
       setIsLocalRestoreInProgress(false);
     }
@@ -310,6 +314,7 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
             >
               {activeSection === 'subscription' && <SubscriptionSettings language={language} />}
               {activeSection === 'team' && <TeamManager language={language} />}
+              {activeSection === 'einvoice' && user && <EInvoiceSettings language={language} />}
               {activeSection === 'support' && <SupportCenter language={language} />}
               {activeSection === 'account' && <AccountSettings language={language} />}
             </motion.div>
@@ -565,7 +570,7 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
                           <div className="space-y-3 pt-2 animate-fade-in">
                             <div className="space-y-1">
                               <div className="flex justify-between text-[10px] font-bold text-slate-500 dark:text-slate-400">
-                                <span className="font-arabic">{isRtl ? 'سعر الدولار مقابل الشيكل (USD ➡️ ILS)' : 'USD to ILS Rate'}</span>
+                                <span className="font-arabic">{isRtl ? 'سعر الدولار بالشيكل (\u20661 USD = ؟ ILS\u2069)' : 'USD to ILS rate (1 USD = ? ILS)'}</span>
                                 <span className="font-mono text-xs">₪</span>
                               </div>
                               <input 
@@ -579,7 +584,7 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
 
                             <div className="space-y-1">
                               <div className="flex justify-between text-[10px] font-bold text-slate-500 dark:text-slate-400">
-                                <span className="font-arabic">{isRtl ? 'سعر الدينار مقابل الشيكل (JOD ➡️ ILS)' : 'JOD to ILS Rate'}</span>
+                                <span className="font-arabic">{isRtl ? 'سعر الدينار بالشيكل (\u20661 JOD = ؟ ILS\u2069)' : 'JOD to ILS rate (1 JOD = ? ILS)'}</span>
                                 <span className="font-mono text-xs">₪</span>
                               </div>
                               <input 
@@ -593,7 +598,7 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
 
                             <div className="space-y-1">
                               <div className="flex justify-between text-[10px] font-bold text-slate-500 dark:text-slate-400">
-                                <span className="font-arabic">{isRtl ? 'سعر الدينار مقابل الدولار (JOD ➡️ USD)' : 'JOD to USD Rate'}</span>
+                                <span className="font-arabic">{isRtl ? 'سعر الدينار بالدولار (\u20661 JOD = ؟ USD\u2069)' : 'JOD to USD rate (1 JOD = ? USD)'}</span>
                                 <span className="font-mono text-xs">$</span>
                               </div>
                               <input 
@@ -828,8 +833,8 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
                         </h4>
                         <p className="text-xs text-slate-500 dark:text-slate-400 font-arabic">
                           {isRtl 
-                            ? 'اسمَح لمتصفحك بإرسال إشعارات عندما يقترب منتج من النفاذ في رادار المخازن اللحظي.' 
-                            : 'Provide authorization to dispatch background alerts for depleting goods tracking.'}
+                            ? 'اسمح للمتصفح بالإشعارات، فيصلك إشعار عندما تقترب كمية صنف من النفاد.' 
+                            : 'Allow browser notifications to be notified when an item\'s quantity is running low.'}
                         </p>
                       </div>
                       
@@ -894,7 +899,7 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
                         />
                       </div>
                       <div className="md:col-span-2">
-                        <label className="text-xs font-black text-gray-400 uppercase block mb-1">{isRtl ? 'سبب المعايرة' : 'Reason'}</label>
+                        <label className="text-xs font-black text-gray-400 uppercase block mb-1">{isRtl ? 'سبب التسوية' : 'Reason'}</label>
                         <input
                           type="text"
                           placeholder={isRtl ? 'مثال: جرد شهري' : 'e.g. Monthly count'} aria-label={isRtl ? 'مثال: جرد شهري' : 'e.g. Monthly count'}
@@ -920,14 +925,14 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
                                   return;
                                 }
                                 if (!recalibrateData.reason.trim()) {
-                                  toast.error(isRtl ? 'اكتب سبب المعايرة؛ يُحفظ في سجل التدقيق.' : 'Enter a reason; it is kept in the audit record.');
+                                  toast.error(isRtl ? 'اكتب سبب التسوية؛ يُحفظ في سجل التدقيق.' : 'Enter a reason; it is kept in the audit record.');
                                   return;
                                 }
                                 setRecalibrateConfirming(true);
                               }}
                               className="px-6 py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-black uppercase transition-all shadow-md active:scale-95"
                             >
-                              {isRtl ? "مراجعة المعايرة" : "Review recalibration"}
+                              {isRtl ? "مراجعة التسوية" : "Review adjustment"}
                             </button>
                           </div>
                         );
@@ -1029,8 +1034,8 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
                       </div>
                       <p className="text-slate-300/70 text-xs leading-relaxed mb-6 flex-1 font-arabic">
                         {isRtl 
-                          ? "قم برفع ملف النسخة الاحتياطية (.json) الذي قمت بتحميله مسبقاً لاستعادة كافة المعاملات والمنتجات على الفور." 
-                          : "Re-import and overlay previous warehouse states directly by importing a valid exported JSON file."}
+                          ? "اختر ملف نسخة احتياطية (.json) حمّلته سابقاً. تُكتب سجلاته فوق السجلات التي تحمل نفس المعرّف، وتبقى السجلات الأخرى كما هي." 
+                          : "Choose a backup file (.json) you downloaded earlier. Its records overwrite records with the same id; other records stay as they are."}
                       </p>
                       <label className="w-full py-4 bg-slate-800 hover:bg-slate-700 text-white rounded-2xl font-black text-xs uppercase text-center transition-all active:scale-95 border border-slate-700 cursor-pointer flex items-center justify-center gap-2">
                         <Upload size={14} />
@@ -1102,10 +1107,10 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
               <div className={`flex items-center gap-4 ${isRtl ? 'flex-row' : 'flex-row-reverse'} justify-between text-amber-500`}>
                 <div className={isRtl ? 'text-right' : 'text-left'}>
                   <h3 className="text-xl font-extrabold uppercase tracking-tight">
-                    {isRtl ? "تأكيد استعادة المحتوى!" : "Confirm Local Restore!"}
+                    {isRtl ? "استعادة هذه النسخة؟" : "Restore this backup?"}
                   </h3>
                   <span className="text-xs text-amber-600 dark:text-amber-400 font-bold block uppercase tracking-wider">
-                    {isRtl ? "عملية حساسة ومحلية بالكامل" : "Highly Crucial Offline Recovery"}
+                    {isRtl ? "يستبدل السجلات المطابقة" : "Overwrites matching records"}
                   </span>
                 </div>
                 <div className="w-14 h-14 bg-amber-500/10 rounded-2xl flex items-center justify-center border border-amber-500/20">
@@ -1116,8 +1121,8 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
               <div className="p-5 bg-amber-500/5 border border-amber-500/10 rounded-2xl space-y-4 text-xs leading-relaxed text-slate-600 dark:text-slate-300">
                 <p className="font-arabic font-bold text-amber-600 dark:text-amber-400 text-sm">
                   ⚠️ {isRtl 
-                    ? "تحذير: سيقوم هذا الإجراء فوراً بمسح واستبدال كافة المعاملات والمنتجات والخزنة والرواتب والعملاء الحالية بالبيانات المحلية!" 
-                    : "Warning: Proceeding will overwrite all current items, warehouses, ledgers, staff, payrolls, and currencies."}
+                    ? "ستُكتب سجلات هذا الملف فوق السجلات التي تحمل نفس المعرّف، وتبقى السجلات غير الموجودة فيه كما هي. تُستبدل الإعدادات ورصيد الخزنة بما في الملف، إلا إذا سُجّلت في الخزنة حركات أحدث منه. لا يمكن التراجع عن الاستعادة." 
+                    : "Records in this file will overwrite records with the same id; records that are not in it stay as they are. Settings and the vault balance are replaced by the file, unless the vault has newer movements. A restore cannot be undone."}
                 </p>
 
                 {/* File Contents Overview */}

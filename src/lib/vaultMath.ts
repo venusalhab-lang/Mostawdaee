@@ -1,5 +1,5 @@
 import type { Currency, Invoice, VaultTransaction } from '../types';
-import { currencyDecimals } from './exchangeRates';
+import { roundMoney } from './exchangeRates';
 
 /**
  * Single source of truth for vault (الخزنة) arithmetic.
@@ -62,8 +62,7 @@ export function buildVaultDoc(balances: VaultBalances, lastUpdated = Date.now())
 
 /** Rounding that matches each currency's real decimals (see CURRENCY_DECIMALS). */
 export function roundForCurrency(value: number, currency: Currency): number {
-  const f = Math.pow(10, currencyDecimals(currency));
-  return Math.round((value + Number.EPSILON) * f) / f;
+  return roundMoney(value, currency);
 }
 
 /** Applies a signed delta to one currency and returns the new document + the resulting balance. */

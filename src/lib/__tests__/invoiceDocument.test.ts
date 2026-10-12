@@ -71,6 +71,14 @@ describe('buildInvoicePrintHtml', () => {
     expect(html).toContain('Discount');
   });
 
+  it('prints the national e-invoicing QR only for an accepted invoice', () => {
+    expect(buildInvoicePrintHtml({ ...ctx, invoice: base })).not.toContain('National Invoicing System');
+    const html = buildInvoicePrintHtml({ ...ctx, invoice: base, einvoice: { qrDataUrl: 'data:image/png;base64,AAA', number: '<7>' } });
+    expect(html).toContain('src="data:image/png;base64,AAA"');
+    expect(html).toContain('National Invoicing System');
+    expect(html).toContain('&lt;7&gt;');
+  });
+
   it('omits the discount row when there is none', () => {
     expect(buildInvoicePrintHtml({ ...ctx, invoice: base })).not.toContain('Discount');
   });

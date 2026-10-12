@@ -13,7 +13,7 @@ export interface CurrencyConfig {
 
 export const AVAILABLE_PRESCNT_CURRENCIES: CurrencyConfig[] = [
   { code: 'DEFAULT', symbol: '⚙️', nameEn: 'Local Currency', nameAr: 'العملة الافتراضية', intCode: 'DEFAULT' },
-  { code: 'ILS', symbol: '₪', nameEn: 'Israeli Shekel', nameAr: 'شيكل إسرائيلي', intCode: 'ILS' },
+  { code: 'ILS', symbol: '₪', nameEn: 'Shekel', nameAr: 'شيكل', intCode: 'ILS' },
   { code: 'USD', symbol: '$', nameEn: 'US Dollar', nameAr: 'دولار أمريكي', intCode: 'USD' },
   { code: 'JOD', symbol: 'د.أ', nameEn: 'Jordanian Dinar', nameAr: 'دينار أردني', intCode: 'JOD' },
   { code: 'SAR', symbol: 'ر.س', nameEn: 'Saudi Riyal', nameAr: 'ريال سعودي', intCode: 'SAR' },

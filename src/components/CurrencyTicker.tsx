@@ -164,7 +164,7 @@ export default function CurrencyTicker({ isRtl, style }: CurrencyTickerProps) {
         {loading ? (
           <div className="text-[10px] text-slate-400 font-medium animate-pulse flex items-center gap-1 w-full justify-center">
             <RefreshCw className="w-3.5 h-3.5 animate-spin text-cyan-400" />
-            <span>{isRtl ? 'جاري مزامنة أسعار الصرف العالمية...' : 'Synchronizing live global exchange rates...'}</span>
+            <span>{isRtl ? 'جارٍ مزامنة أسعار الصرف العالمية...' : 'Synchronizing live global exchange rates...'}</span>
           </div>
         ) : (
           <div className="flex w-full overflow-hidden relative">

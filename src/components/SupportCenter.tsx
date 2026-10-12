@@ -82,7 +82,7 @@ export default function SupportCenter({ language }: { language: 'ar' | 'en' }) {
       ) : (
         <div className={card}>
           {loading ? (
-            <p className="text-sm text-gray-500">{ar ? 'جاري التحميل...' : 'Loading...'}</p>
+            <p className="text-sm text-gray-500">{ar ? 'جارٍ التحميل...' : 'Loading...'}</p>
           ) : loadError ? (
             <p className="text-sm font-bold text-rose-600">{loadError}</p>
           ) : tickets.length === 0 ? (
@@ -158,7 +158,7 @@ function NewTicket({ ar, onCancel, onCreated }: { ar: boolean; onCancel: () => v
         <button type="button" onClick={onCancel} className={quiet}>{ar ? 'إلغاء' : 'Cancel'}</button>
         <button type="submit" disabled={busy || subject.trim().length < 3 || !body.trim()} className={primary}>
           <Send size={15} />
-          <span>{busy ? (ar ? 'جاري الإرسال...' : 'Sending...') : (ar ? 'إرسال' : 'Send')}</span>
+          <span>{busy ? (ar ? 'جارٍ الإرسال...' : 'Sending...') : (ar ? 'إرسال' : 'Send')}</span>
         </button>
       </div>
     </form>

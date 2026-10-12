@@ -2,7 +2,12 @@ import { describe, expect, it } from 'vitest';
 import type { Cheque, ChequeInput } from '../../types';
 import {
   allowedTransitions,
+  appendNote,
   canTransition,
+  chequePaymentPlan,
+  daysUntilDue,
+  dueCounts,
+  dueFilters,
   filterCheques,
   isOverdue,
   isValidDate,
@@ -132,5 +137,60 @@ describe('filterCheques', () => {
     expect(isOverdue(rows[0], '2026-10-06')).toBe(true);
     expect(isOverdue(rows[1], '2026-12-01')).toBe(false);
     expect(isOverdue(rows[0], '2026-10-05')).toBe(false);
+  });
+});
+
+describe('booking a cashed cheque on the customer account', () => {
+  it('reduces the debt in the same currency', () => {
+    expect(chequePaymentPlan({ amount: 250.5, currency: 'JOD' }, { totalDebt: 1000, currency: 'JOD' }))
+      .toEqual({ ok: true, debtBefore: 1000, debtAfter: 749.5 });
+  });
+
+  it('refuses another currency instead of guessing a rate', () => {
+    expect(chequePaymentPlan({ amount: 100, currency: 'ILS' }, { totalDebt: 1000, currency: 'JOD' }))
+      .toEqual({ ok: false, reason: 'currency', debtBefore: 1000 });
+  });
+
+  it('refuses a cheque larger than the debt or a customer with nothing owed', () => {
+    expect(chequePaymentPlan({ amount: 1000.001, currency: 'JOD' }, { totalDebt: 1000, currency: 'JOD' })).toMatchObject({ ok: false, reason: 'exceeds' });
+    expect(chequePaymentPlan({ amount: 10, currency: 'JOD' }, { totalDebt: 0, currency: 'JOD' })).toMatchObject({ ok: false, reason: 'no_debt' });
+  });
+
+  it('appends a line to existing notes', () => {
+    expect(appendNote('', 'سبب الرجوع: الرصيد غير كافٍ')).toBe('سبب الرجوع: الرصيد غير كافٍ');
+    expect(appendNote('دفعة أولى ', 'سبب')).toBe('دفعة أولى\nسبب');
+    expect(appendNote('ملاحظة', '  ')).toBe('ملاحظة');
+  });
+});
+
+describe('due dates', () => {
+  it('counts calendar days across month ends and leap days', () => {
+    expect(daysUntilDue('2026-10-12', '2026-10-09')).toBe(3);
+    expect(daysUntilDue('2026-10-09', '2026-10-09')).toBe(0);
+    expect(daysUntilDue('2026-09-30', '2026-10-02')).toBe(-2);
+    expect(daysUntilDue('2028-03-01', '2028-02-28')).toBe(2);
+    expect(daysUntilDue('2026-02-30', '2026-02-01')).toBeNull();
+  });
+
+  it('counts overdue and due-within-a-week pending cheques only', () => {
+    const list = [
+      cheque({ id: 'late', dueDate: '2026-10-08' }),
+      cheque({ id: 'today', dueDate: '2026-10-09' }),
+      cheque({ id: 'week', dueDate: '2026-10-16' }),
+      cheque({ id: 'later', dueDate: '2026-10-17' }),
+      cheque({ id: 'cashed', dueDate: '2026-10-01', status: 'cashed' }),
+    ];
+    expect(dueCounts(list, '2026-10-09')).toEqual({ overdue: 1, soon: 2 });
+  });
+
+  it('builds filters that select exactly those cheques', () => {
+    const list = [
+      cheque({ id: 'late', dueDate: '2026-10-08' }),
+      cheque({ id: 'today', dueDate: '2026-10-09' }),
+      cheque({ id: 'week', dueDate: '2026-10-16' }),
+      cheque({ id: 'later', dueDate: '2026-10-17' }),
+    ];
+    expect(filterCheques(list, 'incoming', dueFilters('overdue', '2026-10-09')).map((row) => row.id)).toEqual(['late']);
+    expect(filterCheques(list, 'incoming', dueFilters('soon', '2026-10-09')).map((row) => row.id)).toEqual(['today', 'week']);
   });
 });

@@ -57,18 +57,31 @@ export function currencyDecimals(code: string): number {
   return CURRENCY_DECIMALS[code] ?? 2;
 }
 
+/**
+ * Half away from zero on the decimal value the user sees: 1.005 → 1.01, 0.285 → 0.29, -1.005 → -1.01.
+ * Scaling through the decimal string avoids binary drift such as 1.005 * 100 = 100.49999999999999.
+ */
 export function roundMoney(value: number, code: string): number {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n === 0) return 0;
   const d = currencyDecimals(code);
-  const f = 10 ** d;
-  return Math.round((Number(value) || 0) * f + Number.EPSILON) / f;
+  const [mantissa, exp = '0'] = Math.abs(n).toPrecision(15).split('e');
+  const scaled = Math.round(Number(`${mantissa}e${Number(exp) + d}`));
+  const rounded = Number(`${scaled}e-${d}`);
+  return rounded === 0 ? 0 : Math.sign(n) * rounded;
 }
 
-export function formatMoney(value: number, code: string, locale?: string): string {
+/** The number alone, rounded and padded to the currency's minor units (for layouts that print the code separately). */
+export function formatAmount(value: number, code: string, locale?: string): string {
   const d = currencyDecimals(code);
-  const num = (Number(value) || 0).toLocaleString(locale, {
+  return roundMoney(Number(value) || 0, code).toLocaleString(locale, {
     minimumFractionDigits: d,
     maximumFractionDigits: d,
   });
+}
+
+export function formatMoney(value: number, code: string, locale?: string): string {
+  const num = formatAmount(value, code, locale);
   const symbol = CURRENCY_SYMBOLS[code] || code;
   return symbol === '$' ? `$${num}` : `${num} ${symbol}`;
 }
@@ -182,6 +195,53 @@ export function buildUsdUnitRates(
   else if (!live) applySettings(rates, settings);
   rates.USD = 1;
   return rates;
+}
+
+/** Live rates older than this are not trusted for amounts that become debts. */
+export const DEBT_RATE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+export interface ConversionBasis {
+  ok: boolean;
+  /** Both sides come from the merchant's own rates. */
+  manual: boolean;
+  /** When the live rates used were fetched; null when none were needed. */
+  liveAt: number | null;
+  /** Units of `to` per one unit of `from`. */
+  rate: number;
+}
+
+function manualCovers(code: string, s?: RateSettings | null): boolean {
+  if (code === 'USD') return true;
+  if (!s?.useManualExchangeRates) return false;
+  if (code === 'JOD') return Number(s.exchangeRateJOD_USD) > 0;
+  if (code === 'ILS') return Number(s.exchangeRateUSD_ILS) > 0 || (Number(s.exchangeRateJOD_ILS) > 0 && Number(s.exchangeRateJOD_USD) > 0);
+  return false;
+}
+
+/**
+ * Whether converting `from` → `to` rests on a known rate: the merchant's manual rate or a live rate
+ * fetched within `maxAgeMs`. Built-in defaults are never enough for a debt.
+ */
+export function conversionBasis(
+  from: string,
+  to: string,
+  settings: RateSettings | null | undefined,
+  live: Record<string, number> | null,
+  liveAt: number | null,
+  now = Date.now(),
+  maxAgeMs = DEBT_RATE_MAX_AGE_MS
+): ConversionBasis {
+  const rates = buildUsdUnitRates(settings, live);
+  const rate = convertAmount(1, from, to, rates);
+  if (from === to) return { ok: true, manual: false, liveAt: null, rate: 1 };
+  const fresh = !!live && liveAt !== null && now - liveAt <= maxAgeMs && now >= liveAt - 60_000;
+  let usedLive = false;
+  for (const code of [from, to]) {
+    if (manualCovers(code, settings)) continue;
+    if (fresh && Number(live?.[code]) > 0) { usedLive = true; continue; }
+    return { ok: false, manual: false, liveAt: null, rate };
+  }
+  return { ok: true, manual: !usedLive, liveAt: usedLive ? liveAt : null, rate };
 }
 
 export function convertAmount(

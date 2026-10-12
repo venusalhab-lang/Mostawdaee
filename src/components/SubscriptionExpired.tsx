@@ -166,7 +166,7 @@ export default function SubscriptionExpired({ language, onLanguageToggle, reason
                 className="w-full py-4 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white font-black text-sm rounded-xl transition flex items-center justify-center gap-2 cursor-pointer"
               >
                 <Smartphone size={16} />
-                <span>{busy === 'buy' ? (isRtl ? 'جاري الاتصال بـ Google Play...' : 'Connecting to Google Play...') : (isRtl ? 'الاشتراك السنوي عبر Google Play' : 'Annual subscription via Google Play')}</span>
+                <span>{busy === 'buy' ? (isRtl ? 'جارٍ الاتصال بـ Google Play...' : 'Connecting to Google Play...') : (isRtl ? 'الاشتراك السنوي عبر Google Play' : 'Annual subscription via Google Play')}</span>
               </button>
               <button type="button" onClick={restore} disabled={busy !== null} className={`w-full ${secondary}`}>
                 <RotateCw size={13} className={busy === 'restore' ? 'animate-spin' : ''} />
@@ -191,7 +191,7 @@ export default function SubscriptionExpired({ language, onLanguageToggle, reason
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <button type="button" onClick={recheck} disabled={busy !== null} className={secondary}>
             <RotateCw size={13} className={busy === 'check' ? 'animate-spin' : ''} />
-            <span>{busy === 'check' ? (isRtl ? 'جاري التحقق...' : 'Checking...') : (isRtl ? 'إعادة التحقق' : 'Check again')}</span>
+            <span>{busy === 'check' ? (isRtl ? 'جارٍ التحقق...' : 'Checking...') : (isRtl ? 'إعادة التحقق' : 'Check again')}</span>
           </button>
           <button
             type="button"
@@ -206,7 +206,7 @@ export default function SubscriptionExpired({ language, onLanguageToggle, reason
 
         {member && (
           <button type="button" onClick={leave} disabled={busy !== null} className={`w-full ${secondary}`}>
-            <span>{busy === 'leave' ? (isRtl ? 'جاري المغادرة...' : 'Leaving...') : (isRtl ? `مغادرة «${storeLabel}» والعودة إلى حسابي` : `Leave "${storeLabel}" and return to my account`)}</span>
+            <span>{busy === 'leave' ? (isRtl ? 'جارٍ المغادرة...' : 'Leaving...') : (isRtl ? `مغادرة «${storeLabel}» والعودة إلى حسابي` : `Leave "${storeLabel}" and return to my account`)}</span>
           </button>
         )}
 

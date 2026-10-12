@@ -124,8 +124,11 @@ export async function loadAuditArchive(userId: string): Promise<StoredInventoryA
     for (const line of stored.lines) localNames.set(`${line.auditId}:${line.productId}`, line);
   }
 
+  const appliedHere = new Set(local.filter((row) => row.audit.status === 'completed').map((row) => row.audit.id));
   return (audits || []).map((row) => {
-    const audit = mapAudit(row as Record<string, unknown>);
+    const mapped = mapAudit(row as Record<string, unknown>);
+    // Stock was already changed from this device; a draft on the server must not be offered for a second apply.
+    const audit = appliedHere.has(mapped.id) ? { ...mapped, status: 'completed' as const } : mapped;
     const lines = itemRows
       .filter((item) => String(item.audit_id) === audit.id)
       .map((item) => mapLine(item, localNames));

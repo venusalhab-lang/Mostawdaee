@@ -3,6 +3,7 @@ import { Coins, Menu, ChevronDown, Check, ShoppingCart } from 'lucide-react';
 import { sounds } from '../lib/sounds';
 import { toast } from 'sonner';
 import Logo from './Logo';
+import { useFirebase } from './FirebaseProvider';
 
 interface HeaderProps {
   isRtl: boolean;
@@ -22,7 +23,7 @@ interface HeaderProps {
 const CURRENCIES = [
   { code: 'JOD', symbol: 'د.أ', label: 'دينار أردني', sub: 'Jordanian Dinar', color: 'text-emerald-600 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200/20' },
   { code: 'USD', symbol: '$', label: 'دولار أمريكي', sub: 'US Dollar', color: 'text-amber-500 bg-amber-50 dark:bg-amber-950/40 border border-amber-200/20' },
-  { code: 'ILS', symbol: '₪', label: 'شيكل في فلسطين', sub: 'New Israeli Shekel', color: 'text-sky-500 bg-sky-50 dark:bg-sky-950/40 border border-sky-200/20' },
+  { code: 'ILS', symbol: '₪', label: 'شيكل', sub: 'Shekel', color: 'text-sky-500 bg-sky-50 dark:bg-sky-950/40 border border-sky-200/20' },
   { code: 'SAR', symbol: 'ر.س', label: 'ريال سعودي', sub: 'Saudi Riyal', color: 'text-teal-600 bg-teal-50 dark:bg-teal-950/40 border border-teal-200/20' },
   { code: 'IQD', symbol: 'د.ع', label: 'دينار عراقي', sub: 'Iraqi Dinar', color: 'text-indigo-600 bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-200/20' },
   { code: 'AED', symbol: 'د.إ', label: 'درهم إماراتي', sub: 'UAE Dirham', color: 'text-cyan-600 bg-cyan-50 dark:bg-cyan-950/40 border border-cyan-200/20' },
@@ -48,6 +49,8 @@ export default function Header({
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const hasLongPressedRef = useRef(false);
+  const { canOpenScreen } = useFirebase();
+  const assistantAllowed = canOpenScreen('ai-assistant');
 
   // Long press on Logo state
   const [isPressing, setIsPressing] = useState(false);
@@ -62,13 +65,13 @@ export default function Header({
   useEffect(() => {
     const handleOnline = () => {
       setIsOnline(true);
-      toast.success(isRtl ? "تمت إعادة الاتصال بقاعدة البيانات والشبكة اللحظية! ⚡" : "Database and network connection re-established! ⚡", {
+      toast.success(isRtl ? "عاد الاتصال." : "Back online.", {
         id: 'conn-status-toast'
       });
     };
     const handleOffline = () => {
       setIsOnline(false);
-      toast.error(isRtl ? "أنت تعمل الآن في وضع عدم الاتصال (أوفلاين) - سنقوم بحفظ عملياتك محلياً" : "Working in Offline Mode - changes will be saved locally", {
+      toast.error(isRtl ? "لا يوجد اتصال. البيع غير الآجل يُحفظ على الجهاز ويُرسل لاحقاً؛ باقي العمليات تحتاج اتصالاً" : "No connection. Non-credit sales are saved on this device and sent later; other actions need a connection", {
         id: 'conn-status-toast'
       });
     };
@@ -89,6 +92,7 @@ export default function Header({
   }, [isRtl]);
 
   const startPress = (e: React.MouseEvent | React.TouchEvent) => {
+    if (!assistantAllowed) return;
     // Left-click only for mouse events
     if ('button' in e && e.button !== 0) return;
     
@@ -137,6 +141,7 @@ export default function Header({
   };
 
   const handleLogoClick = () => {
+    if (!assistantAllowed) return;
     if (hasLongPressedRef.current) {
       hasLongPressedRef.current = false;
       return;
@@ -171,14 +176,6 @@ export default function Header({
     sounds.playClick();
     onPreferredCurrencyChange(code);
     setDropdownOpen(false);
-    const chosen = CURRENCIES.find(c => c.code === code);
-    toast.success(
-      code === 'DEFAULT'
-        ? (isRtl ? 'العملة النشطة هي عملة النظام المحفوظة' : 'Active currency follows the saved system currency')
-        : (isRtl
-          ? `عملة النظام الآن ${chosen?.label || code} (${chosen?.symbol || ''})`
-          : `System currency is now ${chosen?.sub || code} (${chosen?.symbol || ''})`)
-    );
   };
 
   return (
@@ -201,6 +198,7 @@ export default function Header({
             onOpenSidebar();
           }}
           className="p-2 text-slate-500 dark:text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl transition-all cursor-pointer active:scale-95 shrink-0 flex items-center justify-center mentoring-open-sidebar"
+          data-sidebar-toggle=""
           title={isRtl ? 'فتح القائمة الجانبية' : 'Open Sidebar'} aria-label={isRtl ? 'فتح القائمة الجانبية' : 'Open Sidebar'}
         >
           <Menu className="w-5.5 h-5.5" />
@@ -216,12 +214,12 @@ export default function Header({
             onTouchEnd={endPress}
             onClick={handleLogoClick}
             onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleLogoClick(); } }}
-            role="button"
-            tabIndex={0}
-            aria-label={isRtl ? 'المساعد الذكي' : 'Smart assistant'}
-            aria-pressed={activeScreen === 'ai-assistant'}
-            className={`relative w-10 h-10 rounded-[12px] bg-slate-100/60 dark:bg-white/5 border border-slate-300 dark:border-white/10 shadow-[0_4px_12px_rgba(0,0,0,0.03)] dark:shadow-[0_0_15px_rgba(255,255,255,0.04)] flex items-center justify-center transition-all duration-300 shrink-0 select-none cursor-pointer overflow-hidden ${isPressing ? 'scale-90 bg-indigo-50 dark:bg-indigo-950/20' : 'hover:scale-105 active:scale-95'}`}
-            title={isRtl ? 'المساعد الذكي' : 'Smart assistant'}
+            role={assistantAllowed ? 'button' : undefined}
+            tabIndex={assistantAllowed ? 0 : undefined}
+            aria-label={assistantAllowed ? (isRtl ? 'المساعد الذكي' : 'Smart assistant') : undefined}
+            aria-pressed={assistantAllowed ? activeScreen === 'ai-assistant' : undefined}
+            className={`relative w-10 h-10 rounded-[12px] bg-slate-100/60 dark:bg-white/5 border border-slate-300 dark:border-white/10 shadow-[0_4px_12px_rgba(0,0,0,0.03)] dark:shadow-[0_0_15px_rgba(255,255,255,0.04)] flex items-center justify-center transition-all duration-300 shrink-0 select-none overflow-hidden ${assistantAllowed ? 'cursor-pointer' : ''} ${isPressing ? 'scale-90 bg-indigo-50 dark:bg-indigo-950/20' : assistantAllowed ? 'hover:scale-105 active:scale-95' : ''}`}
+            title={assistantAllowed ? (isRtl ? 'المساعد الذكي' : 'Smart assistant') : undefined}
           >
             {/* Visual Long-Press Progress Bar Overlay representing fill-up */}
             {isPressing && (
@@ -406,7 +404,7 @@ export default function Header({
               }`}
             >
               <div className="px-3 py-1.5 text-[10px] font-extrabold text-slate-400 dark:text-slate-500 tracking-wider uppercase border-b border-slate-100 dark:border-slate-800 mb-1 font-sans">
-                {isRtl ? 'اختر عملة النظام النشطة' : 'Select Display Currency'}
+                {isRtl ? 'اختر عملة النظام' : 'Select system currency'}
               </div>
               <div className="max-h-72 overflow-y-auto">
                 {CURRENCIES.map((curr) => {

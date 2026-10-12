@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { invoiceNetRevenue, saleInvoiceProfit, snapshotLineCosts, stockValueByCurrency, summarizeProfits, weightedAverageCost } from '../profits';
+import { invoiceNetRevenue, saleInvoiceProfit, saleLineProfits, snapshotLineCosts, stockValueByCurrency, summarizeProfits, weightedAverageCost } from '../profits';
 import type { Invoice, Product } from '../../types';
 
 const rates = { USD: 1, JOD: 0.709, ILS: 3.7 };
@@ -62,6 +62,25 @@ describe('profits', () => {
   });
 });
 
+describe('saleLineProfits', () => {
+  it('spreads the invoice discount by line value and excludes VAT', () => {
+    const inv = sale({
+      items: [
+        { productId: 'p1', description: 'a', quantity: 2, unitPrice: 30, total: 60 },
+        { productId: 'p2', description: 'b', quantity: 1, unitPrice: 40, total: 40 },
+      ],
+      subtotal: 100, discount: 10, taxAmount: 14.4, totalAmount: 104.4,
+    });
+    const byId = new Map([['p1', product({ id: 'p1', unitCost: 20 })], ['p2', product({ id: 'p2', unitCost: 0 })]]);
+    const lines = saleLineProfits(inv, byId, rates, 'JOD');
+    expect(lines[0].revenue).toBeCloseTo(54, 9);
+    expect(lines[1].revenue).toBeCloseTo(36, 9);
+    expect(lines[0].revenue + lines[1].revenue).toBeCloseTo(saleInvoiceProfit(inv, byId, rates, 'JOD').revenue, 9);
+    expect(lines[0].cost).toBe(40);
+    expect(lines[1].cost).toBeNull();
+  });
+});
+
 describe('weightedAverageCost', () => {
   const product = { quantity: 10, unitCost: 2, currency: 'JOD' };
 
@@ -81,6 +100,20 @@ describe('weightedAverageCost', () => {
 
   it('ignores empty receipts', () => {
     expect(weightedAverageCost(product, 0, 0, 'JOD', 'JOD')).toBeNull();
+  });
+
+  it('does not dilute the purchase cost with stock that has no recorded cost', () => {
+    expect(weightedAverageCost({ quantity: 10, unitCost: 0, currency: 'JOD' }, 10, 100, 'JOD', 'JOD')).toBe(10);
+  });
+});
+
+describe('snapshotLineCosts without a cost', () => {
+  it('leaves the cost unknown instead of recording 0', () => {
+    const byId = new Map([['p1', product({ unitCost: 0, costPrice: undefined })]]);
+    const [line] = snapshotLineCosts(sale({}).items, byId, 'JOD');
+    expect(line.unitCost).toBeUndefined();
+    const p = saleInvoiceProfit({ ...sale({}), items: [line] }, byId, {}, 'JOD');
+    expect(p.unknownCostLines).toBe(1);
   });
 });
 

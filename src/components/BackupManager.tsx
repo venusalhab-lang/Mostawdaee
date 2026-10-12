@@ -40,6 +40,7 @@ export default function BackupManager({ language }: BackupManagerProps) {
   const [backupStats, setBackupStats] = useState<ReturnType<typeof backupCounts> | null>(null);
   const [backupDate, setBackupDate] = useState<string>('');
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const importingRef = useRef(false);
 
   const t = {
     title: isRtl ? 'النسخ الاحتياطي والأمان' : 'Backup & Data Security Hub',
@@ -51,7 +52,7 @@ export default function BackupManager({ language }: BackupManagerProps) {
       ? 'ملف واحد يحوي الأصناف والمستودعات والفواتير والعملاء وديونهم وحركات الخزنة ورصيدها والموظفين والرواتب والإعدادات.' 
       : 'One file with products, warehouses, invoices, customers and their debts, vault movements and balance, employees, payroll and settings.',
     btnExport: isRtl ? 'تحميل نسخة احتياطية الآن' : 'Download a backup now',
-    preparingBackup: isRtl ? 'جاري تجهيز النسخة...' : 'Preparing the backup...',
+    preparingBackup: isRtl ? 'جارٍ تجهيز النسخة...' : 'Preparing the backup...',
     importTitle: isRtl ? 'استيراد واستعادة كامل البيانات' : 'Restore from a backup file',
     importDesc: isRtl 
       ? 'اختر ملف نسخة من مستودعي. تُعاد السجلات التي فيه، ولا يُستبدل رصيد الخزنة إذا سُجّلت بعده حركات أحدث.' 
@@ -61,7 +62,7 @@ export default function BackupManager({ language }: BackupManagerProps) {
       ? "ستُكتب سجلات هذا الملف فوق السجلات التي تحمل نفس المعرّف في متجرك.\nالسجلات غير الموجودة في الملف تبقى كما هي.\n\nهل تريد المتابعة؟"
       : "Records in this file will overwrite records with the same id in your store.\nRecords that are not in the file stay as they are.\n\nContinue?",
     successTitle: isRtl ? 'تمت العملية بنجاح' : 'Done',
-    processingRestore: isRtl ? 'جاري استعادة السجلات...' : 'Restoring records...',
+    processingRestore: isRtl ? 'جارٍ استعادة السجلات...' : 'Restoring records...',
     legacyFile: isRtl
       ? 'هذا الملف من صيغة قديمة لا تحوي دفاتر المتجر، فلم يُستعد منه شيء. استخدم نسخة أحدث أو نسخة Google Drive.'
       : 'This file uses an old format without the store books, so nothing was restored. Use a newer backup or a Google Drive backup.',
@@ -71,7 +72,7 @@ export default function BackupManager({ language }: BackupManagerProps) {
       ? 'جدول يفتح في Excel: اسم الصنف والقسم والمستودع والكمية وسعر البيع بعملته وتاريخ الإضافة.'
       : 'A sheet that opens in Excel: item name, category, warehouse, quantity, selling price in its currency and date added.',
     btnCsv: isRtl ? 'تحميل جدول جرد المنتجات الحالي (Excel)' : 'Download stock sheet (Excel CSV)',
-    csvPreparing: isRtl ? 'جاري تجهيز تقرير المخزون...' : 'Preparing the stock sheet...',
+    csvPreparing: isRtl ? 'جارٍ تجهيز تقرير المخزون...' : 'Preparing the stock sheet...',
     csvSuccess: isRtl ? 'تم تحميل تقرير جرد المخزون (صيغة Excel).' : 'Stock sheet downloaded (Excel CSV).',
     csvNoData: isRtl ? 'لا توجد أصناف لتصديرها بعد.' : 'There are no products to export yet.',
   };
@@ -95,60 +96,76 @@ export default function BackupManager({ language }: BackupManagerProps) {
   };
 
   const executeFileImport = (file: File) => {
-    if (!file) return;
+    if (!file || loading || importingRef.current) return;
+    importingRef.current = true;
     setStatus({ type: '', message: '' });
     setBackupStats(null);
 
     const reader = new FileReader();
+    reader.onerror = () => {
+      importingRef.current = false;
+      sounds.playError();
+      setStatus({ type: 'error', message: t.invalidFile });
+    };
     reader.onload = async (e) => {
-      let data: any;
       try {
-        data = JSON.parse(String(e.target?.result || ''));
-      } catch {
-        sounds.playError();
-        setStatus({ type: 'error', message: t.invalidFile });
-        return;
-      }
-      if (isLegacyTableBackup(data)) {
-        sounds.playError();
-        setStatus({ type: 'error', message: t.legacyFile });
-        return;
-      }
-      if (!isStoreBackup(data)) {
-        sounds.playError();
-        setStatus({ type: 'error', message: t.invalidFile });
-        return;
-      }
-      if (!window.confirm(t.confirmText)) {
-        sounds.playClick();
-        return;
-      }
-      if (!user) return;
-
-      setLoading(true);
-      toast.info(t.processingRestore);
-      try {
-        await restoreStoreBackup(data, {
-          saveSettings, saveWarehouse, saveProduct, saveInvoice, saveEmployee, savePayrollRecord, saveCustomer, saveCustomerTransaction,
-          saveVaultRecord: (tx) => setDoc(doc(db, 'users', user.uid, 'vault_records', tx.id), tx),
-          restoreVault: (v) => restoreVaultBalance(db, user.uid, v),
-        });
-        sounds.playSuccess();
-        setStatus({ type: 'success', message: isRtl ? 'تمت استعادة السجلات من الملف.' : 'Records were restored from the file.' });
-        setBackupStats(backupCounts(data));
-        if (data.timestamp) setBackupDate(new Date(data.timestamp).toLocaleString(isRtl ? 'ar-EG' : 'en-US'));
-      } catch (err: any) {
-        console.error(err);
-        sounds.playError();
-        setStatus({
-          type: 'error',
-          message: vaultRestoreMessage(err, isRtl) || (isRtl ? `توقفت الاستعادة: ${err?.message || ''}` : `Restore stopped: ${err?.message || ''}`),
-        });
+        await importText(e);
       } finally {
-        setLoading(false);
+        importingRef.current = false;
       }
     };
     reader.readAsText(file);
+  };
+
+  const importText = async (e: ProgressEvent<FileReader>) => {
+    let data: any;
+    try {
+      data = JSON.parse(String(e.target?.result || ''));
+    } catch {
+      sounds.playError();
+      setStatus({ type: 'error', message: t.invalidFile });
+      return;
+    }
+    if (isLegacyTableBackup(data)) {
+      sounds.playError();
+      setStatus({ type: 'error', message: t.legacyFile });
+      return;
+    }
+    if (!isStoreBackup(data)) {
+      sounds.playError();
+      setStatus({ type: 'error', message: t.invalidFile });
+      return;
+    }
+    if (!window.confirm(t.confirmText)) {
+      sounds.playClick();
+      return;
+    }
+    if (!user) return;
+
+    setLoading(true);
+    toast.info(t.processingRestore);
+    try {
+      await restoreStoreBackup(data, {
+        saveSettings, saveWarehouse, saveProduct, saveInvoice, saveEmployee, savePayrollRecord, saveCustomer, saveCustomerTransaction,
+        saveVaultRecord: (tx) => setDoc(doc(db, 'users', user.uid, 'vault_records', tx.id), tx),
+        restoreVault: (v) => restoreVaultBalance(db, user.uid, v),
+      }, { invoices, vaultTransactions, customerTransactions });
+      sounds.playSuccess();
+      setStatus({ type: 'success', message: isRtl ? 'تمت استعادة السجلات من الملف.' : 'Records were restored from the file.' });
+      setBackupStats(backupCounts(data));
+      if (data.timestamp) setBackupDate(new Date(data.timestamp).toLocaleString(isRtl ? 'ar-EG' : 'en-US'));
+    } catch (err: any) {
+      console.error(err);
+      sounds.playError();
+      setStatus({
+        type: 'error',
+        message: vaultRestoreMessage(err, isRtl) || (isRtl
+          ? 'توقفت الاستعادة قبل اكتمالها. تحقق من الاتصال ومن أن الملف نسخة احتياطية من مستودعي، ثم أعد المحاولة.'
+          : 'The restore stopped before finishing. Check your connection and that the file is a Mostawdaee backup, then try again.'),
+      });
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleExportCSV = () => {

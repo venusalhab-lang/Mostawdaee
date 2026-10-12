@@ -1,5 +1,62 @@
 import { describe, it, expect } from 'vitest';
-import { convertMoney, convertAmount, formatMoney, currencyDecimals, buildUsdUnitRates, POS_CURRENCY_CODES } from '../exchangeRates';
+import { convertMoney, convertAmount, formatMoney, currencyDecimals, buildUsdUnitRates, POS_CURRENCY_CODES, roundMoney, conversionBasis, DEBT_RATE_MAX_AGE_MS } from '../exchangeRates';
+import { roundForCurrency } from '../vaultMath';
+
+describe('conversionBasis', () => {
+  const live = { USD: 1, JOD: 0.71, ILS: 3.6, IQD: 1310 };
+  const now = 1_800_000_000_000;
+
+  it('accepts a fresh live rate and reports when it was fetched', () => {
+    const b = conversionBasis('JOD', 'IQD', null, live, now - 1000, now);
+    expect(b.ok).toBe(true);
+    expect(b.liveAt).toBe(now - 1000);
+    expect(b.rate).toBeCloseTo(1310 / 0.71, 6);
+  });
+
+  it('refuses stale or missing live rates (built-in defaults are not enough)', () => {
+    expect(conversionBasis('JOD', 'IQD', null, live, now - DEBT_RATE_MAX_AGE_MS - 1, now).ok).toBe(false);
+    expect(conversionBasis('JOD', 'IQD', null, null, null, now).ok).toBe(false);
+  });
+
+  it('accepts the merchant\'s manual rates for the currencies they cover', () => {
+    const s = { useManualExchangeRates: true, exchangeRateJOD_USD: 1.41, exchangeRateUSD_ILS: 3.7 };
+    const b = conversionBasis('JOD', 'ILS', s, null, null, now);
+    expect(b.ok).toBe(true);
+    expect(b.manual).toBe(true);
+    expect(conversionBasis('JOD', 'IQD', s, null, null, now).ok).toBe(false);
+  });
+
+  it('same currency needs no rate', () => {
+    expect(conversionBasis('USD', 'USD', null, null, null, now)).toMatchObject({ ok: true, rate: 1 });
+  });
+});
+
+describe('roundMoney', () => {
+  it('rounds half away from zero on the decimal value', () => {
+    expect(roundMoney(1.005, 'USD')).toBe(1.01);
+    expect(roundMoney(0.285, 'USD')).toBe(0.29);
+    expect(roundMoney(1.255, 'USD')).toBe(1.26);
+    expect(roundMoney(1.0005, 'JOD')).toBe(1.001);
+    expect(roundMoney(-1.005, 'USD')).toBe(-1.01);
+    expect(roundMoney(-2.5, 'IQD')).toBe(-3);
+    expect(roundMoney(0.1 + 0.2, 'USD')).toBe(0.3);
+  });
+
+  it('never returns -0, NaN or Infinity', () => {
+    expect(Object.is(roundMoney(-0.0001, 'USD'), 0)).toBe(true);
+    expect(roundMoney(NaN, 'USD')).toBe(0);
+    expect(roundMoney(Infinity, 'USD')).toBe(0);
+    expect(roundMoney(1e-9, 'JOD')).toBe(0);
+    expect(roundMoney(123456789.125, 'USD')).toBe(123456789.13);
+  });
+
+  it('is the same function the vault uses', () => {
+    for (const v of [1.005, 0.285, -1.005, 2.675, 1234.5675]) {
+      expect(roundForCurrency(v, 'USD')).toBe(roundMoney(v, 'USD'));
+      expect(roundForCurrency(v, 'JOD')).toBe(roundMoney(v, 'JOD'));
+    }
+  });
+});
 
 describe('exchangeRates', () => {
   it('has the supported currencies', () => {

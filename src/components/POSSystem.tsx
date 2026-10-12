@@ -47,7 +47,11 @@ import { computeInvoiceTotals, resolveVatRate } from '../lib/invoiceTotals';
 import { markUnsavedWork } from '../lib/backNavigation';
 import { getExternalSalesApi } from '../lib/externalSalesApi';
 import { computeStockStatus } from '../lib/stock';
+import { pickForPurchase, pickForSale, productsForCode } from '../lib/productLookup';
+import { formatPackStock, isPackLine, lineAsPack, lineKey, lineQuantityText, lineUnits, productPack, productsForPackCode, unitsInCart } from '../lib/packs';
 import CurrencyPicker from './CurrencyPicker';
+import ShowMoreBar from './ui/ShowMoreBar';
+import { useProgressiveList } from '../hooks/useProgressiveList';
 
 interface POSSystemProps {
   language: Language;
@@ -75,7 +79,7 @@ export default function POSSystem({ language }: POSSystemProps) {
   const t = translations[language];
   const isRtl = language === 'ar';
   
-  const { products, saveInvoice, settings, saveProduct, warehouses, user, can } = useFirebase();
+  const { products, saveInvoice, settings, saveProduct, warehouses, user, can, workspace } = useFirebase();
   const canManageCatalog = can('manage_catalog');
   const storeCurrency = isPosCurrency(settings?.currency) ? settings.currency : 'JOD';
   const [posCurrency, setPosCurrency] = useState<PosCurrency>(() => {
@@ -96,6 +100,7 @@ export default function POSSystem({ language }: POSSystemProps) {
   const itemBaseRef = useRef<Record<string, { amount: number; currency: string }>>({});
   const externalApi = getExternalSalesApi();
   const sessionUid = user?.uid || 'guest';
+  const storeId = workspace?.ownerId;
   
   // Quick Product Registration state variables
   const [showQuickRegModal, setShowQuickRegModal] = useState(false);
@@ -114,7 +119,7 @@ export default function POSSystem({ language }: POSSystemProps) {
   // States
   const [posMode, setPosMode] = useState<'sale' | 'purchase'>('sale');
   const invoicePrefix = posMode === 'sale' ? 'POS' : 'SUP';
-  const previewInvoiceNo = useMemo(() => peekInvoiceNumber(invoicePrefix, sessionUid), [invoicePrefix, sessionUid, invoiceTick]);
+  const previewInvoiceNo = useMemo(() => peekInvoiceNumber(invoicePrefix, sessionUid, storeId), [invoicePrefix, sessionUid, storeId, invoiceTick]);
   const [barcodeInput, setBarcodeInput] = useState('');
   const [scannedItems, setScannedItems] = useState<InvoiceItem[]>([]);
   useEffect(() => {
@@ -148,6 +153,7 @@ export default function POSSystem({ language }: POSSystemProps) {
 
   // Handle suspend current bill
   const handleSuspendBill = () => {
+    if (posMode !== 'sale') return;
     if (scannedItems.length === 0) {
       toast.error(isRtl ? 'لا يمكن تعليق فاتورة فارغة!' : 'Cannot suspend an empty bill!');
       playBeep('error');
@@ -156,7 +162,7 @@ export default function POSSystem({ language }: POSSystemProps) {
     const heldId = crypto.randomUUID();
     const billNum = `HLD-${heldId.slice(0, 6).toUpperCase()}`;
     const formattedTime = new Date().toLocaleTimeString(isRtl ? 'ar-EG' : 'en-US', { hour: '2-digit', minute: '2-digit' });
-    const itemsCount = scannedItems.reduce((acc, item) => acc + (Number(item.quantity) || 0), 0);
+    const itemsCount = scannedItems.reduce((acc, item) => acc + lineUnits(item), 0);
     
     const newHeldBill = {
       id: heldId,
@@ -167,7 +173,8 @@ export default function POSSystem({ language }: POSSystemProps) {
       time: formattedTime,
       itemCount: itemsCount,
       totalAmount: grandTotal,
-      currency: activeCurrency
+      currency: activeCurrency,
+      mode: 'sale' as const,
     };
     setHeldBills([...heldBills, newHeldBill]);
     setScannedItems([]);
@@ -183,6 +190,7 @@ export default function POSSystem({ language }: POSSystemProps) {
 
   // Restore suspended bill
   const handleRestoreBill = (bill: any) => {
+    if (posMode !== 'sale' || (bill.mode ?? 'sale') !== 'sale') return;
     if (scannedItems.length > 0) {
       if (!window.confirm(isRtl ? 'هناك منتجات في السلة حالياً. هل ترغب في سحب الفاتورة المعلقة واستبدال السلة الحالية بها؟' : 'You have active items. Restore held bill and replace current cart?')) {
         return;
@@ -213,7 +221,7 @@ export default function POSSystem({ language }: POSSystemProps) {
     if (scannedItems.length > 0) {
       setScannedItems((prev) =>
         prev.map((item) => {
-          const base = itemBaseRef.current[item.productId];
+          const base = itemBaseRef.current[lineKey(item)];
           const newPrice = base
             ? convertMoney(base.amount, base.currency, targetCurrency, usdUnitRates)
             : convertMoney(item.unitPrice, posCurrency, targetCurrency, usdUnitRates);
@@ -236,6 +244,19 @@ export default function POSSystem({ language }: POSSystemProps) {
   };
   const [discount, setDiscount] = useState<number>(0);
   const [enableTax, setEnableTax] = useState<boolean>(false);
+
+  const switchMode = (mode: 'sale' | 'purchase') => {
+    if (mode === posMode) return;
+    if (scannedItems.length > 0 && !window.confirm(isRtl
+      ? 'سيتم تفريغ السلة الحالية عند تغيير الوضع. هل تريد المتابعة؟'
+      : 'Switching mode clears the current cart. Continue?')) return;
+    itemBaseRef.current = {};
+    setPosMode(mode);
+    setScannedItems([]);
+    setDiscount(0);
+    setReceivedAmount('');
+    playBeep('success');
+  };
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showSuccessModal, setShowSuccessModal] = useState(false);
   const [lastInvoiceNumber, setLastInvoiceNumber] = useState('');
@@ -250,11 +271,23 @@ export default function POSSystem({ language }: POSSystemProps) {
 
   const submitLockRef = useRef(false);
   const submitRef = useRef<(cashOverride?: number) => Promise<void>>(async () => {});
+  const draftIdRef = useRef<string | null>(null);
+  useEffect(() => { draftIdRef.current = null; }, [scannedItems, posMode, discount, enableTax, paymentMethod, activeCurrency]);
 
   const displayedProducts = products;
 
   // Retrieve unique categories
-  const categoriesList = ['all', ...Array.from(new Set(displayedProducts.map(p => p.category).filter(Boolean)))];
+  const categoryCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const p of displayedProducts) if (p.category) counts.set(p.category, (counts.get(p.category) || 0) + 1);
+    return counts;
+  }, [displayedProducts]);
+  const categoriesList = ['all', ...categoryCounts.keys()];
+  const gridProducts = useMemo(
+    () => (selectedCategory === 'all' ? displayedProducts : displayedProducts.filter(p => p.category === selectedCategory)),
+    [displayedProducts, selectedCategory],
+  );
+  const gridPage = useProgressiveList(gridProducts, selectedCategory);
 
   const refreshRates = async (force = false) => {
     setRatesLoading(true);
@@ -284,7 +317,7 @@ export default function POSSystem({ language }: POSSystemProps) {
     if (scannedItems.length === 0) return;
     setScannedItems((prev) =>
       prev.map((item) => {
-        const base = itemBaseRef.current[item.productId];
+        const base = itemBaseRef.current[lineKey(item)];
         if (!base) return item;
         const newPrice = convertMoney(base.amount, base.currency, posCurrency, usdUnitRates);
         const qty = Number(item.quantity) || 0;
@@ -351,8 +384,8 @@ export default function POSSystem({ language }: POSSystemProps) {
             }
             toast.success(
               isRtl 
-                ? `🔄 تم مزامنة ${successful_ids.length} فواتير مخزنة محلياً مع السيرفر بنجاح!` 
-                : `🔄 Synchronized ${successful_ids.length} offline invoice(s) back to server successfully!`
+                ? `أُرسلت الفواتير المحفوظة على الجهاز إلى الخادم (${successful_ids.length}).` 
+                : `Invoices saved on this device were sent to the server (${successful_ids.length}).`
             );
           } catch (storageErr) {
             console.error('Failed to update storage after sync:', storageErr);
@@ -387,12 +420,14 @@ export default function POSSystem({ language }: POSSystemProps) {
     const cleanText = decodedText.replace(/[\x00-\x1F\x7F-\x9F]/g, "").trim();
     setBarcodeInput(cleanText);
     
-    const matchedProduct = products.find(
-      p => p.sku?.toLowerCase() === cleanText.toLowerCase() || p.id === cleanText
-    );
+    const codeMatches = productsForCode(products, cleanText);
+    const packMatches = codeMatches.length ? [] : productsForPackCode(products, cleanText);
+    const asPack = packMatches.length > 0;
+    const candidates = asPack ? packMatches : codeMatches;
+    const matchedProduct = posMode === 'purchase' ? pickForPurchase(candidates) : pickForSale(candidates);
 
     if (matchedProduct) {
-      addItemToPOS(matchedProduct);
+      addItemToPOS(matchedProduct, asPack);
       toast.success(
         isRtl 
           ? `تم مسح وإضافة المنتج: ${matchedProduct.name}`
@@ -697,12 +732,19 @@ export default function POSSystem({ language }: POSSystemProps) {
     if (!query) return;
 
     // 1. Search locally synchronized inventory (instant match)
-    const matchedProduct = products.find(
-      p => p.sku?.toLowerCase() === query.toLowerCase() || p.id === query
-    );
+    const codeMatches = productsForCode(products, query);
+    const matchedProduct = posMode === 'purchase' ? pickForPurchase(codeMatches) : pickForSale(codeMatches);
 
     if (matchedProduct) {
       addItemToPOS(matchedProduct);
+      setBarcodeInput('');
+      return;
+    }
+
+    const packMatches = productsForPackCode(products, query);
+    const packProduct = posMode === 'purchase' ? pickForPurchase(packMatches) : pickForSale(packMatches);
+    if (packProduct) {
+      addItemToPOS(packProduct, true);
       setBarcodeInput('');
       return;
     }
@@ -727,7 +769,7 @@ export default function POSSystem({ language }: POSSystemProps) {
     let apiProductFound = false;
     if (externalApi) try {
       // Show light feedback that we're validating online database
-      toast.info(isRtl ? 'المنتج غير متوفر محلياً، جاري الفحص في السحاب...' : 'Checking online barcode database...', { duration: 1500 });
+      toast.info(isRtl ? 'المنتج غير مسجّل على الجهاز، جارٍ البحث في قاعدة الباركود على الإنترنت...' : 'Checking online barcode database...', { duration: 1500 });
       
       // Perform genuine network fetch request to the custom endpoint
       const response = await fetch(`${externalApi}/products/barcode/${encodeURIComponent(query)}`);
@@ -791,27 +833,38 @@ export default function POSSystem({ language }: POSSystemProps) {
     }
   };
 
-  const addItemToPOS = (product: Product) => {
-    // Check if item already exists in the scanned list
-    const existingIndex = scannedItems.findIndex(item => item.productId === product.id);
-    const targetPrice = Number(posMode === 'sale' ? product.sellingPrice : product.unitCost) || 0;
+  /** Price of one unit or one pack of the product in its own currency: selling price on sales, cost on purchases. */
+  const basePriceFor = (product: Product, asPack: boolean) => {
+    const pack = asPack ? productPack(product) : null;
+    if (posMode === 'sale') return pack ? pack.price : Number(product.sellingPrice) || 0;
+    return (Number(product.unitCost) || 0) * (pack ? pack.size : 1);
+  };
+
+  const insufficientStock = (available: number) => {
+    playBeep('error');
+    toast.warning(
+      isRtl
+        ? `الكمية غير كافية بالمخزن! المتبقي فقط: ${available} وحدة.`
+        : `Insufficient inventory! Only ${available} left in stock.`
+    );
+  };
+
+  const addItemToPOS = (product: Product, asPack = false) => {
+    const pack = asPack ? productPack(product) : null;
+    const key = lineKey({ productId: product.id, packSize: pack?.size });
+    const existingIndex = scannedItems.findIndex(item => lineKey(item) === key);
+    const targetPrice = basePriceFor(product, !!pack);
 
     // Convert base price using the product's custom currency (or default store currency) to the POS activeCurrency
     const baseCurrency = product.currency || settings?.currency || 'JOD';
     const finalPrice = Number(convertMoney(targetPrice, baseCurrency, activeCurrency, usdUnitRates)) || 0;
 
-    // In Sales mode, protect and warn if stock level is insufficient
+    // Stock is checked in units across every line of this product (a box line and a loose line share it).
     if (posMode === 'sale') {
-      const scannedQtySoFar = existingIndex !== -1 ? Number(scannedItems[existingIndex].quantity) || 0 : 0;
       const productQty = Number(product.quantity) || 0;
-      if (productQty <= scannedQtySoFar) {
-         playBeep('error');
-         toast.warning(
-           isRtl 
-             ? `الكمية غير كافية بالمخزن! المتبقي فقط: ${productQty} وحدة.` 
-             : `Insufficient inventory! Only ${productQty} left in stock.`
-         );
-         return;
+      if (unitsInCart(scannedItems, product.id) + (pack ? pack.size : 1) > productQty) {
+        insufficientStock(productQty);
+        return;
       }
     }
 
@@ -824,14 +877,15 @@ export default function POSSystem({ language }: POSSystemProps) {
       setScannedItems(updated);
     } else {
       // Add standard new item with dynamic converted price
-      itemBaseRef.current[product.id] = { amount: targetPrice, currency: baseCurrency };
+      itemBaseRef.current[key] = { amount: targetPrice, currency: baseCurrency };
       const newItem: InvoiceItem = {
         productId: product.id,
         description: product.name,
         quantity: 1,
         unitPrice: finalPrice,
         total: finalPrice,
-        sku: product.sku
+        sku: product.sku,
+        ...(pack ? { packSize: pack.size, packName: lineAsPack(pack).packName } : {}),
       };
       setScannedItems([...scannedItems, newItem]);
     }
@@ -849,33 +903,30 @@ export default function POSSystem({ language }: POSSystemProps) {
     playBeep('success');
   };
 
-  const updateItemQty = (productId: string, delta: number) => {
-    const idx = scannedItems.findIndex(item => item.productId === productId);
+  /** Sale mode: the line at this quantity, plus the product's other lines, must fit in stock. */
+  const fitsStock = (item: InvoiceItem, qty: number) => {
+    if (posMode !== 'sale') return true;
+    const product = products.find(p => p.id === item.productId);
+    if (!product) return true;
+    const available = Number(product.quantity) || 0;
+    if (unitsInCart(scannedItems, item.productId, lineKey(item)) + lineUnits({ ...item, quantity: qty }) <= available) return true;
+    insufficientStock(available);
+    return false;
+  };
+
+  const updateItemQty = (key: string, delta: number) => {
+    const idx = scannedItems.findIndex(item => lineKey(item) === key);
     if (idx === -1) return;
 
-    const originalProduct = products.find(p => p.id === productId);
     const updated = [...scannedItems];
     const currentQty = Number(updated[idx].quantity) || 0;
     const newQty = currentQty + delta;
 
     if (newQty <= 0) {
-      removeItem(productId);
+      removeItem(key);
       return;
     }
-
-    // Safety Stock Check in Sales Mode
-    if (posMode === 'sale' && originalProduct && delta > 0) {
-      const origQty = Number(originalProduct.quantity) || 0;
-      if (origQty < newQty) {
-        playBeep('error');
-        toast.warning(
-          isRtl 
-            ? `الكمية غير كافية بالمخزن! المتبقي فقط: ${origQty} وحدة.` 
-            : `Insufficient inventory! Only ${origQty} left in stock.`
-        );
-        return;
-      }
-    }
+    if (delta > 0 && !fitsStock(updated[idx], newQty)) return;
 
     const uPrice = Number(updated[idx].unitPrice) || 0;
     updated[idx] = { ...updated[idx], quantity: newQty, total: roundMoney(newQty * uPrice, activeCurrency) };
@@ -883,47 +934,67 @@ export default function POSSystem({ language }: POSSystemProps) {
     playBeep('success');
   };
 
-  const setItemQty = (productId: string, val: number) => {
+  const setItemQty = (key: string, val: number) => {
     if (isNaN(val)) return;
     if (val <= 0) {
-      removeItem(productId);
+      removeItem(key);
       return;
     }
 
-    const idx = scannedItems.findIndex(item => item.productId === productId);
+    const idx = scannedItems.findIndex(item => lineKey(item) === key);
     if (idx === -1) return;
+    if (!fitsStock(scannedItems[idx], val)) return;
 
-    const originalProduct = products.find(p => p.id === productId);
     const updated = [...scannedItems];
-
-    // Safety Stock Check in Sales Mode
-    if (posMode === 'sale' && originalProduct) {
-      const origQty = Number(originalProduct.quantity) || 0;
-      if (origQty < val) {
-        playBeep('error');
-        toast.warning(
-          isRtl 
-            ? `الكمية غير كافية بالمخزن! المتبقي فقط: ${origQty} وحدة.` 
-            : `Insufficient inventory! Only ${origQty} left in stock.`
-        );
-        return;
-      }
-    }
-
     const uPrice = Number(updated[idx].unitPrice) || 0;
-    updated[idx].quantity = val;
-    updated[idx].total = roundMoney(val * uPrice, activeCurrency);
+    updated[idx] = { ...updated[idx], quantity: val, total: roundMoney(val * uPrice, activeCurrency) };
     setScannedItems(updated);
   };
 
-  const removeItem = (productId: string) => {
-    setScannedItems(scannedItems.filter(item => item.productId !== productId));
+  /** Switches a line between the single unit and the pack, keeping its count (3 units become 3 packs). */
+  const toggleLinePack = (key: string) => {
+    const idx = scannedItems.findIndex(item => lineKey(item) === key);
+    if (idx === -1) return;
+    const item = scannedItems[idx];
+    const product = products.find(p => p.id === item.productId);
+    const pack = product ? productPack(product) : null;
+    if (!product || !pack) return;
+    const toPack = !isPackLine(item);
+    const nextKey = lineKey({ productId: item.productId, packSize: toPack ? pack.size : undefined });
+    const other = scannedItems.find(i => lineKey(i) === nextKey);
+    const qty = (Number(item.quantity) || 0) + (Number(other?.quantity) || 0);
+    const rest = scannedItems.filter(i => lineKey(i) !== key && lineKey(i) !== nextKey);
+    const next: InvoiceItem = {
+      ...item,
+      quantity: qty,
+      packSize: toPack ? pack.size : undefined,
+      packName: toPack ? lineAsPack(pack).packName : undefined,
+    };
+    if (posMode === 'sale') {
+      const available = Number(product.quantity) || 0;
+      if (unitsInCart(rest, item.productId) + lineUnits(next) > available) {
+        insufficientStock(available);
+        return;
+      }
+    }
+    const baseCurrency = product.currency || settings?.currency || 'JOD';
+    const baseAmount = basePriceFor(product, toPack);
+    itemBaseRef.current[nextKey] = { amount: baseAmount, currency: baseCurrency };
+    const unitPrice = Number(convertMoney(baseAmount, baseCurrency, activeCurrency, usdUnitRates)) || 0;
+    const replaced = { ...next, unitPrice, total: roundMoney(qty * unitPrice, activeCurrency) };
+    const at = Math.min(idx, rest.length);
+    setScannedItems([...rest.slice(0, at), replaced, ...rest.slice(at)]);
+    playBeep('success');
+  };
+
+  const removeItem = (key: string) => {
+    setScannedItems(scannedItems.filter(item => lineKey(item) !== key));
     playBeep('error');
     toast.success(isRtl ? 'تم حذف الصنف من القائمة' : 'Item removed from bill');
   };
 
   // Calculations
-  const totalPieces = scannedItems.reduce((acc, item) => acc + (Number(item.quantity) || 0), 0);
+  const totalPieces = scannedItems.reduce((acc, item) => acc + lineUnits(item), 0);
   const vatRate = resolveVatRate(settings?.defaultVatRate);
   const {
     subtotal,
@@ -945,7 +1016,7 @@ export default function POSSystem({ language }: POSSystemProps) {
       itemsHtml += `
         <tr>
           <td class="item-name">${escapeHtml(item.description)}</td>
-          <td class="item-qty">${item.quantity}</td>
+          <td class="item-qty">${escapeHtml(lineQuantityText(item, isRtl))}</td>
           <td class="item-price">${formatCurrencyValue(item.total, invoiceObj.currency)}</td>
         </tr>
       `;
@@ -1085,11 +1156,11 @@ export default function POSSystem({ language }: POSSystemProps) {
         toast.error(isRtl ? 'المبلغ المستلم أقل من إجمالي الفاتورة!' : 'Received amount is less than the invoice total!');
         return;
       }
-      const generatedNo = peekInvoiceNumber(invoicePrefix, sessionUid);
+      const generatedNo = peekInvoiceNumber(invoicePrefix, sessionUid, storeId);
       const changeDue = roundMoney(Math.max(0, parsedCash - grandTotal), activeCurrency);
       
       const officialInvoice: Invoice = {
-        id: crypto.randomUUID(),
+        id: (draftIdRef.current ||= crypto.randomUUID()),
         invoiceNumber: generatedNo,
         customerName: posMode === 'sale' ? (isRtl ? 'مبيعات نقاط البيع مباشرة' : 'Direct POS Customer') : undefined,
         supplierName: posMode === 'purchase' ? (isRtl ? 'مشتريات توريد مباشرة' : 'Direct Supplier') : undefined,
@@ -1104,13 +1175,15 @@ export default function POSSystem({ language }: POSSystemProps) {
         discount: appliedDiscount,
         cashReceived: parsedCash,
         changeDue: changeDue,
-        paymentMethod
+        // Supply received at the counter is paid from the vault; a card choice left over from a sale must not skip it.
+        paymentMethod: posMode === 'purchase' ? 'cash' : paymentMethod
       };
 
       // Persist first: any failure here aborts checkout (cart is kept) instead of showing a false success.
       if (user) {
         officialInvoice.invoiceNumber = await saveInvoice(officialInvoice);
-        consumeInvoiceNumber(invoicePrefix, sessionUid);
+        consumeInvoiceNumber(invoicePrefix, sessionUid, storeId);
+        draftIdRef.current = null;
       } else {
         toast.warning(
           isRtl
@@ -1126,8 +1199,8 @@ export default function POSSystem({ language }: POSSystemProps) {
           id: Date.now(),
           items: scannedItems.map((item) => ({
             product_id: item.productId,
-            quantity: item.quantity,
-            price: item.unitPrice,
+            quantity: lineUnits(item),
+            price: isPackLine(item) ? (Number(item.total) || 0) / (lineUnits(item) || 1) : item.unitPrice,
           })),
           total_amount: grandTotal,
           cash_received: parsedCash,
@@ -1158,7 +1231,7 @@ export default function POSSystem({ language }: POSSystemProps) {
       printThermalReceipt(officialInvoice);
 
       // Clear State
-      setLastInvoiceNumber(generatedNo);
+      setLastInvoiceNumber(officialInvoice.invoiceNumber);
       setInvoiceTick((t) => t + 1);
       setLastCompletedInvoice(officialInvoice);
       setScannedItems([]);
@@ -1186,10 +1259,10 @@ export default function POSSystem({ language }: POSSystemProps) {
   const formatCurrencyValue = (val: number, customCurrency?: string) =>
     formatMoney(val, customCurrency || activeCurrency);
 
-  const filteredLookupProducts = products.filter(p => 
-    p.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
-    p.sku?.toLowerCase().includes(searchTerm.toLowerCase())
-  );
+  const lookupTerm = searchTerm.toLowerCase();
+  const filteredLookupProducts = showProductLookup
+    ? products.filter(p => p.name.toLowerCase().includes(lookupTerm) || p.sku?.toLowerCase().includes(lookupTerm)).slice(0, 100)
+    : [];
 
   return (
     <div className="flex-1 p-2 sm:p-4 lg:p-6 flex flex-col min-h-[85vh] text-slate-800 dark:text-slate-100" dir={isRtl ? 'rtl' : 'ltr'}>
@@ -1213,11 +1286,7 @@ export default function POSSystem({ language }: POSSystemProps) {
         <div className="flex items-center bg-slate-100 dark:bg-slate-900/60 p-1 rounded-2xl border border-slate-200/60 dark:border-slate-800/60 w-fit self-start shrink-0 select-none">
           <button 
             type="button"
-            onClick={() => {
-              setPosMode('sale');
-              setScannedItems([]);
-              playBeep('success');
-            }}
+            onClick={() => switchMode('sale')}
             className={`px-5 py-2.5 rounded-xl text-xs font-black tracking-tight transition-all duration-300 flex items-center gap-2 cursor-pointer ${
               posMode === 'sale' 
                 ? 'bg-gradient-to-r from-cyan-500 to-blue-600 text-white shadow-md' 
@@ -1230,11 +1299,7 @@ export default function POSSystem({ language }: POSSystemProps) {
           
           {can('back_office') && <button 
             type="button"
-            onClick={() => {
-              setPosMode('purchase');
-              setScannedItems([]);
-              playBeep('success');
-            }}
+            onClick={() => switchMode('purchase')}
             className={`px-5 py-2.5 rounded-xl text-xs font-black tracking-tight transition-all duration-300 flex items-center gap-2 cursor-pointer ${
               posMode === 'purchase' 
                 ? 'bg-gradient-to-r from-emerald-500 to-teal-600 text-white shadow-md' 
@@ -1261,13 +1326,13 @@ export default function POSSystem({ language }: POSSystemProps) {
                 type="text" 
                 value={barcodeInput}
                 onChange={(e) => setBarcodeInput(e.target.value)}
-                placeholder={isRtl ? "مرر باركود الصنف هنا أو اكتب رمز الـ SKU الخاص بالمادة..." : "Pass item barcode here or enter SKU codename manually..."} aria-label={isRtl ? "مرر باركود الصنف هنا أو اكتب رمز الـ SKU الخاص بالمادة..." : "Pass item barcode here or enter SKU codename manually..."} 
-                className="w-full bg-white dark:bg-white/[0.03] border-2 border-emerald-500/50 focus:border-emerald-500 rounded-xl px-5 py-4 text-emerald-600 dark:text-emerald-400 font-mono text-base font-bold shadow-sm outline-none transition-colors"
+                placeholder={isRtl ? "امسح الباركود أو اكتب الرمز" : "Scan a barcode or type the SKU"} aria-label={isRtl ? "امسح الباركود أو اكتب رمز الصنف" : "Scan a barcode or type the SKU"} 
+                className="w-full bg-white dark:bg-white/[0.03] border-2 border-emerald-500/50 focus:border-emerald-500 rounded-xl ps-5 pe-5 xl:pe-32 py-4 text-emerald-600 dark:text-emerald-400 font-arabic tabular-nums text-base font-bold placeholder:font-medium placeholder:text-slate-400 shadow-sm outline-none transition-colors truncate"
                 autoFocus
               />
-              <div className={`absolute ${isRtl ? 'left-4' : 'right-4'} top-1/2 -translate-y-1/2 text-emerald-500 font-bold hidden sm:flex items-center gap-2 text-xs`}>
+              <div className="pointer-events-none absolute end-4 top-1/2 -translate-y-1/2 text-emerald-600 dark:text-emerald-400 font-bold hidden xl:flex items-center gap-2 text-xs whitespace-nowrap">
                 <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                <span>[ 📟 {isRtl ? 'مستعد للمسح' : 'Ready to Scan'} ]</span>
+                <span>{isRtl ? 'جاهز للمسح' : 'Ready to scan'}</span>
               </div>
             </form>
             <button
@@ -1341,7 +1406,7 @@ export default function POSSystem({ language }: POSSystemProps) {
             {categoriesList.map((cat) => {
               const count = cat === 'all' 
                 ? displayedProducts.length 
-                : displayedProducts.filter(p => p.category === cat).length;
+                : categoryCounts.get(cat) || 0;
               
               const label = cat === 'all' 
                 ? (isRtl ? 'الكل' : 'All Items')
@@ -1381,8 +1446,7 @@ export default function POSSystem({ language }: POSSystemProps) {
               </div>
             )}
             <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-4 w-full box-border">
-              {displayedProducts
-                .filter(p => selectedCategory === 'all' || p.category === selectedCategory)
+              {gridPage.visible
                 .map((product) => {
                   const getEmojiIcon = (category: string = '', name: string = '') => {
                     const text = (category + ' ' + name).toLowerCase();
@@ -1415,7 +1479,7 @@ export default function POSSystem({ language }: POSSystemProps) {
                         {product.name}
                       </span>
                       <span className="text-[10px] text-slate-400 font-mono mt-0.5">
-                        {isRtl ? 'بالمخزن:' : 'Qty:'} {product.quantity}
+                        {isRtl ? 'بالمخزن:' : 'Qty:'} {formatPackStock(product.quantity, product, isRtl) ?? product.quantity}
                       </span>
                       <span className="text-emerald-600 dark:text-emerald-400 font-mono font-bold mt-1 text-xs">
                         {formatCurrencyValue(activePrice)}
@@ -1424,6 +1488,7 @@ export default function POSSystem({ language }: POSSystemProps) {
                   );
                 })}
             </div>
+            <ShowMoreBar isRtl={isRtl} shown={gridPage.shown} total={gridPage.total} pageSize={gridPage.pageSize} onMore={gridPage.showMore} onAll={gridPage.showAll} />
           </div>
 
           {/* Keyboard Shortcuts indicators inside active terminal */}
@@ -1495,7 +1560,7 @@ export default function POSSystem({ language }: POSSystemProps) {
           </div>
 
           {/* Suspended Bills Management Banner */}
-          {heldBills.length > 0 && (
+          {posMode === 'sale' && heldBills.length > 0 && (
             <div className="px-4 py-3 bg-slate-50 dark:bg-slate-900/40 border-b border-slate-200 dark:border-slate-800/80 flex flex-col gap-2 transition-all">
               <div className="flex justify-between items-center text-xs text-slate-700 dark:text-slate-300 font-black">
                 <span className="flex items-center gap-1.5 font-arabic">
@@ -1547,7 +1612,7 @@ export default function POSSystem({ language }: POSSystemProps) {
 
                       <div className="flex justify-between items-center text-[11px] leading-none pl-1.5">
                         <div className="text-slate-500 dark:text-slate-400 font-medium">
-                          {isRtl ? `عدد المواد: ${itemsCount} جهات` : `Items: ${itemsCount}`}
+                          {isRtl ? `عدد الأصناف: ${itemsCount}` : `Items: ${itemsCount}`}
                         </div>
                         <div className="text-slate-900 dark:text-amber-400 font-extrabold font-mono text-xs">
                           {formatMoney(Number(billTotal) || 0, billCurrency)}
@@ -1583,9 +1648,13 @@ export default function POSSystem({ language }: POSSystemProps) {
             ) : (
               scannedItems.map((item) => {
                 const origin = products.find(p => p.id === item.productId);
+                const key = lineKey(item);
+                const pack = origin ? productPack(origin) : null;
+                const unitName = origin?.unitName?.trim() || (isRtl ? 'وحدة' : 'unit');
+                const packName = pack?.name || (isRtl ? 'عبوة' : 'pack');
                 return (
                   <div 
-                    key={item.productId} 
+                    key={key} 
                     className={`flex flex-col p-3 rounded-xl border transition-all duration-300 w-full box-border ${
                       item.productId === lastScannedProductId
                         ? 'bg-emerald-500/10 border-emerald-500 ring-2 ring-emerald-500/30 shadow-md shadow-emerald-500/20'
@@ -1603,13 +1672,33 @@ export default function POSSystem({ language }: POSSystemProps) {
 
                     {/* Quantity state controls */}
                     <div className="flex justify-between items-center mt-3.5 w-full">
-                      <span className="text-[10px] text-slate-400 font-mono">
-                        {formatCurrencyValue(item.unitPrice)} / {isRtl ? 'للوحدة' : 'unit'}
+                      <span className="flex flex-col gap-1">
+                        <span className="text-[10px] text-slate-400 font-mono">
+                          {formatCurrencyValue(item.unitPrice)} / {isPackLine(item) ? `${item.packName || packName} (${item.packSize})` : (pack ? unitName : (isRtl ? 'للوحدة' : 'unit'))}
+                        </span>
+                        {pack && (
+                          <span className="inline-flex w-fit rounded-md border border-slate-200 dark:border-white/10 overflow-hidden text-[10px] font-bold" role="group" aria-label={isRtl ? 'البيع بالوحدة أو بالعبوة' : 'Sell by unit or pack'}>
+                            {[false, true].map((asPack) => {
+                              const active = isPackLine(item) === asPack;
+                              return (
+                                <button
+                                  key={String(asPack)}
+                                  type="button"
+                                  aria-pressed={active}
+                                  onClick={() => { if (!active) toggleLinePack(key); }}
+                                  className={`px-2 py-0.5 transition-colors ${active ? 'bg-indigo-600 text-white' : 'text-slate-500 hover:bg-slate-100 dark:hover:bg-white/10'}`}
+                                >
+                                  {asPack ? packName : unitName}
+                                </button>
+                              );
+                            })}
+                          </span>
+                        )}
                       </span>
                       <div className="flex items-center gap-2 bg-white dark:bg-black/20 rounded-lg p-1 border border-slate-200 dark:border-white/5">
                         <button 
                           type="button"
-                          onClick={() => updateItemQty(item.productId, -1)}
+                          onClick={() => updateItemQty(key, -1)}
                           className="w-6 h-6 rounded bg-slate-100 dark:bg-white/10 flex items-center justify-center text-slate-700 dark:text-white hover:bg-rose-500 hover:text-white transition-colors text-xs font-bold cursor-pointer"
                         >
                           -
@@ -1620,14 +1709,14 @@ export default function POSSystem({ language }: POSSystemProps) {
                           value={item.quantity}
                           onChange={(e) => {
                             const val = parseInt(e.target.value, 10);
-                            setItemQty(item.productId, isNaN(val) ? 0 : val);
+                            setItemQty(key, isNaN(val) ? 0 : val);
                           }}
                           className="w-10 bg-transparent text-center font-bold text-xs text-slate-900 dark:text-white border-0 p-0 focus:outline-none focus:ring-1 focus:ring-emerald-500 rounded font-mono select-all [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
                           style={{ MozAppearance: 'textfield' }}
                         />
                         <button 
                           type="button"
-                          onClick={() => updateItemQty(item.productId, 1)}
+                          onClick={() => updateItemQty(key, 1)}
                           className="w-6 h-6 rounded bg-slate-100 dark:bg-white/10 flex items-center justify-center text-slate-700 dark:text-white hover:bg-emerald-500 hover:text-white transition-colors text-xs font-bold cursor-pointer"
                         >
                           +
@@ -1635,7 +1724,7 @@ export default function POSSystem({ language }: POSSystemProps) {
                         
                         <button
                           type="button"
-                          onClick={() => removeItem(item.productId)}
+                          onClick={() => removeItem(key)}
                           className="text-slate-300 hover:text-rose-600 transition p-1 ml-1"
                           title={isRtl ? "حذف" : "Remove"} aria-label={isRtl ? "حذف" : "Remove"}
                         >
@@ -1721,7 +1810,7 @@ export default function POSSystem({ language }: POSSystemProps) {
             {posMode === 'sale' && scannedItems.length > 0 && (
               <div className="bg-slate-100/50 dark:bg-black/30 p-2.5 rounded-xl border border-slate-200/50 dark:border-white/5 space-y-2 transition-all">
                 <span className="text-[10px] font-black text-slate-500 dark:text-slate-400 block">
-                  💳 {isRtl ? 'بوابة الدفع الفوري والمستلم:' : 'Instant Payment Gateway:'}
+                  💳 {isRtl ? 'طريقة الدفع:' : 'Payment method:'}
                 </span>
                 
                 {/* Gateway Selector Tabs */}
@@ -1980,12 +2069,12 @@ export default function POSSystem({ language }: POSSystemProps) {
                   <CheckCircle2 size={36} />
                 </div>
                 <h3 className="font-extrabold text-slate-900 dark:text-white text-xl">
-                  {isRtl ? 'تم إعتماد التقييد بنجاح!' : 'Transaction posted successfully!'}
+                  {isRtl ? 'تم اعتماد العملية' : 'Transaction posted'}
                 </h3>
                 <p className="text-xs text-slate-400 dark:text-slate-400 font-semibold leading-relaxed">
                   {isRtl 
-                    ? `تم تسجيل الفاتورة الرقمية رقم (${lastInvoiceNumber}) بسلام وتعديل أرصدة الكميات في المستودع وقاصة الأموال بنجاح.`
-                    : `Invoice ${lastInvoiceNumber} recorded. Quantities in storage and secure vault registers have been updated.`}
+                    ? `حُفظت الفاتورة رقم ${lastInvoiceNumber} وعُدّل المخزون والأرصدة.`
+                    : `Invoice ${lastInvoiceNumber} was saved; stock and balances were updated.`}
                 </p>
               </div>
 
@@ -2128,6 +2217,7 @@ export default function POSSystem({ language }: POSSystemProps) {
         decimals={currencyDecimals(activeCurrency)}
         quickAmounts={QUICK_CASH[activeCurrency] || QUICK_CASH.USD}
         onConfirm={(received) => handleSubmitProcess(received)}
+        language={isRtl ? 'ar' : 'en'}
       />
 
       {/* Quick Product Registration Portal popup dialog */}
@@ -2290,7 +2380,7 @@ export default function POSSystem({ language }: POSSystemProps) {
                 <div className="grid grid-cols-2 gap-4">
                   <div>
                     <label className="block text-xs font-black text-slate-600 dark:text-slate-300 mb-1.5">
-                      {isRtl ? 'كمية المخزون الإبتدائي' : 'Initial Stock Qty'}
+                      {isRtl ? 'الكمية الافتتاحية' : 'Opening quantity'}
                     </label>
                     <input
                       type="number"
@@ -2306,7 +2396,7 @@ export default function POSSystem({ language }: POSSystemProps) {
 
                   <div>
                     <label className="block text-xs font-black text-slate-600 dark:text-slate-300 mb-1.5">
-                      {isRtl ? 'حد منبه قرب نفاذ الصنف' : 'Low Stock Warning Threshold'}
+                      {isRtl ? 'حد التنبيه قبل نفاد الصنف' : 'Low Stock Warning Threshold'}
                     </label>
                     <input
                       type="number"
@@ -2369,7 +2459,7 @@ export default function POSSystem({ language }: POSSystemProps) {
                     }}
                     className="flex-1 py-3 bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-100 font-bold rounded-xl text-xs transition active:scale-95 cursor-pointer text-center"
                   >
-                    {isRtl ? 'إلغاء التراجع' : 'Cancel / Close'}
+                    {isRtl ? 'إلغاء' : 'Cancel'}
                   </button>
 
                   <button

@@ -1,5 +1,6 @@
 import type { Invoice, Product } from '../types';
 import { userCacheKey } from './userStorage';
+import { lineUnits } from './packs';
 
 /** True only for a missing connection. Conflicts, permissions and validation errors are not "offline". */
 export function isOfflineError(error: unknown): boolean {
@@ -78,7 +79,7 @@ export function localSaleShortages(invoice: Invoice, products: Product[]): Stock
   const requested = new Map<string, { qty: number; name: string }>();
   for (const item of invoice.items) {
     const entry = requested.get(item.productId) || { qty: 0, name: item.description };
-    entry.qty += Number(item.quantity) || 0;
+    entry.qty += lineUnits(item);
     requested.set(item.productId, entry);
   }
   const shortages: StockShortage[] = [];

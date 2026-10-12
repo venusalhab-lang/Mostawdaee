@@ -186,6 +186,15 @@ export async function makePurchase(productId: string): Promise<boolean> {
   return true;
 }
 
+/** Price as Google Play formats it for this account's country (e.g. "JOD 71.000"), once the product has loaded. */
+export function playLocalizedPrice(productId: string): string | null {
+  const CdvPurchase = (window as any).CdvPurchase;
+  if (!CdvPurchase?.store) return null;
+  const product = CdvPurchase.store.get(productId, CdvPurchase.Platform.GOOGLE_PLAY);
+  const price = product?.pricing?.price || product?.getOffer?.()?.pricingPhases?.[0]?.price;
+  return typeof price === 'string' && price.trim() ? price : null;
+}
+
 /** Purchase tokens Google Play reports as owned on this device (after initializeBilling). */
 export function ownedPurchaseTokens(): string[] {
   const store = (window as any).CdvPurchase?.store;

@@ -91,23 +91,26 @@ export function countBarcode(
   lines: InventoryAuditLine[],
   product: { id: string; name: string; sku: string; quantity: number; unitCost: number; currency: string },
   auditId: string,
+  /** Units one scan counts: 1 for a unit barcode, the pack size for a pack barcode. */
+  step = 1,
 ): { lines: InventoryAuditLine[]; unknown: false } | { lines: InventoryAuditLine[]; unknown: true } {
   const sku = product.sku.trim().toLowerCase();
   const match = lines.find(
     (line) => line.productId === product.id || (sku && line.sku.trim().toLowerCase() === sku),
   );
   if (match) {
+    const counted = roundQty(match.actualQty + step);
     return {
       unknown: false,
       lines: lines.map((line) =>
         line.id === match.id
-          ? { ...line, actualQty: roundQty(line.actualQty + 1), difference: auditDifference(line.expectedQty, line.actualQty + 1) }
+          ? { ...line, actualQty: counted, difference: auditDifference(line.expectedQty, counted) }
           : line,
       ),
     };
   }
   const expectedQty = roundQty(product.quantity);
-  const actualQty = 1;
+  const actualQty = roundQty(step);
   const line: InventoryAuditLine = {
     id: crypto.randomUUID(),
     auditId,

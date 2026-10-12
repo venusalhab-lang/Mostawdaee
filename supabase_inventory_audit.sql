@@ -1,10 +1,7 @@
 -- Inventory reconciliation (الجرد الفعلي والتسوية المخزنية)
 -- Run after supabase_production_setup.sql (writes require public.has_access()).
--- Run this once in the Supabase SQL editor for the project that holds `public.products`.
--- Applying an audit sets products.quantity to the counted actual_qty and writes
--- a stock_movements row labelled عجز جرد or زيادة جرد.
--- Products that exist only in the app catalog (Firestore) are listed in
--- missing_products; the app still adjusts those quantities itself.
+-- Product quantities live in merchant_documents and are changed by the app through merchant_commit.
+-- Applying an audit here only closes it, so the same count can never be applied twice.
 
 -- ---------------------------------------------------------
 -- stock_movements (created here if the project does not have one yet)
@@ -171,7 +168,9 @@ EXCEPTION
 END $$;
 
 -- ---------------------------------------------------------
--- Apply: set product quantities to the counted actual and log the variance
+-- Apply: close the stocktake. The app has already set each product to its counted
+-- quantity through merchant_commit (one stock movement per line); this records that
+-- the count is final so it can never be resumed or applied a second time.
 -- ---------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.apply_inventory_audit(p_audit_id UUID)
 RETURNS JSONB
@@ -182,16 +181,8 @@ AS $$
 DECLARE
     v_uid UUID := public.workspace_owner();
     v_audit public.inventory_audits%ROWTYPE;
-    v_item public.inventory_audit_items%ROWTYPE;
-    v_qty INTEGER;
-    v_name TEXT;
-    v_threshold INTEGER;
-    v_actual INTEGER;
-    v_delta NUMERIC;
-    v_adjusted INTEGER := 0;
-    v_unchanged INTEGER := 0;
-    v_missing JSONB := '[]'::JSONB;
-    v_updated INTEGER;
+    v_adjusted INTEGER;
+    v_unchanged INTEGER;
 BEGIN
     IF auth.uid() IS NULL THEN
         RAISE EXCEPTION 'AUTH_REQUIRED';
@@ -218,70 +209,15 @@ BEGIN
         RAISE EXCEPTION 'AUDIT_ALREADY_COMPLETED';
     END IF;
 
-    IF NOT EXISTS (
-        SELECT 1 FROM public.inventory_audit_items WHERE audit_id = p_audit_id
-    ) THEN
+    SELECT COUNT(*) FILTER (WHERE actual_qty <> expected_qty),
+           COUNT(*) FILTER (WHERE actual_qty = expected_qty)
+      INTO v_adjusted, v_unchanged
+    FROM public.inventory_audit_items
+    WHERE audit_id = p_audit_id;
+
+    IF COALESCE(v_adjusted, 0) + COALESCE(v_unchanged, 0) = 0 THEN
         RAISE EXCEPTION 'AUDIT_EMPTY';
     END IF;
-
-    FOR v_item IN
-        SELECT * FROM public.inventory_audit_items
-        WHERE audit_id = p_audit_id
-        ORDER BY id
-        FOR UPDATE
-    LOOP
-        SELECT quantity, name, COALESCE(low_stock_threshold, 10)
-          INTO v_qty, v_name, v_threshold
-        FROM public.products
-        WHERE id = v_item.product_id AND user_id = v_uid
-        FOR UPDATE;
-
-        IF NOT FOUND THEN
-            v_missing := v_missing || to_jsonb(v_item.product_id);
-            CONTINUE;
-        END IF;
-
-        IF v_item.actual_qty <> trunc(v_item.actual_qty) THEN
-            RAISE EXCEPTION 'FRACTIONAL_QTY:%', v_item.product_id;
-        END IF;
-
-        v_actual := v_item.actual_qty::INTEGER;
-        v_delta := v_actual - v_qty;
-
-        UPDATE public.products
-        SET quantity = v_actual,
-            status = CASE
-                WHEN v_actual <= 0 THEN 'Out of Stock'
-                WHEN v_actual <= v_threshold THEN 'Low Stock'
-                ELSE 'In Stock'
-            END
-        WHERE id = v_item.product_id AND user_id = v_uid;
-
-        GET DIAGNOSTICS v_updated = ROW_COUNT;
-        IF v_updated <> 1 THEN
-            RAISE EXCEPTION 'PRODUCT_UPDATE_FAILED:%', v_item.product_id;
-        END IF;
-
-        IF v_delta = 0 THEN
-            v_unchanged := v_unchanged + 1;
-        ELSE
-            INSERT INTO public.stock_movements (
-                user_id, product_id, product_name, movement_type,
-                before_qty, after_qty, delta, reason, audit_id
-            ) VALUES (
-                v_uid,
-                v_item.product_id,
-                v_name,
-                CASE WHEN v_delta < 0 THEN 'عجز جرد' ELSE 'زيادة جرد' END,
-                v_qty,
-                v_actual,
-                v_delta,
-                format('جرد %s: المتوقع %s والفعلي %s', v_audit.audit_number, v_item.expected_qty, v_item.actual_qty),
-                v_audit.id
-            );
-            v_adjusted := v_adjusted + 1;
-        END IF;
-    END LOOP;
 
     UPDATE public.inventory_audits
     SET status = 'completed'
@@ -293,7 +229,7 @@ BEGIN
         'status', 'completed',
         'adjusted', v_adjusted,
         'unchanged', v_unchanged,
-        'missing_products', v_missing
+        'missing_products', '[]'::JSONB
     );
 END;
 $$;

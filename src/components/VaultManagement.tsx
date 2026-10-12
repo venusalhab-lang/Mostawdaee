@@ -25,8 +25,11 @@ import { toast } from 'sonner';
 import { useSuccessCelebration } from '../hooks/useSuccessCelebration';
 import { sounds } from '../lib/sounds';
 import ExcelExportButton from './ui/ExcelExportButton';
+import ShowMoreBar from './ui/ShowMoreBar';
+import { useProgressiveList } from '../hooks/useProgressiveList';
 import { formatMoney } from '../lib/exchangeRates';
 import { VAULT_CURRENCIES, readVaultBalances, roundForCurrency } from '../lib/vaultMath';
+import { localDayEnd, localDayStart } from '../lib/localDate';
 
 interface Props {
   language: Language;
@@ -39,7 +42,7 @@ const VAULT_KINDS: VaultKind[] = ['sale', 'customer_payment', 'purchase', 'payro
 
 const CURRENCY_NAMES: Record<Currency, { ar: string; en: string }> = {
   JOD: { ar: 'دينار أردني', en: 'Jordanian Dinar' },
-  ILS: { ar: 'شيكل', en: 'Israeli Shekel' },
+  ILS: { ar: 'شيكل', en: 'Shekel' },
   USD: { ar: 'دولار أمريكي', en: 'US Dollar' },
   IQD: { ar: 'دينار عراقي', en: 'Iraqi Dinar' },
   SAR: { ar: 'ريال سعودي', en: 'Saudi Riyal' },
@@ -91,9 +94,9 @@ export default function VaultManagement({ language, settings }: Props) {
   const [activeCurrency, setActiveCurrency] = useState<Currency>(VAULT_CURRENCIES.includes(settings.currency as Currency) ? (settings.currency as Currency) : 'JOD');
 
   const expenseCategories = [
-    { id: 'general', label: isRtl ? 'مصرف عام' : 'General Expense' },
+    { id: 'general', label: isRtl ? 'مصروف عام' : 'General Expense' },
     { id: 'salary', label: isRtl ? 'رواتب الكادر' : 'Salary' },
-    { id: 'rent', label: isRtl ? 'إيجار مصاريف' : 'Rent' },
+    { id: 'rent', label: isRtl ? 'إيجار' : 'Rent' },
     { id: 'utilities', label: isRtl ? 'كهرباء ومياه واشتراكات' : 'Utilities' },
     { id: 'transport', label: isRtl ? 'نقل ولوجستيك داخلي' : 'Transport' },
     { id: 'tax', label: isRtl ? 'ضرائب ورسوم حكومية' : 'Taxes' },
@@ -103,7 +106,7 @@ export default function VaultManagement({ language, settings }: Props) {
     { id: 'general', label: isRtl ? 'إيداع عام' : 'General Deposit' },
     { id: 'sale', label: isRtl ? 'عائدات مبيعات' : 'Sales Revenue' },
     { id: 'refund', label: isRtl ? 'مرتجع نقدي' : 'Cash Refund' },
-    { id: 'investment', label: isRtl ? 'حقن رأس مال' : 'Capital injection' },
+    { id: 'investment', label: isRtl ? 'إيداع رأس مال' : 'Capital deposit' },
   ];
 
   const kindLabels: Record<VaultKind, string> = {
@@ -152,32 +155,25 @@ export default function VaultManagement({ language, settings }: Props) {
 
   // Advanced reactive transactions ledger filter
   const filteredTransactions = useMemo(() => {
+    const q = searchQuery.toLowerCase();
+    const fTime = fromDate ? localDayStart(fromDate) : null;
+    const tTime = toDate ? localDayEnd(toDate) : null;
     return vaultTransactions.filter(tx => {
       // 1. Text Search matching description, ID, or category
-      const matchesSearch = 
-        tx.description?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        tx.category?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        txLabel(tx).toLowerCase().includes(searchQuery.toLowerCase()) ||
-        tx.id?.toLowerCase().includes(searchQuery.toLowerCase());
+      const matchesSearch = !q ||
+        tx.description?.toLowerCase().includes(q) ||
+        tx.category?.toLowerCase().includes(q) ||
+        txLabel(tx).toLowerCase().includes(q) ||
+        tx.id?.toLowerCase().includes(q);
       
       // 2. Select Type filter
       const matchesType = filterType === 'all' || tx.type === filterType;
 
       // 3. Date Range starting 'From Date'
-      let matchesFrom = true;
-      if (fromDate) {
-        const fTime = new Date(fromDate);
-        fTime.setHours(0, 0, 0, 0);
-        matchesFrom = tx.timestamp >= fTime.getTime();
-      }
+      const matchesFrom = fTime === null || tx.timestamp >= fTime;
 
       // 4. Date Range ending 'To Date'
-      let matchesTo = true;
-      if (toDate) {
-        const tTime = new Date(toDate);
-        tTime.setHours(23, 59, 59, 999);
-        matchesTo = tx.timestamp <= tTime.getTime();
-      }
+      const matchesTo = tTime === null || tx.timestamp <= tTime;
 
       const matchesKind = filterKind === 'all' || vaultKindOf(tx) === filterKind;
       const matchesCurrency = !onlyActiveCurrency || (tx.currency || 'JOD') === activeCurrency;
@@ -185,25 +181,26 @@ export default function VaultManagement({ language, settings }: Props) {
       return matchesSearch && matchesType && matchesFrom && matchesTo && matchesKind && matchesCurrency;
     });
   }, [vaultTransactions, searchQuery, filterType, fromDate, toDate, filterKind, onlyActiveCurrency, activeCurrency]);
+  const txPage = useProgressiveList(filteredTransactions, `${searchQuery}|${filterType}|${fromDate}|${toDate}|${filterKind}|${onlyActiveCurrency}|${activeCurrency}`);
 
   // Record/recalibrate a transaction
   const handleAction = async (e: React.FormEvent) => {
     e.preventDefault();
     
-    // 1. تنظيف الرصيد ومبلغ السحب وتحويلهما إلى أرقام صافية بنسبة 100%
-    const cleanWithdraw = Number(String(amount).replace(/[^\d.]/g, ''));
+    // A typed "-50" must be refused, not silently read as 50.
+    const typed = String(amount).trim();
+    const parsed = typed === '' ? NaN : Number(typed);
+    const numAmount = Number.isFinite(parsed) ? roundForCurrency(parsed, activeCurrency) : NaN;
+    const cleanWithdraw = numAmount;
     const cleanBalance = balances[activeCurrency] ?? 0;
 
-    const numAmount = cleanWithdraw;
-
-    // 3. الفحص المنطقي الآمن
     if (modalType === 'expense') {
       if (isNaN(cleanWithdraw) || cleanWithdraw <= 0) {
         toast.error(isRtl ? 'يرجى إدخال مبلغ سحب صحيح' : 'Please enter a valid withdrawal amount');
         return;
       }
 
-      if (roundForCurrency(cleanWithdraw, activeCurrency) > cleanBalance) {
+      if (cleanWithdraw > cleanBalance) {
         toast.error(isRtl
           ? `الرصيد غير كافٍ بالخزنة! المتوفر: ${formatCurrency(cleanBalance)}`
           : `Insufficient funds in the vault! Available: ${formatCurrency(cleanBalance)}`);
@@ -228,7 +225,7 @@ export default function VaultManagement({ language, settings }: Props) {
         await recalibrateVault(
           numAmount,
           activeCurrency,
-          description || (isRtl ? 'إعادة معايرة يدوية للرصيد الفعلي' : 'Manual physical safe recalibration')
+          description || (isRtl ? 'تسوية يدوية للرصيد' : 'Manual balance adjustment')
         );
       } else {
         let mappedCategory: VaultTransaction['category'] = 'other';
@@ -240,7 +237,8 @@ export default function VaultManagement({ language, settings }: Props) {
         // Retrieve specific subcategory label for clearer description
         const selectedCat = (modalType === 'income' ? incomeCategories : expenseCategories).find(c => c.id === category);
         const categoryLabel = selectedCat ? selectedCat.label : (modalType === 'income' ? (isRtl ? 'إيداع نقدي غير مصنف' : 'Uncategorized Cash Deposit') : (isRtl ? 'سحب نقدي غير مصنف' : 'Uncategorized Cash Withdrawal'));
-        const finalDescription = description.trim() || categoryLabel;
+        const note = description.trim();
+        const finalDescription = !note ? categoryLabel : (selectedCat && category !== 'general' ? `[${categoryLabel}] ${note}` : note);
 
         await recordVaultTransaction({
           type: modalType,
@@ -271,17 +269,17 @@ export default function VaultManagement({ language, settings }: Props) {
   const handleExportCSV = () => {
     try {
       if (filteredTransactions.length === 0) {
-        toast.info(isRtl ? 'لا توجد أي معاملات لتصديرها ضمن الفلاتر المحددة' : 'No transactions exist under the selected filters');
+        toast.info(isRtl ? 'لا توجد حركات لتصديرها ضمن التصفية المحددة' : 'No transactions match the selected filters');
         return;
       }
       
       const headers = isRtl 
-        ? ['المعرف المالي', 'التاريخ والوقت', 'نوع الحركة', 'التصنيف', 'القيمة المعاملة', 'العملة الأساسية', 'الملاحظات والبيان', 'الرصيد بعد الحركة']
+        ? ['المعرف المالي', 'التاريخ والوقت', 'نوع الحركة', 'التصنيف', 'المبلغ', 'العملة', 'الملاحظات والبيان', 'الرصيد بعد الحركة']
         : ['Tx ID', 'Timestamp', 'Type', 'Category', 'Amount', 'Currency', 'Notes/Description', 'Balance After'];
         
       const rows = filteredTransactions.map(tx => [
         `TX-${tx.id.substring(0, 8).toUpperCase()}`,
-        new Date(tx.timestamp).toLocaleString(isRtl ? 'ar-EG' : 'en-US'),
+        new Date(tx.timestamp).toLocaleString('en-US'),
         tx.type === 'income' ? (isRtl ? 'إيداع / إيراد' : 'Income') : (isRtl ? 'سحب / مصروف' : 'Expense'),
         txLabel(tx),
         tx.amount,
@@ -302,7 +300,7 @@ export default function VaultManagement({ language, settings }: Props) {
       document.body.removeChild(link);
       
       sounds.playPop();
-      toast.success(isRtl ? 'تم تصدير التقرير المالي المفلتر بصيغة CSV بنجاح!' : 'Filtered ledger exported to CSV successfully!');
+      toast.success(isRtl ? 'صُدّرت الحركات المعروضة إلى ملف CSV.' : 'Filtered ledger exported to CSV.');
     } catch (e) {
       toast.error(isRtl ? 'فشل تصدير التقرير المالي' : 'Failed to export financial ledger report');
     }
@@ -316,11 +314,11 @@ export default function VaultManagement({ language, settings }: Props) {
     setToDate('');
     setFilterKind('all');
     setOnlyActiveCurrency(false);
-    toast.success(isRtl ? 'تم تصفية جميع مرشحات البحث' : 'Filters reset to default');
+    toast.success(isRtl ? 'أُعيد ضبط التصفية' : 'Filters reset');
   };
 
   // Structured data formatting tailored for Excel sheet reports
-  const excelData = useMemo(() => {
+  const buildExcelData = () => {
     return filteredTransactions.map(tx => {
       const isIncome = tx.type === 'income';
       const categoryLabel = txLabel(tx);
@@ -328,11 +326,11 @@ export default function VaultManagement({ language, settings }: Props) {
       if (isRtl) {
         return {
           'معرف الحركة': `#TX-${tx.id.substring(0, 8).toUpperCase()}`,
-          'التاريخ والوقت': new Date(tx.timestamp).toLocaleString('ar-EG'),
+          'التاريخ والوقت': new Date(tx.timestamp).toLocaleString('en-US'),
           'نوع الحركة': isIncome ? 'إيداع / إيراد' : 'سحب / مصروف',
           'تصنيف الحركة': categoryLabel,
           'المبلغ': tx.amount,
-          'العملة الأساسية': tx.currency,
+          'العملة': tx.currency,
           'البيان والملاحظات': tx.description || '',
           'الرصيد بعد الحركة': tx.balanceAfter
         };
@@ -349,7 +347,7 @@ export default function VaultManagement({ language, settings }: Props) {
         };
       }
     });
-  }, [filteredTransactions, isRtl]); // eslint-disable-line react-hooks/exhaustive-deps
+  };
 
   return (
     <div className={`max-w-7xl mx-auto p-4 sm:p-6 space-y-8 notranslate text-comfortable page-fade-in ${isRtl ? 'font-arabic' : ''}`} dir={isRtl ? 'rtl' : 'ltr'}>
@@ -362,7 +360,7 @@ export default function VaultManagement({ language, settings }: Props) {
             <span className="heading-soft">{isRtl ? 'الخزنة والمالية المركزية' : 'Corporate Treasury & Liquidity'}</span>
           </h1>
           <p className="text-sm text-slate-500 dark:text-slate-400">
-            {isRtl ? 'شاشة الرقابة الذكية وتتبع جميع حركات التدفقات المالية وتسييل السيولة النقدية.' : 'High-fidelity intelligence panel for tracking corporate cash liquidity, incomes, and expenses.'}
+            {isRtl ? 'رصيد الخزنة وحركات الإيداع والسحب.' : 'Vault balance, deposits and withdrawals.'}
           </p>
         </div>
         
@@ -383,7 +381,7 @@ export default function VaultManagement({ language, settings }: Props) {
             className="flex items-center gap-2 px-5 py-3 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-500 hover:from-emerald-500 hover:to-teal-400 text-white font-bold text-sm shadow-md shadow-emerald-950/20 transition-all active:scale-[0.98] border border-emerald-400/20"
           >
             <Plus size={16} />
-            {isRtl ? 'إيداع نقدي بالصندوق' : 'Cash Deposit'}
+            {isRtl ? 'إيداع نقدي بالخزنة' : 'Cash Deposit'}
           </button>
 
           <button 
@@ -392,7 +390,7 @@ export default function VaultManagement({ language, settings }: Props) {
             className="flex items-center gap-2 px-5 py-3 rounded-xl bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 text-white font-bold text-sm shadow-md shadow-cyan-950/20 transition-all active:scale-[0.98] border border-cyan-400/20"
           >
             <RefreshCw size={16} />
-            {isRtl ? 'إعادة معايرة الخزنة' : 'Recalibrate Safe'}
+            {isRtl ? 'تسوية رصيد الخزنة' : 'Adjust vault balance'}
           </button>
         </div>
       </div>
@@ -451,7 +449,7 @@ export default function VaultManagement({ language, settings }: Props) {
             
             <div className="flex items-center gap-2 text-[10px] text-slate-500 dark:text-slate-400">
               <span className="w-2 h-2 rounded-full bg-emerald-500" />
-              <span>{isRtl ? 'السيولة مؤمنة بالكامل بالخزنة ومطابقة للواقع' : 'Physical liquidity verified & matches reality'}</span>
+              <span>{isRtl ? 'الرصيد المسجّل في الدفاتر' : 'Balance recorded in the books'}</span>
             </div>
           </div>
         </div>
@@ -544,7 +542,7 @@ export default function VaultManagement({ language, settings }: Props) {
 
             {/* Export Excel Report */}
             <ExcelExportButton 
-              reportData={excelData} 
+              reportData={buildExcelData} 
               fileName={isRtl ? 'تقرير_الخزنة_المركزي' : 'central_vault_ledger'} 
               isRtl={isRtl} 
             />
@@ -666,7 +664,7 @@ export default function VaultManagement({ language, settings }: Props) {
                 <th className={`px-6 py-4 text-xs font-bold tracking-wider ${isRtl ? 'text-right' : 'text-left'}`}>{isRtl ? 'معرف الحركة' : 'Movement ID'}</th>
                 <th className={`px-6 py-4 text-xs font-bold tracking-wider ${isRtl ? 'text-right' : 'text-left'}`}>{isRtl ? 'التصنيف / نوع الحركة' : 'Category / Type'}</th>
                 <th className={`px-6 py-4 text-xs font-bold tracking-wider ${isRtl ? 'text-right' : 'text-left'}`}>{isRtl ? 'العملة' : 'Currency'}</th>
-                <th className="px-6 py-4 text-xs font-bold tracking-wider text-center">{isRtl ? 'القيمة المعاملة' : 'Tx Amount'}</th>
+                <th className="px-6 py-4 text-xs font-bold tracking-wider text-center">{isRtl ? 'المبلغ' : 'Amount'}</th>
                 <th className={`px-6 py-4 text-xs font-bold tracking-wider ${isRtl ? 'text-right' : 'text-left'}`}>{isRtl ? 'البيان / الملاحظات والتفاصيل' : 'Statement Description'}</th>
                 <th className="px-6 py-4 text-xs font-bold tracking-wider text-center">{isRtl ? 'الرصيد بعد الحركة' : 'Balance After'}</th>
               </tr>
@@ -674,7 +672,7 @@ export default function VaultManagement({ language, settings }: Props) {
             
             <tbody className="divide-y divide-slate-100 dark:divide-white/[0.04] text-sm text-slate-800 dark:text-slate-100">
               <AnimatePresence>
-                {filteredTransactions.map((tx) => {
+                {txPage.visible.map((tx) => {
                   const isIncome = tx.type === 'income';
                   return (
                     <motion.tr 
@@ -733,6 +731,7 @@ export default function VaultManagement({ language, settings }: Props) {
               </AnimatePresence>
             </tbody>
           </table>
+          <ShowMoreBar isRtl={isRtl} shown={txPage.shown} total={txPage.total} pageSize={txPage.pageSize} onMore={txPage.showMore} onAll={txPage.showAll} className="px-6 border-t border-slate-100 dark:border-white/[0.04]" />
           
           {filteredTransactions.length === 0 && (
             <div className="py-20 text-center space-y-4 bg-white dark:bg-slate-900/10">
@@ -779,14 +778,14 @@ export default function VaultManagement({ language, settings }: Props) {
                   {modalType === 'recalibrate' && <RefreshCw className="text-cyan-600 dark:text-cyan-400 animate-spin-slow" size={24} />}
                   <div>
                     <h3 className="text-xl font-bold font-sans text-slate-900 dark:text-white">
-                      {modalType === 'income' && (isRtl ? 'صندوق المقبوضات (إيداع)' : 'Cash Deposit Protocol')}
-                      {modalType === 'expense' && (isRtl ? 'قيد المدفوعات (سحب)' : 'Cash Withdrawal Protocol')}
-                      {modalType === 'recalibrate' && (isRtl ? 'إعادة معايرة رصيد الخزنة الفعلي' : 'Recalibrate Actual Safe Balance')}
+                      {modalType === 'income' && (isRtl ? 'إيداع في الخزنة' : 'Cash deposit')}
+                      {modalType === 'expense' && (isRtl ? 'سحب من الخزنة' : 'Cash withdrawal')}
+                      {modalType === 'recalibrate' && (isRtl ? 'تسوية رصيد الخزنة' : 'Adjust vault balance')}
                     </h3>
                     <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-                      {modalType === 'income' && (isRtl ? 'قم بتغذية الخزنة المركزية أو إضافة المقبوضات النقدية.' : 'Inject physical cash assets into treasury channels.')}
-                      {modalType === 'expense' && (isRtl ? 'قم بتسجيل سحوبات النقد والمدفوعات والمصروفات.' : 'Withdraw physical assets or record business expenses.')}
-                      {modalType === 'recalibrate' && (isRtl ? 'إجراء تسوية وجرد مالي فعلي لمطابقة الرصيد بالصندوق.' : 'Perform physical asset auditing or manual balance tuning.')}
+                      {modalType === 'income' && (isRtl ? 'سجّل مبلغاً نقدياً دخل الخزنة.' : 'Record cash that came into the vault.')}
+                      {modalType === 'expense' && (isRtl ? 'سجّل سحباً نقدياً أو مصروفاً من الخزنة.' : 'Record a cash withdrawal or expense from the vault.')}
+                      {modalType === 'recalibrate' && (isRtl ? 'أدخل الرصيد الفعلي بعد الجرد لمطابقة رصيد الخزنة.' : 'Enter the counted balance to match the vault balance.')}
                     </p>
                   </div>
                 </div>
@@ -840,6 +839,7 @@ export default function VaultManagement({ language, settings }: Props) {
                       <input 
                         type="number"
                         step="any"
+                        min={0}
                         required
                         value={amount}
                         onChange={(e) => setAmount(e.target.value)}
@@ -866,7 +866,7 @@ export default function VaultManagement({ language, settings }: Props) {
                 <div className="space-y-2">
                   <label className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider">
                     {modalType === 'recalibrate'
-                      ? (isRtl ? 'سبب إعادة المعايرة وتفاصيل الجرد' : 'Reason / Audit Details')
+                      ? (isRtl ? 'سبب التسوية وتفاصيل الجرد' : 'Reason / count details')
                       : (isRtl ? 'البيان / تفاصيل وملاحظات الحركة' : 'Memorandum / Details')}
                   </label>
                   <textarea 
@@ -895,9 +895,9 @@ export default function VaultManagement({ language, settings }: Props) {
                   }`}
                 >
                   <Shield size={16} />
-                  {modalType === 'income' && (isRtl ? 'اعتماد وحقن الإيداع بالخزينة' : 'Authorize & Inject Income')}
-                  {modalType === 'expense' && (isRtl ? 'اعتماد وصرف الحركة من الخزنة' : 'Authorize & Execute Expense')}
-                  {modalType === 'recalibrate' && (isRtl ? 'تأكيد وحفظ تسوية المعايرة' : 'Confirm & Apply Calibration Adjustment')}
+                  {modalType === 'income' && (isRtl ? 'اعتماد الإيداع في الخزنة' : 'Confirm deposit')}
+                  {modalType === 'expense' && (isRtl ? 'اعتماد السحب من الخزنة' : 'Confirm withdrawal')}
+                  {modalType === 'recalibrate' && (isRtl ? 'حفظ تسوية الرصيد' : 'Save balance adjustment')}
                 </button>
               </form>
             </motion.div>

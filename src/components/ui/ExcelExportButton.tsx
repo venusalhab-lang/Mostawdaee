@@ -4,15 +4,17 @@ import { Download } from 'lucide-react';
 import { toast } from 'sonner';
 
 interface ExcelExportButtonProps {
-  reportData: any[];
+  /** Rows, or a builder so large ledgers are only formatted when the user exports. */
+  reportData: any[] | (() => any[]);
   fileName?: string;
   isRtl?: boolean;
 }
 
-export default function ExcelExportButton({ reportData, fileName, isRtl = true }: ExcelExportButtonProps) {
+export default function ExcelExportButton({ reportData: source, fileName, isRtl = true }: ExcelExportButtonProps) {
   
   const handleExport = () => {
     try {
+      const reportData = typeof source === 'function' ? source() : source;
       if (!reportData || reportData.length === 0) {
         toast.info(isRtl ? 'لا توجد بيانات لتصديرها!' : 'No data available to export!');
         return;
@@ -28,9 +30,7 @@ export default function ExcelExportButton({ reportData, fileName, isRtl = true }
 
       // Calculate automated column widths for a clean look inside Excel
       const colWidths = Object.keys(reportData[0] || {}).map(key => {
-        const lengths = reportData.map(row => String(row[key] || '').length);
-        lengths.push(key.length);
-        const maxLen = Math.max(...lengths);
+        const maxLen = reportData.reduce((m, row) => Math.max(m, String(row[key] || '').length), key.length);
         return { wch: Math.min(Math.max(maxLen + 4, 12), 40) }; // bound within 12 - 40 chars
       });
       worksheet['!cols'] = colWidths;
@@ -40,10 +40,10 @@ export default function ExcelExportButton({ reportData, fileName, isRtl = true }
       XLSX.utils.book_append_sheet(workbook, worksheet, isRtl ? "سجل الحركة المركزية" : "Central Ledger");
 
       // 4. Generate & download file immediately via native browser bindings
-      const finalName = `${fileName || (isRtl ? 'تقرير_الخزنة_المرسلة' : 'central_vault_ledger')}_${new Date().toISOString().split('T')[0]}.xlsx`;
+      const finalName = `${fileName || (isRtl ? 'سجل_الخزنة' : 'vault_ledger')}_${new Date().toISOString().split('T')[0]}.xlsx`;
       XLSX.writeFile(workbook, finalName);
       
-      toast.success(isRtl ? 'تم تصدير التقرير المالي المفلتر بصيغة Excel بنجاح!' : 'Excel workbook exported successfully!');
+      toast.success(isRtl ? 'صُدّر الملف بصيغة Excel.' : 'Excel workbook exported.');
     } catch (error) {
       console.error("Excel Export Error:", error);
       toast.error(isRtl ? 'فشل تصدير التقرير إلى Excel!' : 'An error occurred during Excel export!');

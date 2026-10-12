@@ -130,17 +130,51 @@ export async function createCheque(userId: string, input: ChequeInput): Promise<
   return fromRow(data);
 }
 
+/** Corrects a cheque entered with a mistake; only possible while it is still pending (the server locks it afterwards). */
+export async function updateCheque(userId: string, cheque: Cheque, input: ChequeInput): Promise<Cheque> {
+  if (cheque.status !== 'pending') throw new ChequeStoreError('invalid_transition');
+  if (input.type !== cheque.type || validateChequeInput(input)) throw new ChequeStoreError('invalid');
+  const patch = toRow(input);
+
+  if ((await mode(userId)) === 'guest') {
+    const rows = readGuest();
+    const index = rows.findIndex((row) => row.id === cheque.id);
+    if (index < 0) throw new ChequeStoreError('not_found');
+    if (rows[index].status !== 'pending') throw new ChequeStoreError('invalid_transition');
+    const key = (c: { type: string; bankName: string; chequeNumber: string }) =>
+      `${c.type}|${c.bankName.trim().toLowerCase()}|${c.chequeNumber.trim()}`;
+    if (rows.some((row) => row.id !== cheque.id && key(row) === key(input))) throw new ChequeStoreError('duplicate');
+    const updated = fromRow({ ...patch, id: cheque.id, status: 'pending', endorsed_to: '', status_changed_at: rows[index].statusChangedAt, created_at: rows[index].createdAt });
+    rows[index] = updated;
+    writeGuest(rows);
+    return updated;
+  }
+
+  const { data, error } = await getSupabaseClient()!
+    .from('cheques')
+    .update(patch)
+    .eq('id', cheque.id)
+    .eq('status', 'pending')
+    .select(COLUMNS)
+    .maybeSingle();
+  if (error) throw mapError(error);
+  if (!data) throw new ChequeStoreError('invalid_transition');
+  return fromRow(data);
+}
+
 export async function changeChequeStatus(
   userId: string,
   cheque: Cheque,
   next: ChequeStatus,
   endorsedTo = '',
+  notes: string = cheque.notes,
 ): Promise<Cheque> {
   if (!canTransition(cheque.type, cheque.status, next)) throw new ChequeStoreError('invalid_transition');
   if (next === 'endorsed' && !endorsedTo.trim()) throw new ChequeStoreError('invalid');
   const patch = {
     status: next,
     endorsed_to: next === 'endorsed' ? endorsedTo.trim() : cheque.endorsedTo,
+    notes: notes.trim().slice(0, 1000),
   };
 
   if ((await mode(userId)) === 'guest') {
@@ -148,7 +182,7 @@ export async function changeChequeStatus(
     const index = rows.findIndex((row) => row.id === cheque.id);
     if (index < 0) throw new ChequeStoreError('not_found');
     if (rows[index].status !== cheque.status) throw new ChequeStoreError('invalid_transition');
-    const updated: Cheque = { ...rows[index], status: next, endorsedTo: patch.endorsed_to, statusChangedAt: new Date().toISOString() };
+    const updated: Cheque = { ...rows[index], status: next, endorsedTo: patch.endorsed_to, notes: patch.notes, statusChangedAt: new Date().toISOString() };
     rows[index] = updated;
     writeGuest(rows);
     return updated;

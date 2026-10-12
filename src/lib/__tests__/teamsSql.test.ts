@@ -39,7 +39,7 @@ const cashSale = (n: number): Op[] => [
   set('inventory', 'p1', { quantity: 10 - 2 * n, status: 'in_stock' }, true),
   set('settings', 'vault', { balanceAED: 100 + 50 * n, balanceJOD: 0, currentBalance: 0, lastUpdated: n }, true),
   set('vault_records', `inv-inv${n}`, { type: 'income', amount: 50, currency: 'AED' }),
-  set('invoices', `inv${n}`, { type: 'sale', totalAmount: 50, currency: 'AED', paymentMethod: 'cash' }),
+  set('invoices', `inv${n}`, { type: 'sale', totalAmount: 50, currency: 'AED', paymentMethod: 'cash', items: [{ productId: 'p1', quantity: 2 }] }),
   set('audit_logs', `log${n}`, { action: 'sale' }),
 ];
 
@@ -150,6 +150,28 @@ describe('reading the store', () => {
     expect((await read(OWNER, 'employees')).length).toBe(1);
     expect((await read(OWNER, 'vault_records')).length).toBe(1);
   });
+
+  it('managers do not see salaries through the vault history or the activity log either', async () => {
+    await commit(OWNER, [
+      set('vault_records', 'pay1', { type: 'expense', category: 'salary', source: 'payroll', amount: 3000, description: 'Salary: Sara' }),
+      set('vault_records', 'payback1', { type: 'income', category: 'salary', source: 'reversal', amount: 3000 }),
+      set('vault_records', 'rent1', { type: 'expense', category: 'other', source: 'expense', amount: 500 }),
+      set('audit_logs', 'paylog1', { action: 'pay', category: 'payroll', details: 'Sara 3000' }),
+      set('audit_logs', 'emplog1', { action: 'add', category: 'employee', details: 'Sara salary 3000' }),
+      set('audit_logs', 'salelog1', { action: 'sale', category: 'invoice' }),
+    ]);
+    const vault = (await read(MANAGER, 'vault_records')).map((r) => r.doc_id);
+    expect(vault).toContain('rent1');
+    expect(vault).not.toContain('pay1');
+    expect(vault).not.toContain('payback1');
+    const logs = (await read(MANAGER, 'audit_logs')).map((r) => r.doc_id);
+    expect(logs).toContain('salelog1');
+    expect(logs).not.toContain('paylog1');
+    expect(logs).not.toContain('emplog1');
+    const ownerVault = (await read(OWNER, 'vault_records')).map((r) => r.doc_id);
+    expect(ownerVault).toEqual(expect.arrayContaining(['pay1', 'payback1', 'rent1']));
+    expect((await read(OWNER, 'audit_logs')).map((r) => r.doc_id)).toEqual(expect.arrayContaining(['paylog1', 'emplog1']));
+  });
 });
 
 describe('cashier writes', () => {
@@ -166,9 +188,50 @@ describe('cashier writes', () => {
     await commit(CASHIER, [
       set('customers', 'c1', { totalDebt: 70 }, true),
       set('customer_transactions', 'inv-inv9', { type: 'invoice', amount: 50 }),
-      set('invoices', 'inv9', { type: 'sale', paymentMethod: 'credit' }),
+      set('invoices', 'inv9', { type: 'sale', paymentMethod: 'credit', customerId: 'c1', totalAmount: 50, items: [] }),
     ]);
     expect((await stored('customers', 'c1')).totalDebt).toBe(70);
+  });
+
+  it('cannot lower stock beyond what the sale invoice sold', async () => {
+    const before = (await stored('inventory', 'p1')).quantity;
+    await expect(commit(CASHIER, [
+      set('inventory', 'p1', { quantity: before - 5 }, true),
+      set('invoices', 'inv-short', { type: 'sale', totalAmount: 25, paymentMethod: 'cash', items: [{ productId: 'p1', quantity: 1 }] }),
+    ])).rejects.toThrow(/role not allowed/);
+    await expect(commit(CASHIER, [set('inventory', 'p1', { quantity: before - 1 }, true)])).rejects.toThrow(/role not allowed/);
+    expect((await stored('inventory', 'p1')).quantity).toBe(before);
+  });
+
+  it('a sale by the pack lowers stock by pack size, and only by the stored pack size', async () => {
+    await commit(OWNER, [set('inventory', 'box1', { name: 'Juice', quantity: 200, packSize: 20, packName: 'صندوق', status: 'in_stock' })]);
+    const boxSale = (id: string, packSize: number, left: number): Op[] => [
+      set('inventory', 'box1', { quantity: left }, true),
+      set('invoices', id, { type: 'sale', totalAmount: 30, currency: 'AED', paymentMethod: 'cash', items: [{ productId: 'box1', quantity: 2, packSize }] }),
+    ];
+    await expect(commit(CASHIER, boxSale('inv-box-forged', 50, 100))).rejects.toThrow(/role not allowed/);
+    await commit(CASHIER, boxSale('inv-box', 20, 160));
+    expect((await stored('inventory', 'box1')).quantity).toBe(160);
+    await expect(commit(CASHIER, boxSale('inv-box-more', 20, 100))).rejects.toThrow(/role not allowed/);
+  });
+
+  it('cannot raise a debt beyond the credit sale, or without one', async () => {
+    const debt = (await stored('customers', 'c1')).totalDebt;
+    await expect(commit(CASHIER, [
+      set('customers', 'c1', { totalDebt: debt + 500 }, true),
+      set('invoices', 'inv-big', { type: 'sale', paymentMethod: 'credit', customerId: 'c1', totalAmount: 5, items: [] }),
+    ])).rejects.toThrow(/role not allowed/);
+    await expect(commit(CASHIER, [set('customers', 'c1', { totalDebt: debt + 1 }, true)])).rejects.toThrow(/role not allowed/);
+    expect((await stored('customers', 'c1')).totalDebt).toBe(debt);
+  });
+
+  it('a credit sale in another currency uses the converted debt amount', async () => {
+    const debt = (await stored('customers', 'c1')).totalDebt;
+    await commit(CASHIER, [
+      set('customers', 'c1', { totalDebt: debt + 36.7 }, true),
+      set('invoices', 'inv-usd', { type: 'sale', paymentMethod: 'credit', customerId: 'c1', totalAmount: 10, currency: 'USD', debtAmount: 36.7, debtCurrency: 'AED', items: [] }),
+    ]);
+    expect((await stored('customers', 'c1')).totalDebt).toBeCloseTo(debt + 36.7, 6);
   });
 
   it.each([
@@ -199,8 +262,28 @@ describe('cashier writes', () => {
   });
 
   it('a device cannot forge who created a record', async () => {
-    await commit(CASHIER, [set('invoices', 'inv3', { type: 'sale', actorId: OWNER })]);
-    expect((await stored('invoices', 'inv3')).actorId).toBe(CASHIER);
+    await commit(CASHIER, [set('invoices', 'inv3', { type: 'sale', actorId: OWNER, actorEmail: 'owner@shop.com' })]);
+    expect(await stored('invoices', 'inv3')).toMatchObject({ actorId: CASHIER, actorEmail: 'cashier@shop.com' });
+  });
+});
+
+describe('who sold', () => {
+  it('editing an invoice keeps its seller, even when the edit drops or changes it', async () => {
+    await commit(OWNER, [set('invoices', 'inv3', { type: 'sale', totalAmount: 9, actorId: OWNER, actorEmail: 'x@y.com' })]);
+    expect(await stored('invoices', 'inv3')).toMatchObject({ totalAmount: 9, actorId: CASHIER, actorEmail: 'cashier@shop.com' });
+    await commit(OWNER, [set('invoices', 'inv3', { status: 'sent' }, true)]);
+    expect(await stored('invoices', 'inv3')).toMatchObject({ status: 'sent', actorId: CASHIER, actorEmail: 'cashier@shop.com' });
+  });
+
+  it('an invoice saved before sellers were stamped does not gain one on edit', async () => {
+    await h.admin(
+      `INSERT INTO public.merchant_documents (user_id, collection, doc_id, data) VALUES ($1, 'invoices', 'legacy1', '{"type":"sale"}'::jsonb)`,
+      [OWNER]);
+    await commit(OWNER, [set('invoices', 'legacy1', { note: 'x', actorId: OWNER, actorEmail: 'owner@shop.com' }, true)]);
+    const old = await stored('invoices', 'legacy1');
+    expect(old.note).toBe('x');
+    expect(old.actorId).toBeUndefined();
+    expect(old.actorEmail).toBeUndefined();
   });
 });
 

@@ -5,6 +5,7 @@ import {
 import { toast } from 'sonner';
 import { useFirebase } from './FirebaseProvider';
 import { sounds } from '../lib/sounds';
+import { arCount } from '../lib/arabicPlural';
 import { type AdminSubscriber, type AdminSubscriptionOp, fetchAdminSubscribers, mutateAdminSubscription } from '../lib/adminSubscriptionApi';
 import { type PlatformRole, SUPPORT_GRACE_DAYS, platformRoleLabel, staffCan } from '../lib/platformStaff';
 import AdminSupportInbox from './AdminSupportInbox';
@@ -130,7 +131,7 @@ function SubscribersPanel({ role, isRtl }: { role: PlatformRole; isRtl: boolean 
         ? (isRtl ? 'مدفوع' : 'paid')
         : subscriber.status === 'trial' ? (isRtl ? 'تجريبي' : 'trial') : (isRtl ? 'منتهٍ' : 'expired');
       toast.success(isRtl
-        ? `${subscriber.businessName || subscriber.displayName || subscriber.email}: ${kind}، ${subscriber.daysRemaining} يوماً متبقية`
+        ? `${subscriber.businessName || subscriber.displayName || subscriber.email}: ${kind}، ${arCount(subscriber.daysRemaining, { one: 'يوم واحد متبقٍ', two: 'يومان متبقيان', few: '{n} أيام متبقية', many: '{n} يوماً متبقياً', other: '{n} يوم متبقٍ' })}`
         : `${subscriber.email}: ${kind}, ${subscriber.daysRemaining} days left`);
     } catch (err: any) {
       toast.error(err?.message || (isRtl ? 'تعذر تعديل الاشتراك' : 'Could not update the subscription'));

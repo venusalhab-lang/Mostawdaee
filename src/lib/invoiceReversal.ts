@@ -1,10 +1,13 @@
 import type { Invoice } from '../types';
+import { roundQty } from './stock';
+import { lineUnits } from './packs';
 
+/** Stock units each product moves on this invoice (pack lines count quantity × pack size). */
 export function quantitiesByProduct(items: Invoice['items']): Map<string, { qty: number; description: string }> {
   const totals = new Map<string, { qty: number; description: string }>();
   for (const item of items) {
     const entry = totals.get(item.productId) || { qty: 0, description: item.description };
-    entry.qty += Number(item.quantity) || 0;
+    entry.qty = roundQty(entry.qty + lineUnits(item));
     totals.set(item.productId, entry);
   }
   return totals;
@@ -30,12 +33,12 @@ export function planStockReversal(
       result.missing.push(description || productId);
       continue;
     }
-    const available = Number(product.quantity) || 0;
+    const available = roundQty(Number(product.quantity) || 0);
     if (invoice.type === 'purchase' && available < qty) {
       result.shortages.push({ name: product.name || description || productId, available, needed: qty });
       continue;
     }
-    result.updates.push({ productId, quantity: invoice.type === 'sale' ? available + qty : available - qty });
+    result.updates.push({ productId, quantity: roundQty(invoice.type === 'sale' ? available + qty : available - qty) });
   }
   return result;
 }

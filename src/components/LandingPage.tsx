@@ -58,40 +58,9 @@ export default function LandingPage({ language = 'ar', onEnter = () => {}, darkM
     return () => clearInterval(timer);
   }, [isRtl]);
 
-  // Inspirational greetings that rotate or are beautifully displayed based on localized selection
-  const arGreetings = [
-    {
-      title: "صباح الخير والريادة",
-      body: "إنتاجية اليوم تصنع ريادة الغد. طاب يومكم بكل خير وتميز في نظام مستودعي الذكي."
-    },
-    {
-      title: "العمل المنظم أساس النمو",
-      body: "التنظيم والاتساق هما مفتاحا الكفاءة التشغيلية والنمو المستدام. نسعد بدعم تميزكم دائماً."
-    },
-    {
-      title: "رؤية شاملة لغد أفضل",
-      body: "المستودع الذكي والعمل المنظم يعني قرارات حاسمة وأرباحاً متنامية. تمنياتنا لكم بجلسة عمل مثمرة."
-    }
-  ];
-
-  const enGreetings = [
-    {
-      title: "Empower Your Workday",
-      body: "Today's productivity shapes tomorrow's leadership. Experience precision asset management."
-    },
-    {
-      title: "Consistency Drives Growth",
-      body: "Structured workflows and solid logs are the blueprints for operational excellence. Have a great session."
-    },
-    {
-      title: "Smarter Insights, Better Decisions",
-      body: "Our synchronized modules are tuned to help you govern your assets with complete confidence."
-    }
-  ];
-
-  // Pick a greeting based on the current minute to make it feel fresh and active
-  const greetingIndex = new Date().getMinutes() % 3;
-  const activeGreeting = isRtl ? arGreetings[greetingIndex] : enGreetings[greetingIndex];
+  const activeGreeting = isRtl
+    ? { title: "أهلاً بك في مستودعي", body: "المخزون والمبيعات والخزنة والموظفون في مكان واحد." }
+    : { title: "Welcome to Mostawdaee", body: "Inventory, sales, the vault and staff in one place." };
 
   const containerVariants: any = {
     hidden: { opacity: 0 },
@@ -124,14 +93,14 @@ export default function LandingPage({ language = 'ar', onEnter = () => {}, darkM
     {
       icon: <ArrowUpRight className="w-6 h-6" />,
       title: isRtl ? "المبيعات والفواتير الضريبية" : "Invoicing & POS",
-      desc: isRtl ? "إصدار وتلقي فواتير المبيعات والمشتريات والبيع السريع عبر الباركود بنقرة واحدة." : "Generate standard sales invoices, log cargo logistics, and conduct direct rapid POS scanning.",
+      desc: isRtl ? "إصدار وتلقي فواتير المبيعات والمشتريات والبيع السريع عبر الباركود بنقرة واحدة." : "Issue and receive sales and purchase invoices, and sell quickly by scanning barcodes.",
       accent: "from-emerald-500/10 to-teal-500/10 dark:from-emerald-500/5 dark:to-teal-500/5",
       iconBg: "bg-emerald-50 dark:bg-emerald-900/40 text-emerald-600 dark:text-emerald-400"
     },
     {
       icon: <ShieldCheck className="w-6 h-6" />,
       title: isRtl ? "الخزنة المركزية وإدارة النقد" : "Treasury & Capital Ledger",
-      desc: isRtl ? "مراقبة الصندوق النقدي وتسجيل حركات المقبوضات والمدفوعات والمستندات ببيانات آمنة." : "Audit raw safe deposits, operational disbursements, and real-time cash flow records.",
+      desc: isRtl ? "متابعة رصيد الخزنة وتسجيل حركات المقبوضات والمدفوعات." : "Track the vault balance and record cash received and paid out.",
       accent: "from-indigo-500/10 to-purple-500/10 dark:from-indigo-500/5 dark:to-purple-500/5",
       iconBg: "bg-indigo-50 dark:bg-indigo-900/40 text-indigo-600 dark:text-indigo-400"
     },
@@ -157,7 +126,7 @@ export default function LandingPage({ language = 'ar', onEnter = () => {}, darkM
                 {isRtl ? 'مستودعي' : 'Mostawdaee'}
               </h2>
               <p className="text-[10px] text-indigo-600 dark:text-indigo-400 font-bold uppercase tracking-widest leading-none mt-0.5">
-                {isRtl ? 'نظام المستودع الآمن' : 'Secure Warehouse Platform'}
+                {isRtl ? 'إدارة المخزون والمبيعات' : 'Inventory & sales management'}
               </p>
             </div>
           </div>
@@ -256,7 +225,7 @@ export default function LandingPage({ language = 'ar', onEnter = () => {}, darkM
               
               <div className="flex items-center justify-center gap-2 text-[11px] text-slate-500 dark:text-slate-400 font-bold justify-center pt-1 border-t border-slate-200/40 dark:border-slate-800/40">
                 <Lock size={12} className="text-emerald-600 dark:text-emerald-400" />
-                <span>{isRtl ? 'إتاحة وصلاحيات معماة بالكامل' : 'Database Connection Secured'}</span>
+                <span>{isRtl ? 'الدخول بحسابك فقط' : 'Access with your account only'}</span>
               </div>
             </motion.div>
 
@@ -310,7 +279,7 @@ export default function LandingPage({ language = 'ar', onEnter = () => {}, darkM
         <div className="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-center gap-4 text-xs font-semibold text-slate-500 dark:text-slate-400">
           <div className="flex items-center gap-2">
             <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-            <span>© 2026 {isRtl ? 'نظام مستودعي الذكي.' : 'Mostawdaee Enterprise Suite.'} {isRtl ? 'جميع الأنظمة نشطة ومعايرة.' : 'All sub-systems ready.'}</span>
+            <span>© 2026 {isRtl ? 'مستودعي.' : 'Mostawdaee.'}</span>
           </div>
           <div className="flex gap-4 sm:gap-6 font-bold text-slate-600 dark:text-slate-300 flex-wrap justify-center">
             <button 
@@ -331,7 +300,7 @@ export default function LandingPage({ language = 'ar', onEnter = () => {}, darkM
             <span>•</span>
             <button 
               type="button"
-              onClick={() => alert(isRtl ? 'دعم مستودعي متاح لكم على مدار الساعة في الواجهة الرئيسية عبر المساعد الذكي!' : 'Mostawdaee operational academy and live support are active via the Smart Assistant.')}
+              onClick={() => alert(isRtl ? 'للتواصل مع الدعم، سجّل الدخول ثم افتح الإعدادات ← الدعم الفني (مركز الدعم داخل التطبيق).' : 'To contact support, sign in and open Settings → Support (the in-app support center).')}
               className="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors cursor-pointer outline-none bg-transparent"
             >
               {isRtl ? 'دعم المستودعات' : 'Technical Support'}
@@ -392,11 +361,11 @@ export default function LandingPage({ language = 'ar', onEnter = () => {}, darkM
                     <div className="space-y-6">
                       <div className="space-y-2">
                         <h4 className="font-bold text-sm text-indigo-600 dark:text-indigo-400">1. منح الترخيص</h4>
-                        <p className="text-gray-600 dark:text-gray-300">يمنحك التطبيق ترخيصاً محدوداً، غير حصري، غير قابل للنقل، وقابلاً للإلغاء لاستخدام البرنامج وواجهاته ثلاثية الأبعاد بدقة وفقاً لشروط هذه الاتفاقية. يُحظر تماماً أي محاولة للهندسة العكسية، فك التشفير، أو استخراج الكود المصدري.</p>
+                        <p className="text-gray-600 dark:text-gray-300">يمنحك التطبيق ترخيصاً محدوداً، غير حصري، غير قابل للنقل، وقابلاً للإلغاء لاستخدام البرنامج وفقاً لشروط هذه الاتفاقية. يُحظر تماماً أي محاولة للهندسة العكسية، فك التشفير، أو استخراج الكود المصدري.</p>
                       </div>
                       <div className="space-y-2">
                         <h4 className="font-bold text-sm text-indigo-600 dark:text-indigo-400">2. الملكية الفكرية</h4>
-                        <p className="text-gray-600 dark:text-gray-300">تظل جميع حقوق الملكية الفكرية في التطبيق، بما في ذلك على سبيل المثال لا الحصر النماذج ثلاثية الأبعاد، وواجهات المستخدم، والعلامة التجارية، والكود المصدري الأساسي، ملكاً حصرياً للمنصة.</p>
+                        <p className="text-gray-600 dark:text-gray-300">تظل جميع حقوق الملكية الفكرية في التطبيق، بما في ذلك على سبيل المثال لا الحصر تصميمه، وواجهات المستخدم، والعلامة التجارية، والكود المصدري الأساسي، ملكاً حصرياً للمنصة.</p>
                       </div>
                       <div className="space-y-2">
                         <h4 className="font-bold text-sm text-indigo-600 dark:text-indigo-400">3. تحديد المسؤولية</h4>
@@ -411,11 +380,11 @@ export default function LandingPage({ language = 'ar', onEnter = () => {}, darkM
                     <div className="space-y-6">
                       <div className="space-y-2">
                         <h4 className="font-bold text-sm text-indigo-600 dark:text-indigo-400">1. Grant of License</h4>
-                        <p className="text-gray-600 dark:text-gray-300">The Application grants you a limited, non-exclusive, non-transferable, and revocable license to use the software and its 3D interfaces strictly in accordance with the terms of this agreement. Any attempt to reverse engineer, decompile, or extract the source code is strictly prohibited.</p>
+                        <p className="text-gray-600 dark:text-gray-300">The Application grants you a limited, non-exclusive, non-transferable, and revocable license to use the software strictly in accordance with the terms of this agreement. Any attempt to reverse engineer, decompile, or extract the source code is strictly prohibited.</p>
                       </div>
                       <div className="space-y-2">
                         <h4 className="font-bold text-sm text-indigo-600 dark:text-indigo-400">2. Intellectual Property</h4>
-                        <p className="text-gray-600 dark:text-gray-300">All intellectual property rights in the application, including but not limited to the 3D models, user interfaces, branding, and underlying source code, remain the exclusive property of the platform.</p>
+                        <p className="text-gray-600 dark:text-gray-300">All intellectual property rights in the application, including but not limited to its design, user interfaces, branding, and underlying source code, remain the exclusive property of the platform.</p>
                       </div>
                       <div className="space-y-2">
                         <h4 className="font-bold text-sm text-indigo-600 dark:text-indigo-400">3. Limitation of Liability</h4>

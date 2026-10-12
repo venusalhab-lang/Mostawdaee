@@ -78,11 +78,38 @@ export interface RestoreActions {
 
 const list = <T,>(v: unknown): T[] => (Array.isArray(v) ? (v as T[]) : []);
 
+/** What the store already holds; anything dated after the backup means the backup is out of date. */
+export interface LiveBooks {
+  invoices: Pick<Invoice, 'date'>[];
+  vaultTransactions: Pick<VaultTransaction, 'timestamp'>[];
+  customerTransactions: Pick<CustomerTransaction, 'date'>[];
+}
+
+const time = (v: unknown): number => {
+  const n = typeof v === 'number' ? v : Date.parse(String(v ?? ''));
+  return Number.isFinite(n) ? n : 0;
+};
+
+/** Latest live movement recorded after the backup was taken, or null when the backup is current. */
+export function newerLiveActivity(backupTimestamp: unknown, live: LiveBooks): number | null {
+  const taken = time(backupTimestamp);
+  let latest = 0;
+  for (const inv of live.invoices) latest = Math.max(latest, time(inv.date));
+  for (const tx of live.vaultTransactions) latest = Math.max(latest, time(tx.timestamp));
+  for (const tx of live.customerTransactions) latest = Math.max(latest, time(tx.date));
+  return latest > taken ? latest : null;
+}
+
 /**
  * Writes a backup back through the app's own save paths, so roles and the database rules apply.
- * Vault movements go before the balance; the balance is refused when the live vault is newer.
+ * A backup older than recorded sales, payments or vault movements is refused before anything is written:
+ * its product quantities would bring back goods that were already sold.
  */
-export async function restoreStoreBackup(data: Partial<StoreBackup>, actions: RestoreActions): Promise<void> {
+export async function restoreStoreBackup(data: Partial<StoreBackup>, actions: RestoreActions, live: LiveBooks): Promise<void> {
+  const newer = newerLiveActivity(data.timestamp, live);
+  if (newer !== null) {
+    throw Object.assign(new Error('The store has activity newer than this backup'), { code: 'backup-older', newer });
+  }
   if (data.settings) await actions.saveSettings(data.settings);
   for (const wh of list<Warehouse>(data.warehouses)) await actions.saveWarehouse(wh);
   for (const p of list<Product>(data.products)) await actions.saveProduct(p, { skipMovement: true });

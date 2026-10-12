@@ -9,6 +9,7 @@ import {
 } from '../lib/workspace';
 import { pendingSalesBlockSwitch, switchStore } from '../lib/storeSwitch';
 import SupportCenter from './SupportCenter';
+import AccountSettings from './AccountSettings';
 
 type MemberRole = Exclude<WorkspaceRole, 'owner'>;
 
@@ -85,7 +86,7 @@ export function TeamManager({ language }: { language: 'ar' | 'en' }) {
     void run('invite', async () => {
       await inviteMember(address, role);
       setEmail('');
-    }, ar ? `أُرسلت الدعوة إلى ${address}. يقبلها عند دخوله بهذا البريد.` : `Invitation saved for ${address}. They accept it when they sign in with this email.`);
+    }, ar ? `حُفظت الدعوة لـ ${address}، وتظهر له عند دخوله بهذا البريد.` : `Invitation saved for ${address}. It appears when they sign in with this email.`);
   };
 
   if (!user) {
@@ -117,10 +118,10 @@ export function TeamManager({ language }: { language: 'ar' | 'en' }) {
             required
             value={email}
             onChange={(e) => setEmail(e.target.value)}
-            placeholder={ar ? 'بريد الموظف' : 'Staff email'}
+            placeholder={ar ? 'بريد عضو الفريق' : 'Team member email'}
             className={input}
             dir="ltr"
-            aria-label={ar ? 'بريد الموظف' : 'Staff email'}
+            aria-label={ar ? 'بريد عضو الفريق' : 'Team member email'}
           />
           <select value={role} onChange={(e) => setRole(e.target.value as MemberRole)} className={input} aria-label={ar ? 'الدور' : 'Role'}>
             <option value="cashier">{roleLabel('cashier', ar)}</option>
@@ -128,7 +129,7 @@ export function TeamManager({ language }: { language: 'ar' | 'en' }) {
           </select>
           <button type="submit" disabled={busy !== null} className={primary}>
             <UserPlus size={16} />
-            <span>{busy === 'invite' ? (ar ? 'جاري الحفظ...' : 'Saving...') : (ar ? 'دعوة' : 'Invite')}</span>
+            <span>{busy === 'invite' ? (ar ? 'جارٍ الحفظ...' : 'Saving...') : (ar ? 'دعوة' : 'Invite')}</span>
           </button>
         </div>
         <p className="text-xs text-gray-500 dark:text-gray-400">{roleHelp(role, ar)}</p>
@@ -136,7 +137,7 @@ export function TeamManager({ language }: { language: 'ar' | 'en' }) {
 
       <div className={card}>
         {loading ? (
-          <p className="text-sm text-gray-500">{ar ? 'جاري التحميل...' : 'Loading...'}</p>
+          <p className="text-sm text-gray-500">{ar ? 'جارٍ التحميل...' : 'Loading...'}</p>
         ) : loadError ? (
           <p className="text-sm font-bold text-rose-600">{loadError}</p>
         ) : members.length === 0 ? (
@@ -249,9 +250,10 @@ export function MembershipSettings({ language, onLanguageToggle }: { language: '
         </button>
         <button type="button" onClick={leave} disabled={busy} className={quiet}>
           <LogOut size={14} className="text-rose-500" />
-          <span>{busy ? (ar ? 'جاري المغادرة...' : 'Leaving...') : (ar ? 'مغادرة المتجر' : 'Leave store')}</span>
+          <span>{busy ? (ar ? 'جارٍ المغادرة...' : 'Leaving...') : (ar ? 'مغادرة المتجر' : 'Leave store')}</span>
         </button>
       </div>
+      <AccountSettings language={language} />
       <SupportCenter language={language} />
     </div>
   );
@@ -309,7 +311,7 @@ export function PendingInvites({ language }: { language: 'ar' | 'en' }) {
           </p>
           <div className="flex gap-2">
             <button type="button" disabled={busy !== null} onClick={() => void accept(invite)} className={primary}>
-              {busy === invite.ownerId ? (ar ? 'جاري...' : 'Working...') : (ar ? 'قبول' : 'Accept')}
+              {busy === invite.ownerId ? (ar ? 'جارٍ...' : 'Working...') : (ar ? 'قبول' : 'Accept')}
             </button>
             <button type="button" disabled={busy !== null} onClick={() => void decline(invite)} className={quiet}>
               {ar ? 'رفض' : 'Decline'}

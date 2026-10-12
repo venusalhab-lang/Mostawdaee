@@ -9,19 +9,23 @@ interface QuickActionModalProps {
   onClose: () => void;
   language: Language;
   onActionClick: (screenDetail: string, actionId?: string) => void;
+  /** Screens this account's role may open; shortcuts leading elsewhere are not offered. */
+  canOpenScreen: (screen: string) => boolean;
 }
 
 export default function QuickActionModal({ 
   isOpen, 
   onClose, 
   language, 
-  onActionClick 
+  onActionClick,
+  canOpenScreen,
 }: QuickActionModalProps) {
   const isRtl = language === 'ar';
 
   const actions = [
     {
       id: 'pos',
+      screen: 'pos',
       title: isRtl ? 'بيع مباشر' : 'Direct POS',
       desc: isRtl ? 'حركة خروج بضاعة مبيعات' : 'Log outgoing sale items',
       icon: ShoppingCart,
@@ -31,6 +35,7 @@ export default function QuickActionModal({
     },
     {
       id: 'add-product',
+      screen: 'inventory',
       title: isRtl ? 'إضافة منتج' : 'Add Product',
       desc: isRtl ? 'إدخال سلعة جديدة للمخازن' : 'Register a new warehouse item',
       icon: PlusSquare,
@@ -40,8 +45,9 @@ export default function QuickActionModal({
     },
     {
       id: 'debts',
+      screen: 'customers',
       title: isRtl ? 'الديون' : 'Debts & Debtors',
-      desc: isRtl ? 'كشف الذمم ومستحقات الشركاء' : 'Review outstanding financial accounts',
+      desc: isRtl ? 'الذمم المستحقة على العملاء' : 'Outstanding customer debts',
       icon: Wallet,
       color: 'from-amber-500 to-orange-600',
       textColor: 'text-amber-500',
@@ -49,14 +55,15 @@ export default function QuickActionModal({
     },
     {
       id: 'reports',
-      title: isRtl ? 'التقارير' : 'Analytical Reports',
-      desc: isRtl ? 'المخططات والاحصاءات الذكية' : 'Check warehouse performance & KPIs',
+      screen: 'profits-dashboard',
+      title: isRtl ? 'التقارير' : 'Reports',
+      desc: isRtl ? 'الأرباح والإحصاءات' : 'Profits and statistics',
       icon: BarChart3,
       color: 'from-purple-500 to-indigo-600',
       textColor: 'text-purple-500',
       bgColor: 'bg-purple-500/10 border-purple-500/20 hover:border-purple-500/35',
     }
-  ];
+  ].filter((act) => canOpenScreen(act.screen));
 
   return (
     <AnimatePresence>
@@ -90,7 +97,7 @@ export default function QuickActionModal({
                 </div>
                 <div>
                   <h3 className="font-extrabold text-slate-900 dark:text-transparent dark:bg-clip-text dark:bg-gradient-to-r dark:from-white dark:to-slate-300 text-base font-arabic">
-                    {isRtl ? 'الإجراءات السريعة الفائقة' : 'Super Quick Actions'}
+                    {isRtl ? 'الإجراءات السريعة' : 'Quick Actions'}
                   </h3>
                   <p className="text-[11px] text-slate-500 dark:text-slate-400 font-bold font-arabic">
                     {isRtl ? 'اختصارات لوحة التحكم الفورية' : 'Instant controls and fast routes'}
@@ -145,8 +152,8 @@ export default function QuickActionModal({
               <HelpCircle size={15} className="text-indigo-500 dark:text-indigo-400 shrink-0" />
               <p className="text-[10px] text-slate-500 dark:text-slate-400 leading-relaxed font-arabic">
                 {isRtl 
-                  ? 'هذه الاختصارات صُممت لتسهيل تدوير كلف البيع وجرد المخازن مباشرة دون مغادرة لوحة القيادة الحالية.' 
-                  : 'Designed to quickly register new sales, add incoming inventory, and track outstanding debts straight away.'}
+                  ? 'اختصارات لفتح البيع المباشر، وإضافة منتج، وديون العملاء، وتقرير الأرباح.' 
+                  : 'Shortcuts to direct sale, adding a product, customer debts and the profit report.'}
               </p>
             </div>
 

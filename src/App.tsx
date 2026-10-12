@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useRef, Suspense, lazy } from 'react';
+import React, { useState, useEffect, useRef, Suspense } from 'react';
+import { lazyWithRetry } from './lib/lazyWithRetry';
 import { motion, AnimatePresence } from 'motion/react';
 import { Capacitor } from '@capacitor/core';
 import { App as CapApp } from '@capacitor/app';
@@ -8,6 +9,7 @@ import Login from './components/Auth';
 import LandingPage from './components/LandingPage';
 import ErrorBoundary from './components/ErrorBoundary';
 import { decideBack, hasUnsavedWork } from './lib/backNavigation';
+import { requestInventoryIntent } from './lib/inventoryIntent';
 import Header from './components/Header';
 import CurrencyTicker from './components/CurrencyTicker';
 import { AuthContext, mockUserObj } from './components/AuthContext';
@@ -37,24 +39,25 @@ import { homeScreen } from './lib/roles';
 import { leaveStore, teamErrorMessage } from './lib/workspace';
 import { pendingSalesBlockSwitch, switchStore } from './lib/storeSwitch';
 
-const HomeDesk = lazy(() => import('./components/HomeDesk'));
-const POSSystem = lazy(() => import('./components/POSSystem'));
-const InventoryManagement = lazy(() => import('./components/InventoryManagement'));
-const InventoryAudit = lazy(() => import('./components/InventoryAudit'));
-const WarehouseManagement = lazy(() => import('./components/WarehouseManagement'));
-const InvoiceSystem = lazy(() => import('./components/InvoiceSystem'));
-const CustomerManagement = lazy(() => import('./components/CustomerManagement'));
-const ChequesManagement = lazy(() => import('./components/ChequesManagement'));
-const EmployeeManagement = lazy(() => import('./components/EmployeeManagement'));
-const VaultManagement = lazy(() => import('./components/VaultManagement'));
-const PurchasesExpenses = lazy(() => import('./components/PurchasesExpenses'));
-const GoogleDriveBackup = lazy(() => import('./components/GoogleDriveBackup'));
-const BackupManager = lazy(() => import('./components/BackupManager'));
-const AdminDashboard = lazy(() => import('./components/AdminDashboard'));
-const Settings = lazy(() => import('./components/Settings'));
-const AIAssistant = lazy(() => import('./components/AIAssistant'));
-const LandedCostCalculator = lazy(() => import('./components/LandedCostCalculator'));
-const ProfitsDashboard = lazy(() => import('./components/ProfitsDashboard'));
+const HomeDesk = lazyWithRetry(() => import('./components/HomeDesk'));
+const POSSystem = lazyWithRetry(() => import('./components/POSSystem'));
+const InventoryManagement = lazyWithRetry(() => import('./components/InventoryManagement'));
+const InventoryAudit = lazyWithRetry(() => import('./components/InventoryAudit'));
+const WarehouseManagement = lazyWithRetry(() => import('./components/WarehouseManagement'));
+const InvoiceSystem = lazyWithRetry(() => import('./components/InvoiceSystem'));
+const CustomerManagement = lazyWithRetry(() => import('./components/CustomerManagement'));
+const ChequesManagement = lazyWithRetry(() => import('./components/ChequesManagement'));
+const EmployeeManagement = lazyWithRetry(() => import('./components/EmployeeManagement'));
+const VaultManagement = lazyWithRetry(() => import('./components/VaultManagement'));
+const PurchasesExpenses = lazyWithRetry(() => import('./components/PurchasesExpenses'));
+const GoogleDriveBackup = lazyWithRetry(() => import('./components/GoogleDriveBackup'));
+const BackupManager = lazyWithRetry(() => import('./components/BackupManager'));
+const AdminDashboard = lazyWithRetry(() => import('./components/AdminDashboard'));
+const Settings = lazyWithRetry(() => import('./components/Settings'));
+const AIAssistant = lazyWithRetry(() => import('./components/AIAssistant'));
+const LandedCostCalculator = lazyWithRetry(() => import('./components/LandedCostCalculator'));
+const ProfitsDashboard = lazyWithRetry(() => import('./components/ProfitsDashboard'));
+const AccountingDashboard = lazyWithRetry(() => import('./components/AccountingDashboard'));
 
 export default function App() {
   const { 
@@ -191,8 +194,9 @@ export default function App() {
     if (history.length > 30) history.shift();
   }, [activeScreen]);
 
-  const backStateRef = useRef({ isCommandPaletteOpen, isSidebarOpen, isQuickActionModalOpen, activeScreen, isRtl });
-  backStateRef.current = { isCommandPaletteOpen, isSidebarOpen, isQuickActionModalOpen, activeScreen, isRtl };
+  const home = homeScreen(storeRole);
+  const backStateRef = useRef({ isCommandPaletteOpen, isSidebarOpen, isQuickActionModalOpen, activeScreen, isRtl, home });
+  backStateRef.current = { isCommandPaletteOpen, isSidebarOpen, isQuickActionModalOpen, activeScreen, isRtl, home };
 
   useEffect(() => {
     if (!Capacitor.isNativePlatform()) return;
@@ -210,7 +214,7 @@ export default function App() {
         overlayOpen: !!visibleOverlay(),
         unsavedWork: hasUnsavedWork(),
         screen: st.activeScreen,
-        homeScreen: 'dashboard',
+        homeScreen: st.home,
         previousScreen: history.length > 1 ? history[history.length - 2] : null,
         exitArmedAt: exitArmedAtRef.current,
         now: Date.now(),
@@ -240,7 +244,7 @@ export default function App() {
           setActiveScreen(history[history.length - 1]);
           return;
         case 'home':
-          setActiveScreen('dashboard');
+          setActiveScreen(st.home);
           return;
         case 'arm-exit':
           exitArmedAtRef.current = Date.now();
@@ -292,8 +296,12 @@ export default function App() {
       }
       return;
     }
+    if (settings?.currency === next) {
+      setPreferredCurrency(next);
+      return;
+    }
+    const previous = settings?.currency;
     setPreferredCurrency(next);
-    if (settings?.currency === next) return;
     const base: AppSettings = settings ?? {
       userName: '',
       businessName: '',
@@ -306,7 +314,13 @@ export default function App() {
       darkMode: false,
       currency: next,
     };
-    void saveSettings({ ...base, currency: next as Currency });
+    saveSettings({ ...base, currency: next as Currency }).then(
+      () => toast.success(isRtl ? `عملة النظام الآن ${next}` : `System currency is now ${next}`, { id: 'system-currency' }),
+      () => {
+        if (previous) setPreferredCurrency(previous);
+        toast.error(isRtl ? 'تعذّر حفظ عملة النظام؛ بقيت كما كانت. تحقق من الاتصال وحاول مرة أخرى.' : 'Could not save the system currency; it was not changed. Check your connection and try again.', { id: 'system-currency' });
+      },
+    );
   };
 
   // Sync dark mode class
@@ -329,7 +343,7 @@ export default function App() {
   const handleToggleDarkMode = () => {
     sounds.playClick();
     setIsClassDarkMode(!isClassDarkMode);
-    toast.success(!isClassDarkMode ? (isRtl ? 'تم تفعيل الوضع الليلي' : 'Dark mode activated') : (isRtl ? 'تم تفعيل الوضع المضيء' : 'Light mode activated'));
+    toast.success(!isClassDarkMode ? (isRtl ? 'تم تفعيل الوضع الداكن' : 'Dark mode activated') : (isRtl ? 'تم تفعيل الوضع الفاتح' : 'Light mode activated'));
   };
 
   // Sync language with default settings on mount
@@ -393,8 +407,7 @@ export default function App() {
         target.closest('#sidebar-btn') || 
         target.closest('#sidebarToggle') || 
         target.closest('.sidebar-toggle-btn') || 
-        target.closest('[title="Open Sidebar"]') || 
-        target.closest('[title="فتح القائمة الجانبية"]')
+        target.closest('[data-sidebar-toggle]')
       ) {
         return;
       }
@@ -412,7 +425,10 @@ export default function App() {
     const nextLang = language === 'en' ? 'ar' : 'en';
     setLanguage(nextLang);
     if (settings) {
-      saveSettings({ ...settings, defaultLanguage: nextLang });
+      saveSettings({ ...settings, defaultLanguage: nextLang }).catch(() => {
+        setLanguage(language);
+        toast.error(nextLang === 'ar' ? 'تعذّر حفظ اللغة. حاول مرة أخرى.' : 'Could not save the language. Try again.');
+      });
     }
   };
 
@@ -506,10 +522,8 @@ const signUpWithEmail = async (emailVal: string, passwordVal: string) => {
     if (actionId === 'pos') {
       setActiveScreen('pos');
     } else if (actionId === 'add-product') {
+      requestInventoryIntent({ type: 'add' });
       setActiveScreen('inventory');
-      setTimeout(() => {
-        window.dispatchEvent(new CustomEvent('open-add-product'));
-      }, 150);
     } else if (actionId === 'debts') {
       setActiveScreen('customers');
     } else if (actionId === 'reports') {
@@ -526,16 +540,15 @@ const signUpWithEmail = async (emailVal: string, passwordVal: string) => {
     } else if (action === 'new-purchase') {
       setActiveScreen('purchases-expenses');
     } else if (action === 'add-product') {
+      requestInventoryIntent({ type: 'add' });
       setActiveScreen('inventory');
-      setTimeout(() => window.dispatchEvent(new CustomEvent('open-add-product')), 150);
     } else if (action === 'employees') {
       setActiveScreen('employees');
     } else if (action === 'settings') {
       setActiveScreen('settings');
     } else if (action === 'view-product' && payload) {
+      requestInventoryIntent({ type: 'view', product: payload });
       setActiveScreen('inventory');
-      // If Inventory listens for a view-product event, dispatch it
-      setTimeout(() => window.dispatchEvent(new CustomEvent('view-product', { detail: payload })), 180);
     }
   };
 
@@ -571,7 +584,7 @@ const signUpWithEmail = async (emailVal: string, passwordVal: string) => {
           <div className="absolute inset-0 rounded-2xl border-4 border-t-indigo-500 animate-spin" />
         </div>
         <p className="text-sm font-bold text-slate-300 tracking-wide animate-pulse">
-          {isRtl ? 'جاري تحميل مستودعي الفائق...' : 'Loading secure database contents...'}
+          {isRtl ? 'جارٍ تحميل مستودعي...' : 'Loading Mostawdaee...'}
         </p>
       </div>
     );
@@ -752,7 +765,15 @@ const signUpWithEmail = async (emailVal: string, passwordVal: string) => {
         return (
           <ProfitsDashboard 
             language={language}
-            currency={settings?.currency || 'JOD'}
+            currency={(POS_CURRENCY_CODES as readonly string[]).includes(preferredCurrency) ? preferredCurrency : settings?.currency || 'JOD'}
+            onClose={() => setActiveScreen('dashboard')}
+          />
+        );
+      case 'accounting':
+        return (
+          <AccountingDashboard
+            language={language}
+            currency={(POS_CURRENCY_CODES as readonly string[]).includes(preferredCurrency) ? preferredCurrency : settings?.currency || 'JOD'}
             onClose={() => setActiveScreen('dashboard')}
           />
         );
@@ -832,7 +853,7 @@ const signUpWithEmail = async (emailVal: string, passwordVal: string) => {
                   <div className="min-h-[40vh] flex items-center justify-center">
                     <div className="inline-flex items-center gap-3 rounded-3xl bg-white/90 dark:bg-slate-900/90 border border-slate-200/80 dark:border-white/10 px-5 py-4 shadow-lg">
                       <div className="w-10 h-10 rounded-full border-4 border-indigo-500 animate-spin" />
-                      <span className="text-sm font-semibold text-slate-700 dark:text-slate-200">{isRtl ? 'جاري تحميل الصفحة...' : 'Loading screen...'}</span>
+                      <span className="text-sm font-semibold text-slate-700 dark:text-slate-200">{isRtl ? 'جارٍ تحميل الصفحة...' : 'Loading screen...'}</span>
                     </div>
                   </div>
                 }
@@ -853,7 +874,7 @@ const signUpWithEmail = async (emailVal: string, passwordVal: string) => {
               </Suspense>
             </div>
 
-            {activeScreen === 'ai-assistant' && (
+            {activeScreen === 'ai-assistant' && canOpenScreen('ai-assistant') && (
               <div className="relative block">
                 <ErrorBoundary variant="screen" isRtl={isRtl} resetKey="ai-assistant">
                 <Suspense fallback={null}>
@@ -950,7 +971,7 @@ const signUpWithEmail = async (emailVal: string, passwordVal: string) => {
                   setIsQuickActionModalOpen(true);
                 }}
                 className="w-14 h-14 bg-gradient-to-tr from-indigo-600 to-indigo-800 hover:from-indigo-700 hover:to-indigo-900 active:scale-90 text-white rounded-full flex items-center justify-center shadow-xl shadow-indigo-600/35 border-4 border-white dark:border-slate-900 -translate-y-5 transition-all cursor-pointer group"
-                title={isRtl ? 'الإجراءات السريعة الفائقة' : 'Quick Actions'}
+                title={isRtl ? 'الإجراءات السريعة' : 'Quick Actions'}
               >
                 <Plus size={26} className="text-white group-hover:rotate-90 transition-transform duration-300 stroke-[2.5]" />
               </button>
@@ -1005,6 +1026,7 @@ const signUpWithEmail = async (emailVal: string, passwordVal: string) => {
           onClose={() => setIsQuickActionModalOpen(false)}
           language={language}
           onActionClick={handleQuickActionClick}
+          canOpenScreen={canOpenScreen}
         />
 
         {/* Global Command Palette */}
@@ -1014,6 +1036,7 @@ const signUpWithEmail = async (emailVal: string, passwordVal: string) => {
           language={language}
           products={products}
           onAction={handleCommandAction}
+          canOpenScreen={canOpenScreen}
         />
       </div>
     </AuthContext.Provider>

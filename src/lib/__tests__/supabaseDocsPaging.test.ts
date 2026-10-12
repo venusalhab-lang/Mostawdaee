@@ -23,6 +23,7 @@ vi.mock('../../supabaseClient', () => {
     supabase: {
       auth: { getSession: async () => ({ data: { session: { user: { id: 'u1' } } } }) },
       from: () => query,
+      rpc: async () => ({ data: null, error: { code: 'PGRST202', message: 'Could not find the function public.team_context' } }),
       channel: () => ({ on: function () { return this; }, subscribe() { return this; }, unsubscribe() {} }),
     },
   };

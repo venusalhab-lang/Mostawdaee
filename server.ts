@@ -33,6 +33,18 @@ import {
   privacyPolicy,
   renderPolicyHtml,
 } from "./src/lib/privacyPolicy";
+import {
+  JOFOTARA_ENDPOINT,
+  type JoFotaraSeller,
+  buildJoFotaraXml,
+  isJoFotaraIncomeSource,
+  isJoFotaraTin,
+  joFotaraFromInvoice,
+  joFotaraRequestBody,
+  readJoFotaraResponse,
+} from "./src/lib/jofotara";
+import { openSecret, parseSecretKey, sealSecret } from "./src/lib/secretBox";
+import type { Invoice } from "./src/types";
 
 dotenv.config();
 
@@ -176,7 +188,7 @@ type ServiceClient = NonNullable<ReturnType<typeof getSupabaseServiceClient>>;
 async function syncPlayEntitlement(service: ServiceClient, userId: string) {
   const { data: rows, error } = await service
     .from("play_purchases")
-    .select("purchase_token")
+    .select("purchase_token, expiry_time")
     .eq("user_id", userId);
   if (error) throw new Error(`play_purchases table is not available: ${error.message}`);
   if (!rows?.length) return null;
@@ -186,13 +198,13 @@ async function syncPlayEntitlement(service: ServiceClient, userId: string) {
     const result = await fetchPlaySubscription(row.purchase_token);
     if (result.ok === false) {
       if (result.status === 400) {
-        tokens.push({ state: "SUBSCRIPTION_STATE_EXPIRED", expiry: null });
+        tokens.push({ state: "SUBSCRIPTION_STATE_EXPIRED", expiry: null, previousExpiry: row.expiry_time });
         continue;
       }
       // Google is unreachable: change nothing rather than revoke or grant on partial data.
       throw Object.assign(new Error(result.message), { status: result.status });
     }
-    tokens.push({ state: result.state, expiry: result.expiry });
+    tokens.push({ state: result.state, expiry: result.expiry, previousExpiry: row.expiry_time });
     await service.from("play_purchases").update({
       state: result.state,
       expiry_time: result.expiry,
@@ -278,6 +290,20 @@ async function listAuthUsers(service: ReturnType<typeof getSupabaseServiceClient
 
 async function startServer() {
   const app = express();
+  // Express 4 ignores a rejected async handler: the request would hang until the client gives up.
+  for (const method of ["get", "post"] as const) {
+    const register = app[method].bind(app) as (...args: any[]) => any;
+    (app as any)[method] = (...args: any[]) => register(...args.map((handler) => (typeof handler !== "function" ? handler
+      : (req: any, res: any, next: any) => {
+          try {
+            const result = handler(req, res, next);
+            if (result && typeof result.catch === "function") result.catch(next);
+            return result;
+          } catch (error) {
+            next(error);
+          }
+        })));
+  }
   const PORT = process.env.PORT || 3000;
   if (isProduction) app.set("trust proxy", 1); // real client IP behind a reverse proxy
 
@@ -503,15 +529,19 @@ async function startServer() {
   // Google Play Real-time Developer Notifications (Pub/Sub push with an OIDC token).
   app.post("/api/play/rtdn", async (req, res) => {
     const audience = process.env.PLAY_RTDN_AUDIENCE;
-    if (!audience) return res.status(503).json({ message: "PLAY_RTDN_AUDIENCE is not configured" });
+    // Any Google service account can mint a token for any audience, so the sender must be pinned too.
+    const expectedSender = process.env.PLAY_RTDN_SERVICE_ACCOUNT;
+    if (!audience || !expectedSender) {
+      return res.status(503).json({ message: "PLAY_RTDN_AUDIENCE and PLAY_RTDN_SERVICE_ACCOUNT must be configured" });
+    }
+    if (!rateLimit(`rtdn:${req.ip}`, 120, 60_000)) return res.sendStatus(429);
     try {
       const header = req.headers.authorization || "";
       const idToken = header.startsWith("Bearer ") ? header.slice(7) : "";
       if (!idToken) return res.sendStatus(401);
       const ticket = await new OAuth2Client().verifyIdToken({ idToken, audience });
       const claims = ticket.getPayload();
-      const expectedSender = process.env.PLAY_RTDN_SERVICE_ACCOUNT;
-      if (!claims?.email_verified || (expectedSender && claims.email !== expectedSender)) {
+      if (!claims?.email_verified || claims.email !== expectedSender) {
         return res.sendStatus(403);
       }
     } catch {
@@ -1014,24 +1044,44 @@ async function startServer() {
    * to send. Fails closed.
    */
   async function checkAssistantAccess(user: any): Promise<{ refusal: AssistantRefusal } | { ownerId: string }> {
-    if (isVerifiedAdmin(user)) return { ownerId: user.id };
+    return checkStoreAccess(user, ["owner", "manager"], true);
+  }
+
+  /**
+   * The caller's store and role (members act for their owner). With `requireActive`, the store's
+   * subscription must be live on the server clock. Fails closed.
+   */
+  async function checkStoreAccess(
+    user: any,
+    roles: Array<"owner" | "manager" | "cashier">,
+    requireActive: boolean,
+  ): Promise<{ refusal: AssistantRefusal } | { ownerId: string; role: "owner" | "manager" | "cashier" }> {
+    if (isVerifiedAdmin(user)) return { ownerId: user.id, role: "owner" };
     const service = getSupabaseServiceClient();
     if (!service) {
       return { refusal: { status: 503, code: "subscription_check_unavailable", message: "Subscription check is not configured on the server" } };
     }
     let ownerId = user.id;
+    let role: "owner" | "manager" | "cashier" = "owner";
     const membership = await service
       .from("workspace_members")
       .select("owner_id, role")
       .eq("member_id", user.id)
       .eq("status", "active")
       .maybeSingle();
+    // Without the teams table every account is its own store; any other failure must not bill a member as an owner.
+    const teamsMissing = membership.error?.code === "42P01" || membership.error?.code === "PGRST205";
+    if (membership.error && !teamsMissing) {
+      return { refusal: { status: 503, code: "subscription_check_unavailable", message: "Could not read the store membership" } };
+    }
     if (!membership.error && membership.data) {
-      if (membership.data.role !== "manager") {
-        return { refusal: { status: 403, code: "role_not_allowed", message: "Your role in this store cannot use the assistant" } };
-      }
+      role = membership.data.role === "manager" ? "manager" : "cashier";
       ownerId = membership.data.owner_id;
     }
+    if (!roles.includes(role)) {
+      return { refusal: { status: 403, code: "role_not_allowed", message: "Your role in this store cannot do this" } };
+    }
+    if (!requireActive) return { ownerId, role };
     const { data, error } = await service
       .from("user_subscriptions")
       .select("subscription_status, trial_start_date, expiry_date")
@@ -1048,7 +1098,7 @@ async function startServer() {
     if (access.kind === "expired") {
       return { refusal: { status: 402, code: "subscription_required", message: "An active subscription is required" } };
     }
-    return { ownerId };
+    return { ownerId, role };
   }
 
   /** Token counts as Gemini reports them, per store per day. A failure here never blocks the answer. */
@@ -1177,6 +1227,262 @@ async function startServer() {
       if (claimed) await releaseAssistantClaim(access.ownerId);
       return res.status(502).json({ code: "ai_failed", message: "The AI service did not respond" });
     }
+  });
+
+  // ---------------------------------------------------------------------------
+  // National e-invoicing (Jordan JoFotara). Credentials stay on the server, sealed with
+  // EINVOICE_ENCRYPTION_KEY; the server builds the file from the stored invoice, never from the client.
+  // ---------------------------------------------------------------------------
+  const einvoiceKey = () => parseSecretKey(process.env.EINVOICE_ENCRYPTION_KEY);
+  const tableMissing = (error: any) => error?.code === "42P01" || error?.code === "PGRST205";
+  const refuse = (res: any, refusal: AssistantRefusal) =>
+    res.status(refusal.status).json({ code: refusal.code, message: refusal.message });
+
+  app.get("/api/einvoice/jofotara", async (req, res) => {
+    const authUser = await getRequestUser(req);
+    if (!authUser) return res.status(401).json({ code: "sign_in_required", message: "Sign in first" });
+    const access = await checkStoreAccess(authUser, ["owner", "manager", "cashier"], false);
+    if ("refusal" in access) return refuse(res, access.refusal);
+    const service = getSupabaseServiceClient();
+    if (!service || !einvoiceKey()) return res.json({ available: false, configured: false, role: access.role });
+    const { data, error } = await service
+      .from("einvoice_settings")
+      .select("tin, seller_name, income_source, family, zero_rate_category, client_id, updated_at")
+      .eq("owner_id", access.ownerId)
+      .maybeSingle();
+    if (error) {
+      if (tableMissing(error)) return res.json({ available: false, configured: false, role: access.role });
+      return res.status(503).json({ code: "einvoice_unavailable", message: "Could not read the e-invoicing settings" });
+    }
+    const settings = data && access.role !== "cashier"
+      ? {
+          tin: data.tin,
+          sellerName: data.seller_name,
+          incomeSource: data.income_source,
+          family: data.family,
+          zeroRateCategory: data.zero_rate_category,
+          clientIdHint: `••••${String(data.client_id).slice(-4)}`,
+          updatedAt: data.updated_at,
+        }
+      : undefined;
+    return res.json({ available: true, configured: !!data, role: access.role, settings });
+  });
+
+  app.post("/api/einvoice/jofotara/settings", async (req, res) => {
+    const authUser = await getRequestUser(req);
+    if (!authUser) return res.status(401).json({ code: "sign_in_required", message: "Sign in first" });
+    if (!rateLimit(`einv-settings:${authUser.id}`, 10, 60_000)) {
+      return res.status(429).json({ code: "rate_limited", message: "Too many requests, please wait a minute" });
+    }
+    const access = await checkStoreAccess(authUser, ["owner"], true);
+    if ("refusal" in access) return refuse(res, access.refusal);
+    const service = getSupabaseServiceClient();
+    const key = einvoiceKey();
+    if (!service || !key) return res.status(503).json({ code: "einvoice_unavailable", message: "E-invoicing is not configured on this server" });
+
+    const text = (value: unknown, max: number) => (typeof value === "string" ? value.trim().slice(0, max) : "");
+    const body = req.body || {};
+    const input = {
+      tin: text(body.tin, 20),
+      sellerName: text(body.sellerName, 200),
+      incomeSource: text(body.incomeSource, 25),
+      family: body.family === "general_sales" ? "general_sales" : body.family === "income" ? "income" : "",
+      zeroRateCategory: body.zeroRateCategory === "Z" || body.zeroRateCategory === "O" ? body.zeroRateCategory : null,
+      clientId: text(body.clientId, 200),
+      secretKey: text(body.secretKey, 500),
+    };
+    const { data: existing, error: readError } = await service
+      .from("einvoice_settings")
+      .select("client_id, secret_sealed")
+      .eq("owner_id", access.ownerId)
+      .maybeSingle();
+    if (readError) return res.status(503).json({ code: "einvoice_unavailable", message: "Could not read the e-invoicing settings" });
+
+    // Empty Client-Id / Secret-Key keep what is stored.
+    const fields: string[] = [];
+    if (!isJoFotaraTin(input.tin)) fields.push("tin");
+    if (!input.sellerName) fields.push("sellerName");
+    if (!isJoFotaraIncomeSource(input.incomeSource)) fields.push("incomeSource");
+    if (!input.family) fields.push("family");
+    if (!input.clientId && !existing) fields.push("clientId");
+    if (!input.secretKey && !existing) fields.push("secretKey");
+    if (fields.length) return res.status(400).json({ code: "invalid_settings", message: "Some fields are invalid", fields });
+
+    const { error } = await service.from("einvoice_settings").upsert({
+      owner_id: access.ownerId,
+      provider: "jofotara",
+      tin: input.tin,
+      seller_name: input.sellerName,
+      income_source: input.incomeSource,
+      family: input.family,
+      zero_rate_category: input.zeroRateCategory,
+      client_id: input.clientId || existing!.client_id,
+      secret_sealed: input.secretKey ? sealSecret(input.secretKey, key) : existing!.secret_sealed,
+      updated_by: authUser.id,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: "owner_id" });
+    if (error) {
+      console.error("[e-invoice settings]", error.message);
+      return res.status(503).json({ code: "einvoice_unavailable", message: "Could not save the e-invoicing settings" });
+    }
+    return res.json({ ok: true });
+  });
+
+  app.post("/api/einvoice/jofotara/disconnect", async (req, res) => {
+    const authUser = await getRequestUser(req);
+    if (!authUser) return res.status(401).json({ code: "sign_in_required", message: "Sign in first" });
+    const access = await checkStoreAccess(authUser, ["owner"], false);
+    if ("refusal" in access) return refuse(res, access.refusal);
+    const service = getSupabaseServiceClient();
+    if (!service) return res.status(503).json({ code: "einvoice_unavailable", message: "E-invoicing is not configured on this server" });
+    const { error } = await service.from("einvoice_settings").delete().eq("owner_id", access.ownerId);
+    if (error) return res.status(503).json({ code: "einvoice_unavailable", message: "Could not remove the e-invoicing settings" });
+    return res.json({ ok: true });
+  });
+
+  app.post("/api/einvoice/jofotara/submit", async (req, res) => {
+    const authUser = await getRequestUser(req);
+    if (!authUser) return res.status(401).json({ code: "sign_in_required", message: "Sign in first" });
+    if (!rateLimit(`einv-submit:${authUser.id}`, 30, 60_000)) {
+      return res.status(429).json({ code: "rate_limited", message: "Too many requests, please wait a minute" });
+    }
+    const access = await checkStoreAccess(authUser, ["owner", "manager"], true);
+    if ("refusal" in access) return refuse(res, access.refusal);
+    const service = getSupabaseServiceClient();
+    const key = einvoiceKey();
+    if (!service || !key) return res.status(503).json({ code: "einvoice_unavailable", message: "E-invoicing is not configured on this server" });
+    const invoiceId = typeof req.body?.invoiceId === "string" ? req.body.invoiceId.trim().slice(0, 200) : "";
+    if (!invoiceId) return res.status(400).json({ code: "invoice_required", message: "invoiceId is required" });
+
+    const { data: config, error: configError } = await service
+      .from("einvoice_settings")
+      .select("tin, seller_name, income_source, family, zero_rate_category, client_id, secret_sealed")
+      .eq("owner_id", access.ownerId)
+      .maybeSingle();
+    if (configError && !tableMissing(configError)) {
+      return res.status(503).json({ code: "einvoice_unavailable", message: "Could not read the e-invoicing settings" });
+    }
+    if (!config) return res.status(409).json({ code: "not_configured", message: "Link the store to JoFotara in Settings first" });
+    const secret = openSecret(config.secret_sealed, key);
+    if (!secret) return res.status(503).json({ code: "secret_unreadable", message: "The stored Secret-Key cannot be read; enter it again in Settings" });
+
+    const { data: stored, error: invoiceError } = await service
+      .from("merchant_documents")
+      .select("data")
+      .eq("user_id", access.ownerId)
+      .eq("collection", "invoices")
+      .eq("doc_id", invoiceId)
+      .maybeSingle();
+    if (invoiceError) return res.status(503).json({ code: "einvoice_unavailable", message: "Could not read the invoice" });
+    if (!stored?.data) return res.status(404).json({ code: "invoice_not_found", message: "Invoice not found (sync it first)" });
+    const invoice = stored.data as Invoice;
+
+    let phone: string | undefined;
+    if (invoice.customerId) {
+      const { data: customer } = await service
+        .from("merchant_documents")
+        .select("data")
+        .eq("user_id", access.ownerId)
+        .eq("collection", "customers")
+        .eq("doc_id", String(invoice.customerId))
+        .maybeSingle();
+      phone = typeof customer?.data?.phone === "string" ? customer.data.phone : undefined;
+    }
+    const seller: JoFotaraSeller = {
+      tin: config.tin,
+      name: config.seller_name,
+      incomeSource: config.income_source,
+      family: config.family,
+      zeroRateCategory: config.zero_rate_category,
+    };
+    // Check the invoice before a counter number is reserved for it.
+    const precheck = joFotaraFromInvoice(invoice, { seller, uuid: "00000000-0000-4000-8000-000000000000", icv: 1, buyer: { phone } });
+    if (precheck.ok === false) {
+      return res.status(422).json({ code: "invoice_invalid", message: "The invoice cannot be sent as it is", issues: precheck.issues });
+    }
+
+    const claim = await service.rpc("einvoice_claim", {
+      p_owner: access.ownerId,
+      p_invoice: invoiceId,
+      p_number: invoice.invoiceNumber,
+      p_kind: "invoice",
+      p_actor: authUser.id,
+    });
+    if (claim.error) {
+      const text = claim.error.message || "";
+      if (text.includes("EINVOICE_ALREADY_ACCEPTED")) return res.status(409).json({ code: "already_accepted", message: "This invoice was already accepted" });
+      if (text.includes("EINVOICE_IN_PROGRESS")) return res.status(409).json({ code: "in_progress", message: "This invoice is being sent right now" });
+      console.error("[e-invoice claim]", text);
+      return res.status(503).json({ code: "einvoice_unavailable", message: "Could not reserve the invoice counter" });
+    }
+    const reserved = Array.isArray(claim.data) ? claim.data[0] : claim.data;
+    const uuid = String(reserved?.claim_uuid || "");
+    const icv = Number(reserved?.claim_icv);
+
+    const prepared = joFotaraFromInvoice(invoice, { seller, uuid, icv, buyer: { phone } });
+    const built = prepared.ok ? buildJoFotaraXml(prepared.doc) : null;
+    if (!built || built.ok === false) {
+      await service.rpc("einvoice_record", {
+        p_owner: access.ownerId, p_invoice: invoiceId, p_status: "failed", p_type_code: null, p_payable: null,
+        p_xml: null, p_response: null, p_qr: null, p_einv_num: null, p_error: "The file could not be built",
+      });
+      return res.status(500).json({ code: "build_failed", message: "The e-invoice file could not be built" });
+    }
+
+    let httpStatus = 0;
+    let body: any = null;
+    let networkError = "";
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 30_000);
+    try {
+      const response = await fetch(JOFOTARA_ENDPOINT, {
+        method: "POST",
+        headers: { "Client-Id": config.client_id, "Secret-Key": secret, "Content-Type": "application/json" },
+        body: joFotaraRequestBody(built.xml),
+        signal: controller.signal,
+      });
+      httpStatus = response.status;
+      const raw = await response.text();
+      try {
+        body = raw ? JSON.parse(raw) : null;
+      } catch {
+        body = { raw: raw.slice(0, 4000) };
+      }
+    } catch (error: any) {
+      networkError = error?.name === "AbortError" ? "No answer from JoFotara within 30 seconds" : "JoFotara could not be reached";
+    } finally {
+      clearTimeout(timer);
+    }
+
+    const result = readJoFotaraResponse(httpStatus, body);
+    const messages = networkError ? [networkError] : result.messages;
+    if (!networkError && result.outcome !== "accepted" && !messages.length) messages.push(`HTTP ${httpStatus}`);
+    const recorded = await service.rpc("einvoice_record", {
+      p_owner: access.ownerId,
+      p_invoice: invoiceId,
+      p_status: result.outcome,
+      p_type_code: built.typeCode,
+      p_payable: Number(built.totals.payable),
+      p_xml: built.xml,
+      p_response: body,
+      p_qr: result.qr,
+      p_einv_num: result.einvNum,
+      p_error: messages.join(" | "),
+    });
+    if (recorded.error) {
+      // The row stays 'sending'; a resend after two minutes reuses the same UUID, so nothing is declared twice.
+      console.error("[e-invoice record]", recorded.error.message);
+    }
+    return res.json({
+      outcome: result.outcome,
+      status: result.status,
+      qr: result.qr,
+      einvNum: result.einvNum,
+      messages,
+      icv,
+      uuid,
+      saved: !recorded.error,
+    });
   });
 
   // Vite middleware for development

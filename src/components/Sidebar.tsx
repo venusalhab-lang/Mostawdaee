@@ -22,7 +22,8 @@ import {
   TrendingUp,
   Calculator,
   ClipboardCheck,
-  Banknote
+  Banknote,
+  BookOpen,
 } from 'lucide-react';
 import Logo from './Logo';
 import CurrencySwitcher from './CurrencySwitcher';
@@ -124,10 +125,11 @@ export default function Sidebar({
     { id: 'invoices', icon: FileText, label: t.invoices },
     { id: 'customers', icon: Users, label: isRtl ? "العملاء والديون" : "Customers & Debt" },
     { id: 'cheques', icon: Banknote, label: isRtl ? "إدارة الشيكات" : "Cheques" },
-    { id: 'employees', icon: Briefcase, label: isRtl ? "الموظفين والرواتب" : "Employees & Payroll" },
+    { id: 'employees', icon: Briefcase, label: isRtl ? "الموظفون والرواتب" : "Employees & Payroll" },
     { id: 'vault', icon: Shield, label: t.vault },
     { id: 'purchases-expenses', icon: ShoppingBag, label: isRtl ? "المشتريات والمصاريف" : "Purchases & Expenses" },
-    { id: 'profits-dashboard', icon: TrendingUp, label: isRtl ? "سجل الأرباح" : "Profits Log" },
+    { id: 'profits-dashboard', icon: TrendingUp, label: isRtl ? "الأرباح" : "Profits" },
+    { id: 'accounting', icon: BookOpen, label: isRtl ? "المحاسبة" : "Accounting" },
     { id: 'landed-cost', icon: Calculator, label: isRtl ? "تكلفة الاستيراد" : "Landed Cost" },
     { id: 'google-drive', icon: Cloud, label: isRtl ? "النسخ الاحتياطي والأمان" : "Backup & Security" },
     { id: 'admin-dashboard', icon: Shield, label: isRtl ? "لوحة فريق مستودعي" : "Mostawdaee Console" },
@@ -389,7 +391,7 @@ export default function Sidebar({
                   setIsLocked(!isLocked);
                 }}
                 className="p-1.5 rounded-lg text-slate-400 hover:text-cyan-500 dark:hover:text-cyan-400 hover:bg-cyan-50/50 dark:hover:bg-cyan-950/20 cursor-pointer transition-all duration-150 active:scale-90"
-                title={isLocked ? "إلغاء تثبيت القائمة" : "تثبيت القائمة الجانبية الحالية"} aria-label={isLocked ? "إلغاء تثبيت القائمة" : "تثبيت القائمة الجانبية الحالية"}
+                title={isLocked ? (isRtl ? "إلغاء تثبيت القائمة" : "Unpin sidebar") : (isRtl ? "تثبيت القائمة الجانبية" : "Pin sidebar")} aria-label={isLocked ? (isRtl ? "إلغاء تثبيت القائمة" : "Unpin sidebar") : (isRtl ? "تثبيت القائمة الجانبية" : "Pin sidebar")}
               >
                 {isLocked ? <Lock size={13} className="animate-pulse text-cyan-500" /> : <Unlock size={13} />}
               </button>

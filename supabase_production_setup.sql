@@ -347,6 +347,8 @@ ALTER TABLE public.merchant_documents ADD CONSTRAINT merchant_documents_collecti
 
 ALTER TABLE public.merchant_documents ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.merchant_documents REPLICA IDENTITY FULL;
+-- Catch-up sync asks only for rows changed since the last pull; keep that a range scan, not a full collection read.
+CREATE INDEX IF NOT EXISTS merchant_documents_updated_idx ON public.merchant_documents (user_id, collection, updated_at);
 REVOKE ALL ON public.merchant_documents FROM anon, authenticated;
 -- Reading stays open to the store (an expired merchant can still see and export the books).
 -- Salaries are owner-only; the vault history and the activity log are hidden from cashiers.
@@ -359,6 +361,13 @@ CREATE POLICY merchant_documents_select ON public.merchant_documents
         user_id = (SELECT public.workspace_owner())
         AND ((SELECT public.workspace_role()) = 'owner' OR collection NOT IN ('employees', 'payroll'))
         AND ((SELECT public.workspace_role()) <> 'cashier' OR collection NOT IN ('vault_records', 'audit_logs'))
+        -- A paid salary also leaves a vault movement and an activity entry naming the employee and the amount.
+        AND ((SELECT public.workspace_role()) = 'owner' OR NOT (
+            (collection = 'vault_records' AND (
+                COALESCE(data->>'source', '') = 'payroll'
+                OR (COALESCE(data->>'source', '') = 'reversal' AND COALESCE(data->>'category', '') = 'salary')))
+            OR (collection = 'audit_logs' AND COALESCE(data->>'category', '') IN ('payroll', 'employee'))
+        ))
     );
 DROP POLICY IF EXISTS merchant_documents_insert ON public.merchant_documents;
 DROP POLICY IF EXISTS merchant_documents_update ON public.merchant_documents;
@@ -490,6 +499,15 @@ DECLARE
     bal_key TEXT;
     audit_id TEXT;
     actor_email TEXT;
+    -- A cashier may lower stock or raise a debt only as far as the sale invoices in the same batch account for.
+    cut_qty JSONB := '{}'::jsonb;
+    sold_qty JSONB := '{}'::jsonb;
+    debt_up JSONB := '{}'::jsonb;
+    sold_debt JSONB := '{}'::jsonb;
+    line JSONB;
+    ref_id TEXT;
+    delta NUMERIC;
+    pack NUMERIC;
 BEGIN
     IF actor IS NULL THEN
         RAISE EXCEPTION 'not authenticated';
@@ -567,9 +585,61 @@ BEGIN
                 payload := COALESCE(existing, '{}'::jsonb) || payload;
             END IF;
             PERFORM public.assert_role_can_write(member_role, op, col, did, existing, payload);
-            -- Who created a record is set here, never trusted from the device.
-            IF existing IS NULL AND col IN ('invoices', 'vault_records', 'customer_transactions', 'stock_movements', 'audit_logs') THEN
-                payload := payload || jsonb_build_object('actorId', actor::text);
+            IF member_role = 'cashier' THEN
+                IF col = 'inventory' THEN
+                    delta := public.jsonb_num(existing, 'quantity') - public.jsonb_num(payload, 'quantity');
+                    IF delta > 0 THEN
+                        cut_qty := cut_qty || jsonb_build_object(did, public.jsonb_num(cut_qty, did) + delta);
+                    END IF;
+                ELSIF col = 'customers' THEN
+                    delta := public.jsonb_num(payload, 'totalDebt') - public.jsonb_num(existing, 'totalDebt');
+                    IF delta > 0 THEN
+                        debt_up := debt_up || jsonb_build_object(did, public.jsonb_num(debt_up, did) + delta);
+                    END IF;
+                ELSIF col = 'invoices' AND existing IS NULL AND payload->>'type' = 'sale' THEN
+                    IF jsonb_typeof(payload->'items') = 'array' THEN
+                        FOR line IN SELECT * FROM jsonb_array_elements(payload->'items')
+                        LOOP
+                            ref_id := line->>'productId';
+                            IF COALESCE(ref_id, '') <> '' THEN
+                                -- A line sold by the pack moves quantity x packSize units; the pack size must be
+                                -- the one stored on the product, so a device cannot inflate it.
+                                pack := 1;
+                                IF line ? 'packSize' AND jsonb_typeof(line->'packSize') <> 'null' THEN
+                                    pack := public.jsonb_num(line, 'packSize');
+                                    IF pack <> 1 AND pack IS DISTINCT FROM (
+                                        SELECT public.jsonb_num(d.data, 'packSize')
+                                          FROM public.merchant_documents d
+                                         WHERE d.user_id = uid AND d.collection = 'inventory' AND d.doc_id = ref_id
+                                    ) THEN
+                                        RAISE EXCEPTION 'role not allowed';
+                                    END IF;
+                                END IF;
+                                sold_qty := sold_qty || jsonb_build_object(ref_id,
+                                    public.jsonb_num(sold_qty, ref_id) + GREATEST(public.jsonb_num(line, 'quantity'), 0) * pack);
+                            END IF;
+                        END LOOP;
+                    END IF;
+                    ref_id := payload->>'customerId';
+                    IF payload->>'paymentMethod' = 'credit' AND COALESCE(ref_id, '') <> '' THEN
+                        delta := CASE WHEN jsonb_typeof(payload->'debtAmount') = 'number'
+                                      THEN public.jsonb_num(payload, 'debtAmount')
+                                      ELSE public.jsonb_num(payload, 'totalAmount') END;
+                        sold_debt := sold_debt || jsonb_build_object(ref_id, public.jsonb_num(sold_debt, ref_id) + GREATEST(delta, 0));
+                    END IF;
+                END IF;
+            END IF;
+            -- Who created a record is set here, never trusted from the device, and an edit keeps it.
+            IF col IN ('invoices', 'vault_records', 'customer_transactions', 'stock_movements', 'audit_logs') THEN
+                IF existing IS NULL THEN
+                    IF actor_email IS NULL THEN
+                        SELECT lower(u.email) INTO actor_email FROM auth.users u WHERE u.id = actor;
+                    END IF;
+                    payload := payload || jsonb_build_object('actorId', actor::text, 'actorEmail', COALESCE(actor_email, ''));
+                ELSE
+                    payload := (payload - 'actorId' - 'actorEmail')
+                        || jsonb_strip_nulls(jsonb_build_object('actorId', existing->'actorId', 'actorEmail', existing->'actorEmail'));
+                END IF;
             END IF;
             INSERT INTO public.merchant_documents (user_id, collection, doc_id, data, updated_at)
             VALUES (uid, col, did, payload, stamp)
@@ -600,6 +670,21 @@ BEGIN
             END IF;
         END IF;
     END LOOP;
+
+    IF member_role = 'cashier' THEN
+        FOR ref_id IN SELECT key FROM jsonb_object_keys(cut_qty) AS key
+        LOOP
+            IF public.jsonb_num(cut_qty, ref_id) > public.jsonb_num(sold_qty, ref_id) + 0.0005 THEN
+                RAISE EXCEPTION 'role not allowed';
+            END IF;
+        END LOOP;
+        FOR ref_id IN SELECT key FROM jsonb_object_keys(debt_up) AS key
+        LOOP
+            IF public.jsonb_num(debt_up, ref_id) > public.jsonb_num(sold_debt, ref_id) + 0.01 THEN
+                RAISE EXCEPTION 'role not allowed';
+            END IF;
+        END LOOP;
+    END IF;
 
     IF sensitive THEN
         SELECT lower(u.email) INTO actor_email FROM auth.users u WHERE u.id = actor;

@@ -1,5 +1,6 @@
 import type { Invoice, InvoiceItem, Product } from '../types';
 import { convertAmount } from './exchangeRates';
+import { lineUnits } from './packs';
 
 export interface InvoiceProfit {
   /** Sale value after discount and before VAT, in the invoice currency. */
@@ -18,7 +19,7 @@ const num = (v: unknown) => {
 };
 
 /**
- * Unit cost of a sold line in the invoice currency: the snapshot taken at sale time wins;
+ * Cost of one stock unit of a sold line in the invoice currency (pack lines multiply by lineUnits): the snapshot taken at sale time wins;
  * older invoices fall back to the product's current cost. Null when no cost is recorded.
  */
 export function lineUnitCost(
@@ -58,9 +59,42 @@ export function saleInvoiceProfit(
       unknownCostLines += 1;
       continue;
     }
-    cost += unit * num(item.quantity);
+    cost += unit * lineUnits(item);
   }
   return { revenue, cost, profit: revenue - cost, unknownCostLines };
+}
+
+export interface LineProfit {
+  item: InvoiceItem;
+  /** This line's share of the invoice's net revenue: the invoice discount is spread by line value, VAT is excluded. */
+  revenue: number;
+  /** Null when no cost is recorded for this line. */
+  cost: number | null;
+}
+
+/**
+ * Per-line split of saleInvoiceProfit. The line revenues add up to the invoice revenue exactly,
+ * so a per-product report agrees with the invoice totals.
+ */
+export function saleLineProfits(
+  inv: Invoice,
+  productsById: Map<string, Product>,
+  rates: Record<string, number>,
+  defaultCurrency: string
+): LineProfit[] {
+  const currency = inv.currency || defaultCurrency;
+  const items = inv.items || [];
+  const gross = items.map((item) => num(item.total ?? num(item.unitPrice) * num(item.quantity)));
+  const grossSum = gross.reduce((a, b) => a + b, 0);
+  const revenue = invoiceNetRevenue(inv);
+  return items.map((item, i) => {
+    const unit = lineUnitCost(item, currency, productsById.get(item.productId), rates, defaultCurrency);
+    return {
+      item,
+      revenue: grossSum > 0 ? (revenue * gross[i]) / grossSum : items.length ? revenue / items.length : 0,
+      cost: unit === null ? null : unit * lineUnits(item),
+    };
+  });
 }
 
 export interface ProfitTotals {
@@ -110,6 +144,8 @@ export function snapshotLineCosts(items: InvoiceItem[], productsById: Map<string
     const product = productsById.get(item.productId);
     if (!product) return item;
     const cost = num(product.unitCost ?? product.costPrice);
+    // No recorded cost stays unknown: a 0 snapshot would report the whole sale as profit and hide the warning.
+    if (cost <= 0) return item;
     return { ...item, unitCost: cost, costCurrency: product.currency || defaultCurrency };
   });
 }
@@ -117,7 +153,7 @@ export function snapshotLineCosts(items: InvoiceItem[], productsById: Map<string
 /**
  * Moving weighted-average unit cost after receiving stock.
  * Returns null when the purchase currency differs from the product's cost currency: mixing them would need a rate.
- * Stock at or below zero has no cost to average, so the purchase cost replaces it.
+ * Stock at or below zero, or stock with no recorded cost, has nothing to average, so the purchase cost replaces it.
  */
 export function weightedAverageCost(
   product: Pick<Product, 'quantity' | 'unitCost' | 'costPrice' | 'currency'>,
@@ -129,9 +165,10 @@ export function weightedAverageCost(
   if (!(receivedQty > 0) || !Number.isFinite(receivedTotal) || receivedTotal < 0) return null;
   if ((product.currency || defaultCurrency) !== purchaseCurrency) return null;
   const onHand = num(product.quantity);
+  const onHandCost = num(product.unitCost ?? product.costPrice);
   const purchaseUnit = receivedTotal / receivedQty;
-  const averaged = onHand > 0
-    ? (onHand * num(product.unitCost ?? product.costPrice) + receivedTotal) / (onHand + receivedQty)
+  const averaged = onHand > 0 && onHandCost > 0
+    ? (onHand * onHandCost + receivedTotal) / (onHand + receivedQty)
     : purchaseUnit;
   return Math.round(averaged * 10_000) / 10_000;
 }

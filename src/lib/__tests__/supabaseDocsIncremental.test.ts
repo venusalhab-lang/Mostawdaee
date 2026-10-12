@@ -27,7 +27,10 @@ vi.mock('../../supabaseClient', () => {
     supabase: {
       auth: { getSession: async () => ({ data: { session: { user: { id: 'u1' } } } }) },
       from: () => { query.filters = {}; return query; },
-      rpc: async (_name: string, args: { p_ops: Array<{ op: string; id: string; data: Record<string, unknown> }> }) => {
+      rpc: async (name: string, args: { p_ops: Array<{ op: string; id: string; data: Record<string, unknown> }> }) => {
+        if (name === 'team_context') {
+          return { data: null, error: { code: 'PGRST202', message: 'Could not find the function public.team_context' } };
+        }
         for (const op of args.p_ops) {
           if (op.op === 'delete') server.delete(op.id);
           else server.set(op.id, op.data);

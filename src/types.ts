@@ -65,6 +65,15 @@ export interface Product {
   baseCostPrice?: number;
   taxRate?: number;
   additionalCosts?: number;
+  /**
+   * Optional selling pack (box, carton). Stock, cost and selling price stay per single unit;
+   * a pack is `packSize` units sold at `packPrice`. Active only when packSize is a whole number >= 2.
+   */
+  unitName?: string;
+  packName?: string;
+  packSize?: number;
+  packPrice?: number;
+  packBarcode?: string;
 }
 
 /** Manual stock change (not caused by an invoice). Invoices already carry their own stock effect. */
@@ -79,6 +88,11 @@ export interface StockMovement {
   reason?: string;
   timestamp: number;
   userName?: string;
+  /** Product cost per unit when the stock changed, so the books value it at that cost. Missing on older movements. */
+  unitCost?: number;
+  costCurrency?: string;
+  /** Moved between warehouses: the store's stock value did not change. */
+  transfer?: boolean;
 }
 
 export interface ProductLog {
@@ -208,9 +222,15 @@ export interface InvoiceItem {
   total: number;
   /** Snapshot at issue time so reprints stay stable if the product SKU later changes. */
   sku?: string;
-  /** Product unit cost at sale time, in costCurrency. Profit uses this, not today's cost. */
+  /** Product cost per single unit at sale time, in costCurrency (also on pack lines). Profit uses this, not today's cost. */
   unitCost?: number;
   costCurrency?: string;
+  /**
+   * Set when the line is sold or bought by the pack: quantity and unitPrice are per pack,
+   * and the stock moves quantity × packSize units. Snapshot, so a later change of pack size keeps old invoices right.
+   */
+  packSize?: number;
+  packName?: string;
 }
 
 export interface Invoice {
@@ -238,6 +258,11 @@ export interface Invoice {
   debtCurrency?: Currency;
   /** Whether saving this invoice moved the cash vault. Missing on invoices saved before card/wallet were excluded. */
   vaultPosted?: boolean;
+  /** Purchases: each product's average unit cost before and after this receipt, so deleting it can put the cost back. */
+  costChanges?: Record<string, { before: number; after: number }>;
+  /** The account that created the invoice. Stamped by merchant_commit; a device cannot set or change it. */
+  actorId?: string;
+  actorEmail?: string;
 }
 
 export type VaultSource =

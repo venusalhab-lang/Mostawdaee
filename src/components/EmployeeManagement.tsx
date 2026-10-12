@@ -11,7 +11,8 @@ import {
   Search,
   CheckCircle2,
   AlertCircle,
-  Clock
+  Clock,
+  X
 } from 'lucide-react';
 import { Language, Employee, AppSettings, PayrollRecord, Currency } from '../types';
 import { translations } from '../translations';
@@ -19,16 +20,16 @@ import { motion, AnimatePresence } from 'motion/react';
 import { useFirebase } from './FirebaseProvider';
 import ContextMenu3D from './ContextMenu3D';
 import useLongPress from '../hooks/useLongPress';
-import { Eye, Printer, Phone } from 'lucide-react';
+import { Printer, Phone } from 'lucide-react';
 import { toast } from 'sonner';
 import { TactileButton } from './ui/TactileButton';
 import { useSuccessCelebration } from '../hooks/useSuccessCelebration';
 import { sounds } from '../lib/sounds';
 import { matchesQuery, phoneMatches } from '../lib/search';
 import { useScreenSearch } from '../lib/screenSearch';
-import { CURRENCY_SYMBOLS, buildUsdUnitRates, convertMoney, formatMoney, isPosCurrency, readCachedLiveRates } from '../lib/exchangeRates';
+import { conversionBasis, formatMoney, isPosCurrency, readCachedLiveRates, readCachedLiveRatesTimestamp } from '../lib/exchangeRates';
 import { usePreferredCurrency } from './CurrencyContext';
-import CurrencyPicker from './CurrencyPicker';
+import { CurrencySelect } from './CurrencyPicker';
 import { roundForCurrency } from '../lib/vaultMath';
 
 interface Props {
@@ -48,6 +49,19 @@ interface EmployeeCardProps {
   onPaySalary: (emp: Employee) => void;
   onLongPress: (emp: Employee) => void;
 }
+
+// Stored as 'on-leave'; the translation key is camelCase.
+const statusLabel = (t: any, status: string) => (status === 'on-leave' ? t.onLeave : t[status]) || status;
+
+// A sheet from the bottom on phones, a centred card on wider screens. Only the body scrolls,
+// so the title and the actions stay in view and above the bottom navigation bar.
+const SHEET_OVERLAY = 'fixed inset-0 z-[500] flex items-end sm:items-center justify-center sm:p-4';
+const SHEET_PANEL = 'relative w-full sm:max-w-lg max-h-[92dvh] sm:max-h-[90dvh] flex flex-col bg-white dark:bg-gray-800 rounded-t-[2rem] sm:rounded-[2rem] shadow-2xl border border-gray-100 dark:border-gray-700 overflow-hidden';
+const SHEET_HEADER = 'shrink-0 flex items-center gap-3 px-6 py-4 border-b border-gray-100 dark:border-gray-700';
+const SHEET_BODY = 'flex-1 min-h-0 overflow-y-auto overscroll-contain px-6 py-5 space-y-5';
+const SHEET_FOOTER = 'shrink-0 flex gap-3 px-6 pt-4 pb-[max(1rem,env(safe-area-inset-bottom))] border-t border-gray-100 dark:border-gray-700';
+const FIELD_LABEL = 'block text-sm font-bold text-gray-700 dark:text-gray-300';
+const FIELD_INPUT = 'w-full px-4 py-3 bg-gray-50 dark:bg-gray-900 border border-gray-100 dark:border-gray-700 rounded-2xl focus:ring-2 focus:ring-indigo-500 outline-none dark:text-white';
 
 function EmployeeCard({ emp, index, t, isRtl, settings, onEdit, onDelete, onPaySalary, onLongPress }: EmployeeCardProps) {
   const longPressProps = useLongPress(() => onLongPress(emp));
@@ -70,17 +84,19 @@ function EmployeeCard({ emp, index, t, isRtl, settings, onEdit, onDelete, onPayS
         }`}>
           <Briefcase size={24} />
         </div>
-        <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-          <button 
+        <div className="flex gap-2">
+          <button
+            type="button"
             onClick={(e) => { e.stopPropagation(); onEdit(emp); }}
-            className="p-2 bg-gray-50 dark:bg-gray-700 hover:bg-indigo-50 dark:hover:bg-indigo-900/50 text-gray-400 hover:text-indigo-600 rounded-lg transition-all"
-           aria-label={isRtl ? 'تعديل' : 'Edit'}>
+            className="p-2.5 bg-gray-50 dark:bg-gray-700 hover:bg-indigo-50 dark:hover:bg-indigo-900/50 text-gray-500 hover:text-indigo-600 rounded-xl transition-all"
+            aria-label={isRtl ? `تعديل ${emp.name}` : `Edit ${emp.name}`}>
             <Edit2 size={16} />
           </button>
-          <button 
+          <button
+            type="button"
             onClick={(e) => { e.stopPropagation(); onDelete(emp.id); }}
-            className="p-2 bg-gray-50 dark:bg-gray-700 hover:bg-rose-50 dark:hover:bg-rose-900/50 text-gray-400 hover:text-rose-600 rounded-lg transition-all"
-           aria-label={isRtl ? 'حذف' : 'Delete'}>
+            className="p-2.5 bg-gray-50 dark:bg-gray-700 hover:bg-rose-50 dark:hover:bg-rose-900/50 text-gray-500 hover:text-rose-600 rounded-xl transition-all"
+            aria-label={isRtl ? `حذف ${emp.name}` : `Delete ${emp.name}`}>
             <Trash2 size={16} />
           </button>
         </div>
@@ -94,31 +110,36 @@ function EmployeeCard({ emp, index, t, isRtl, settings, onEdit, onDelete, onPayS
 
         <div className="grid grid-cols-2 gap-4 pt-4 border-t border-gray-50 dark:border-gray-700">
           <div className="space-y-1">
-            <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest">{t.salary}</p>
+            <p className="text-xs font-bold text-gray-400">{t.salary}</p>
             <div className="text-gray-900 dark:text-gray-100 font-bold font-mono">
               {formatMoney(emp.salary, isPosCurrency(emp.currency) ? emp.currency : (isPosCurrency(settings.currency) ? settings.currency : 'JOD'), isRtl ? 'ar' : 'en-US')}
             </div>
           </div>
-          <div className="space-y-1 text-right">
-            <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest">{t.employeeStatus}</p>
-            <span className={`text-[10px] font-black px-2 py-0.5 rounded-full inline-block ${
+          <div className="space-y-1 text-end">
+            <p className="text-xs font-bold text-gray-400">{t.employeeStatus}</p>
+            <span className={`text-xs font-bold px-2.5 py-0.5 rounded-full inline-block ${
               emp.status === 'active' ? 'bg-emerald-100 text-emerald-700' :
               emp.status === 'on-leave' ? 'bg-amber-100 text-amber-700' :
               'bg-rose-100 text-rose-700'
             }`}>
-              {t[emp.status as keyof typeof t]}
+              {statusLabel(t, emp.status)}
             </span>
           </div>
         </div>
 
         <div className="flex items-center gap-3 text-sm text-gray-500 dark:text-gray-400 pt-2">
-          <Mail size={14} />
-          <span className="truncate">{emp.contact || 'No contact info'}</span>
+          {emp.contact?.includes('@') ? <Mail size={14} /> : <Phone size={14} />}
+          <span className="truncate" dir={emp.contact ? 'ltr' : undefined}>
+            {emp.contact || (isRtl ? 'لا توجد بيانات اتصال' : 'No contact info')}
+          </span>
         </div>
-        
-        <div className="flex items-center gap-3 text-[10px] font-bold text-gray-400 pt-1">
+
+        <div className="flex items-center gap-3 text-xs font-bold text-gray-400 pt-1">
           <Clock size={12} />
-          <span>Joined: {new Date(emp.hiredDate).toLocaleDateString()}</span>
+          <span>
+            {isRtl ? 'تاريخ التعيين: ' : 'Hired: '}
+            {new Date(emp.hiredDate).toLocaleDateString(isRtl ? 'ar' : 'en-US')}
+          </span>
         </div>
 
         <div className="pt-4">
@@ -127,7 +148,7 @@ function EmployeeCard({ emp, index, t, isRtl, settings, onEdit, onDelete, onPayS
             disabled={emp.status !== 'active'}
             variant={emp.status === 'active' ? 'secondary' : 'ghost'}
             fullWidth
-            className={`text-[10px] uppercase tracking-widest ${
+            className={`text-sm ${
               emp.status !== 'active' ? 'cursor-not-allowed opacity-50' : ''
             }`}
           >
@@ -252,13 +273,16 @@ export default function EmployeeManagement({ language, settings }: Props) {
     isPosCurrency(emp.currency) ? emp.currency : systemCurrency;
 
   // The stored salary is in the employee's currency. Paying in another currency converts that amount.
+  const salaryBasis = (emp: Employee, target: Currency) =>
+    conversionBasis(salaryCurrencyOf(emp), target, settings, readCachedLiveRates(), readCachedLiveRatesTimestamp());
+
   const baseSalaryIn = (emp: Employee, target: Currency): number => {
     const from = salaryCurrencyOf(emp);
     const salary = Number(emp.salary) || 0;
     if (from === target) return salary;
-    const converted = convertMoney(salary, from, target, buildUsdUnitRates(settings, readCachedLiveRates()));
-    return roundForCurrency(converted, target);
+    return roundForCurrency(salary * salaryBasis(emp, target).rate, target);
   };
+  const payRateMissing = !!selectedPayEmployee && !salaryBasis(selectedPayEmployee, payrollCurrency).ok;
 
   const payrollErrorMessage = (error: any): string => {
     const msg = String(error?.message || '');
@@ -271,10 +295,12 @@ export default function EmployeeManagement({ language, settings }: Props) {
 
   // Safe salary payment with single-submission lock to prevent double payments
   const handleConfirmPayment = async () => {
-    if (!selectedPayEmployee) return;
+    if (!selectedPayEmployee || payRateMissing) return;
     setIsPaying(true);
     try {
-      const netSalary = roundForCurrency(baseSalaryIn(selectedPayEmployee, payrollCurrency) + (Number(payrollAllowances) || 0) - (Number(payrollDeductions) || 0), payrollCurrency);
+      const allowances = roundForCurrency(Math.max(0, Number(payrollAllowances) || 0), payrollCurrency);
+      const deductions = roundForCurrency(Math.max(0, Number(payrollDeductions) || 0), payrollCurrency);
+      const netSalary = roundForCurrency(baseSalaryIn(selectedPayEmployee, payrollCurrency) + allowances - deductions, payrollCurrency);
 
       const monthYear = payrollMonthYear || `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
       // Records saved before ids were per month are matched by employee and month.
@@ -287,14 +313,18 @@ export default function EmployeeManagement({ language, settings }: Props) {
         employeeId: selectedPayEmployee.id,
         employeeName: selectedPayEmployee.name,
         monthYear,
-        allowances: Number(payrollAllowances) || 0,
-        deductions: Number(payrollDeductions) || 0,
+        allowances,
+        deductions,
         netSalary: netSalary,
         paymentDate: Date.now(),
         paymentStatus: payrollStatus,
         currency: payrollCurrency
       };
 
+      if (netSalary < 0) {
+        toast.error(isRtl ? 'الخصومات أكبر من الراتب والعلاوات' : 'Deductions exceed salary plus allowances');
+        return;
+      }
       if (payrollStatus === 'paid') {
         if (netSalary <= 0) {
           toast.error(isRtl ? 'صافي الراتب يجب أن يكون أكبر من صفر' : 'Net salary must be greater than zero');
@@ -337,7 +367,7 @@ export default function EmployeeManagement({ language, settings }: Props) {
     const isPaidRecord = target?.paymentStatus === 'paid';
     const confirmMsg = isPaidRecord
       ? (isRtl ? 'هذا الراتب مصروف من الخزنة. حذف السجل سيعيد المبلغ إلى الخزنة بقيد عكسي. هل تريد المتابعة؟' : 'This salary was paid from the vault. Deleting the record returns the amount to the vault with a reversal entry. Continue?')
-      : (isRtl ? 'هل أنت متأكد من حذف هذا السجل للمسير الرواتب؟' : 'Are you sure you want to delete this payroll record?');
+      : (isRtl ? 'هل تريد حذف سجل الراتب هذا؟' : 'Delete this payroll record?');
     if (window.confirm(confirmMsg)) {
       try {
         await deletePayrollRecord(id);
@@ -347,10 +377,36 @@ export default function EmployeeManagement({ language, settings }: Props) {
       }
     }
   };
+  const handleDeleteEmployee = async (id: string) => {
+    const target = employees.find((emp) => emp.id === id);
+    const name = target?.name || '';
+    const confirmMsg = isRtl
+      ? `حذف الموظف «${name}»؟ تبقى سجلات رواتبه السابقة في كشف الرواتب.`
+      : `Delete employee "${name}"? Their past payroll records stay in the ledger.`;
+    if (!window.confirm(confirmMsg)) return;
+    try {
+      await deleteEmployee(id);
+      toast.success(isRtl ? 'تم حذف الموظف' : 'Employee deleted');
+    } catch (error: any) {
+      if (!error?.notified) toast.error(t.error);
+    }
+  };
+
   const resetForm = () => {
     setFormData({ name: '', role: '', contact: '', salary: 0, currency: systemCurrency, status: 'active' });
     setEditingEmployee(null);
   };
+
+  const searchLabel = activeTab === 'employees'
+    ? (isRtl ? 'ابحث بالاسم أو الوظيفة أو الهاتف...' : 'Search by name, role or phone...')
+    : (isRtl ? 'ابحث باسم الموظف أو الفترة...' : 'Search by employee or period...');
+
+  const closeEmployeeForm = () => {
+    setIsModalOpen(false);
+    resetForm();
+  };
+
+  const salaryCurrencyLocked = !!editingEmployee && payrollRecords.some((record) => record.employeeId === editingEmployee.id);
 
   const handleEdit = (emp: Employee) => {
     setEditingEmployee(emp);
@@ -368,43 +424,49 @@ export default function EmployeeManagement({ language, settings }: Props) {
         language={language}
         details={[
           { label: t.salary, value: formatMoney(contextMenuTarget?.salary || 0, contextMenuTarget ? salaryCurrencyOf(contextMenuTarget) : systemCurrency) },
-          { label: t.employeeStatus, value: contextMenuTarget ? t[contextMenuTarget.status as keyof typeof t] : '' },
-          { label: t.contact, value: contextMenuTarget?.contact || 'N/A' },
-          { label: t.date, value: contextMenuTarget ? new Date(contextMenuTarget.hiredDate).toLocaleDateString() : '' }
+          { label: t.employeeStatus, value: contextMenuTarget ? statusLabel(t, contextMenuTarget.status) : '' },
+          { label: t.contact, value: contextMenuTarget?.contact || (isRtl ? 'لا يوجد' : 'None') },
+          { label: isRtl ? 'تاريخ التعيين' : 'Hired', value: contextMenuTarget ? new Date(contextMenuTarget.hiredDate).toLocaleDateString(isRtl ? 'ar' : 'en-US') : '' }
         ]}
         actions={[
-          { id: 'view', label: t.view, icon: <Eye size={18}/>, onClick: () => { toast.info(isRtl ? 'عرض ملف الموظف غير متاح حالياً' : 'Employee profile view not available yet'); setContextMenuTarget(null); } },
           { id: 'edit', label: t.editEmployee, icon: <Edit2 size={18}/>, onClick: () => { handleEdit(contextMenuTarget!); setContextMenuTarget(null); } },
-          { id: 'pay', label: t.paySalary, icon: <DollarSign size={18}/>, onClick: () => { handlePaySalary(contextMenuTarget!); setContextMenuTarget(null); } },
-          { id: 'call', label: t.contact, icon: <Phone size={18}/>, onClick: () => { if (contextMenuTarget?.contact) window.location.href = `tel:${contextMenuTarget.contact}`; setContextMenuTarget(null); } },
-          { id: 'delete', label: t.actions, color: 'rose', icon: <Trash2 size={18}/>, onClick: () => { deleteEmployee(contextMenuTarget!.id); setContextMenuTarget(null); } }
+          ...(contextMenuTarget?.status === 'active'
+            ? [{ id: 'pay', label: t.paySalary, icon: <DollarSign size={18}/>, onClick: () => { handlePaySalary(contextMenuTarget!); setContextMenuTarget(null); } }]
+            : []),
+          ...(contextMenuTarget?.contact && !contextMenuTarget.contact.includes('@')
+            ? [{ id: 'call', label: isRtl ? 'اتصال' : 'Call', icon: <Phone size={18}/>, onClick: () => { window.location.href = `tel:${contextMenuTarget!.contact.replace(/\s+/g, '')}`; setContextMenuTarget(null); } }]
+            : []),
+          { id: 'delete', label: isRtl ? 'حذف الموظف' : 'Delete employee', color: 'rose', icon: <Trash2 size={18}/>, onClick: () => { const id = contextMenuTarget!.id; setContextMenuTarget(null); void handleDeleteEmployee(id); } }
         ]}
       />
       {/* Header */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
-          <h2 className="text-3xl font-bold text-gray-900 dark:text-white tracking-tight">{t.employees}</h2>
+          <h2 className="text-2xl sm:text-3xl font-bold text-gray-900 dark:text-white tracking-tight">{t.employees}</h2>
           <p className="text-gray-500 dark:text-gray-400 mt-1">{t.hrSummary}</p>
         </div>
-        <div className="flex items-center gap-3">
-          {/* Tab Switcher */}
-          <div className="flex bg-gray-100 dark:bg-gray-800/60 p-1 rounded-xl border border-gray-200/50 dark:border-gray-700/50">
+        <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+          <div className="flex bg-gray-100 dark:bg-gray-800/60 p-1 rounded-xl border border-gray-200/50 dark:border-gray-700/50" role="tablist">
             <button
               type="button"
+              role="tab"
+              aria-selected={activeTab === 'employees'}
               onClick={() => { sounds.playClick(); setActiveTab('employees'); }}
-              className={`px-4 py-2 rounded-lg text-xs font-extrabold transition-all duration-300 flex items-center gap-1.5 ${
+              className={`flex-1 sm:flex-none whitespace-nowrap px-4 py-2.5 rounded-lg text-sm font-bold transition-all duration-300 flex items-center justify-center gap-1.5 ${
                 activeTab === 'employees'
                   ? 'bg-white dark:bg-gray-700 text-indigo-600 dark:text-indigo-400 shadow-sm'
                   : 'text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white'
               }`}
             >
               <Users size={14} />
-              {isRtl ? 'الموظفين' : 'Employees'}
+              {isRtl ? 'الموظفون' : 'Employees'}
             </button>
             <button
               type="button"
+              role="tab"
+              aria-selected={activeTab === 'payroll'}
               onClick={() => { sounds.playClick(); setActiveTab('payroll'); }}
-              className={`px-4 py-2 rounded-lg text-xs font-extrabold transition-all duration-300 flex items-center gap-1.5 ${
+              className={`flex-1 sm:flex-none whitespace-nowrap px-4 py-2.5 rounded-lg text-sm font-bold transition-all duration-300 flex items-center justify-center gap-1.5 ${
                 activeTab === 'payroll'
                   ? 'bg-white dark:bg-gray-700 text-indigo-600 dark:text-indigo-400 shadow-sm'
                   : 'text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white'
@@ -416,6 +478,7 @@ export default function EmployeeManagement({ language, settings }: Props) {
           </div>
 
           <TactileButton
+            className="w-full sm:w-auto whitespace-nowrap"
             onClick={() => { resetForm(); setIsModalOpen(true); }}
           >
             <UserPlus size={20} />
@@ -431,7 +494,8 @@ export default function EmployeeManagement({ language, settings }: Props) {
             <Search size={20} className={`absolute top-1/2 -translate-y-1/2 ${isRtl ? 'right-4' : 'left-4'} text-gray-400`} />
             <input
               type="text"
-              placeholder={activeTab === 'employees' ? t.searchPlaceholder : (isRtl ? 'البحث باسم الموظف أو الفترة...' : 'Search by employee or period...')} aria-label={activeTab === 'employees' ? t.searchPlaceholder : (isRtl ? 'البحث باسم الموظف أو الفترة...' : 'Search by employee or period...')}
+              placeholder={searchLabel}
+              aria-label={searchLabel}
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               className={`w-full ${isRtl ? 'pr-12 pl-4' : 'pl-12 pr-4'} py-3 bg-white dark:bg-gray-800 border border-gray-100 dark:border-gray-700 rounded-2xl focus:ring-2 focus:ring-indigo-500 outline-none shadow-sm dark:text-white transition-all`}
@@ -446,13 +510,18 @@ export default function EmployeeManagement({ language, settings }: Props) {
                 <div className="p-2 bg-indigo-50 dark:bg-indigo-900/30 rounded-lg text-indigo-600 dark:text-indigo-400">
                   <Users size={20} />
                 </div>
-                <span className="text-sm font-bold text-gray-500 dark:text-gray-400">{t.totalItems}</span>
+                <span className="text-sm font-bold text-gray-500 dark:text-gray-400">{isRtl ? 'عدد الموظفين' : 'Employees'}</span>
               </div>
               <span className="text-xl font-black text-gray-900 dark:text-white">{employees.length}</span>
             </div>
-            <div className="lg:col-span-3 salary-card-layout glass-card-test">
-              <h3>{isRtl ? 'إجمالي الرواتب الأساسية' : 'Total Basic Salaries'}</h3>
-              <p>{(() => {
+            <div className="lg:col-span-3 bg-white dark:bg-gray-800 p-4 rounded-2xl border border-gray-100 dark:border-gray-700 flex items-center justify-between gap-3 shadow-sm">
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-emerald-50 dark:bg-emerald-950/20 rounded-lg text-emerald-600 dark:text-emerald-400">
+                  <DollarSign size={20} />
+                </div>
+                <span className="text-sm font-bold text-gray-500 dark:text-gray-400">{isRtl ? 'إجمالي الرواتب الأساسية' : 'Total basic salaries'}</span>
+              </div>
+              <span className="text-lg font-mono font-black text-emerald-600 dark:text-emerald-400 text-end">{(() => {
                 const totals: Record<string, number> = {};
                 employees.forEach((emp) => {
                   const code = salaryCurrencyOf(emp);
@@ -460,7 +529,7 @@ export default function EmployeeManagement({ language, settings }: Props) {
                 });
                 const parts = Object.entries(totals).filter(([, amount]) => amount !== 0).map(([code, amount]) => money(amount, code));
                 return parts.length ? parts.join('  •  ') : money(0, systemCurrency);
-              })()}</p>
+              })()}</span>
             </div>
           </>
         ) : (
@@ -504,7 +573,7 @@ export default function EmployeeManagement({ language, settings }: Props) {
                 isRtl={isRtl}
                 settings={settings}
                 onEdit={handleEdit}
-                onDelete={deleteEmployee}
+                onDelete={handleDeleteEmployee}
                 onPaySalary={handlePaySalary}
                 onLongPress={setContextMenuTarget}
               />
@@ -527,9 +596,9 @@ export default function EmployeeManagement({ language, settings }: Props) {
                   <th className="py-4 px-6 text-center">{isRtl ? 'علاوات (+)' : 'Allowances'}</th>
                   <th className="py-4 px-6 text-center">{isRtl ? 'خصومات (-)' : 'Deductions'}</th>
                   <th className="py-4 px-6 text-center">{isRtl ? 'صافي الراتب' : 'Net Salary'}</th>
-                  <th className="py-4 px-6 text-center">{isRtl ? 'تاريخ الدفع' : 'Payment Code'}</th>
+                  <th className="py-4 px-6 text-center">{isRtl ? 'تاريخ الدفع' : 'Payment date'}</th>
                   <th className="py-4 px-6 text-center">{isRtl ? 'حالة الصرف' : 'Status'}</th>
-                  <th className="py-4 px-6 text-center">{isRtl ? 'إجراء' : 'Cancel'}</th>
+                  <th className="py-4 px-6 text-center">{isRtl ? 'حذف' : 'Delete'}</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100 dark:divide-gray-700/50">
@@ -579,7 +648,7 @@ export default function EmployeeManagement({ language, settings }: Props) {
                             className="inline-flex items-center gap-1.5 px-3 py-1 bg-amber-50 hover:bg-amber-100 dark:bg-amber-950/20 text-amber-600 dark:text-amber-400 hover:text-amber-700 text-xs font-black rounded-lg transition-all shadow-sm border border-amber-200/50"
                           >
                             <Clock size={12} className="animate-spin" style={{ animationDuration: '3s' }} />
-                            {isRtl ? 'إتمام الدفع' : 'Pay Slip'}
+                            {isRtl ? 'صرف الراتب' : 'Pay salary'}
                           </button>
                         )}
                       </td>
@@ -604,131 +673,142 @@ export default function EmployeeManagement({ language, settings }: Props) {
       {/* Add/Edit Modal */}
       <AnimatePresence>
         {isModalOpen && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className={SHEET_OVERLAY}>
             <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              onClick={() => { setIsModalOpen(false); resetForm(); }}
+              onClick={closeEmployeeForm}
               className="absolute inset-0 bg-gray-900/60 backdrop-blur-sm"
             />
             <motion.div
-              initial={{ scale: 0.9, opacity: 0, y: 20 }}
-              animate={{ scale: 1, opacity: 1, y: 0 }}
-              exit={{ scale: 0.9, opacity: 0, y: 20 }}
-              className="relative w-full max-w-lg bg-white dark:bg-gray-800 rounded-[2.5rem] shadow-2xl overflow-hidden border border-gray-100 dark:border-gray-700"
+              initial={{ opacity: 0, y: 40 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 40 }}
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="employee-form-title"
+              onKeyDown={(e) => { if (e.key === 'Escape') closeEmployeeForm(); }}
+              className={SHEET_PANEL}
             >
-              <form onSubmit={handleSubmit} className="p-8 space-y-6">
-                <div className="flex items-center gap-4 mb-2">
-                  <div className="p-3 bg-indigo-600 rounded-2xl text-white">
-                    <UserPlus size={24} />
+              <form onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0">
+                <div className={SHEET_HEADER}>
+                  <div className="p-2.5 bg-indigo-600 rounded-xl text-white">
+                    <UserPlus size={20} />
                   </div>
-                  <div>
-                    <h3 className="text-2xl font-bold text-gray-900 dark:text-white">
-                      {editingEmployee ? t.editEmployee : t.addEmployee}
-                    </h3>
-                    <p className="text-sm text-gray-500 dark:text-gray-400">{t.hrSummary}</p>
-                  </div>
+                  <h3 id="employee-form-title" className="flex-1 text-lg font-bold text-gray-900 dark:text-white">
+                    {editingEmployee ? t.editEmployee : t.addEmployee}
+                  </h3>
+                  <button
+                    type="button"
+                    onClick={closeEmployeeForm}
+                    aria-label={isRtl ? 'إغلاق' : 'Close'}
+                    className="p-2 rounded-xl text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700"
+                  >
+                    <X size={18} />
+                  </button>
                 </div>
 
-                <div className="space-y-4">
-                  <div className="space-y-1.5">
-                    <label className="text-sm font-bold text-gray-700 dark:text-gray-300">{t.employeeName}</label>
-                    <input
-                      required
-                      type="text"
-                      value={formData.name}
-                      onChange={(e) => setFormData({...formData, name: e.target.value})}
-                      className="w-full px-5 py-3.5 bg-gray-50 dark:bg-gray-900 border border-gray-100 dark:border-gray-700 rounded-2xl focus:ring-2 focus:ring-indigo-500 outline-none dark:text-white"
-                    />
+                <div className={SHEET_BODY}>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div className="space-y-1.5">
+                      <label htmlFor="emp-name" className={FIELD_LABEL}>{t.employeeName}</label>
+                      <input
+                        id="emp-name"
+                        required
+                        type="text"
+                        autoComplete="off"
+                        value={formData.name}
+                        onChange={(e) => setFormData({...formData, name: e.target.value})}
+                        className={FIELD_INPUT}
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <label htmlFor="emp-role" className={FIELD_LABEL}>{t.role}</label>
+                      <input
+                        id="emp-role"
+                        required
+                        type="text"
+                        autoComplete="off"
+                        value={formData.role}
+                        onChange={(e) => setFormData({...formData, role: e.target.value})}
+                        className={FIELD_INPUT}
+                      />
+                    </div>
                   </div>
 
                   <div className="space-y-1.5">
-                    <label className="text-sm font-bold text-gray-700 dark:text-gray-300">{t.role}</label>
+                    <label htmlFor="emp-contact" className={FIELD_LABEL}>{t.contact}</label>
                     <input
-                      required
+                      id="emp-contact"
                       type="text"
-                      value={formData.role}
-                      onChange={(e) => setFormData({...formData, role: e.target.value})}
-                      className="w-full px-5 py-3.5 bg-gray-50 dark:bg-gray-900 border border-gray-100 dark:border-gray-700 rounded-2xl focus:ring-2 focus:ring-indigo-500 outline-none dark:text-white"
-                    />
-                  </div>
-                  <div className={payrollRecords.some(record => record.employeeId === editingEmployee?.id) ? 'pointer-events-none opacity-60' : ''}>
-                    <CurrencyPicker
-                      value={isPosCurrency(formData.currency) ? formData.currency : systemCurrency}
-                      onChange={(code) => setFormData({ ...formData, currency: code })}
-                      isRtl={isRtl}
-                      label={isRtl ? 'عملة الراتب' : 'Salary currency'}
-                    />
-                  </div>
-                  {payrollRecords.some(record => record.employeeId === editingEmployee?.id) && (
-                    <p className="text-[11px] text-amber-600">
-                      {isRtl ? 'لا يمكن تغيير عملة الراتب بعد وجود مسير لهذا الموظف.' : 'Salary currency cannot change after a payroll record exists.'}
-                    </p>
-                  )}
-                  <div className="space-y-1.5">
-                    <label className="text-sm font-bold text-gray-700 dark:text-gray-300">
-                      {t.salary} ({CURRENCY_SYMBOLS[isPosCurrency(formData.currency) ? formData.currency : systemCurrency]})
-                    </label>
-                    <input
-                      type="number"
-                      min={0}
-                      step="any"
-                      value={formData.salary}
-                      onChange={(e) => setFormData({...formData, salary: Number(e.target.value)})}
-                      className="w-full px-5 py-3.5 bg-gray-50 dark:bg-gray-900 border border-gray-100 dark:border-gray-700 rounded-2xl focus:ring-2 focus:ring-indigo-500 outline-none dark:text-white font-mono"
-                    />
-                    <p className="text-[11px] text-gray-400">
-                      {isRtl
-                        ? 'المبلغ بهذه العملة. إذا صُرف الراتب بعملة أخرى يُحوَّل الراتب الأساسي بسعر الصرف، وتُكتب العلاوات بعملة الصرف.'
-                        : 'The amount is in this currency. Paying in another currency converts the basic salary at the exchange rate. Allowances are entered in the payout currency.'}
-                    </p>
-                  </div>
-
-                  <div className="space-y-1.5">
-                    <label className="text-sm font-bold text-gray-700 dark:text-gray-300">{t.contact}</label>
-                    <input
-                      type="text"
+                      dir="ltr"
+                      autoComplete="off"
+                      placeholder={isRtl ? 'رقم الهاتف أو البريد' : 'Phone or email'}
                       value={formData.contact}
                       onChange={(e) => setFormData({...formData, contact: e.target.value})}
-                      className="w-full px-5 py-3.5 bg-gray-50 dark:bg-gray-900 border border-gray-100 dark:border-gray-700 rounded-2xl focus:ring-2 focus:ring-indigo-500 outline-none dark:text-white"
+                      className={`${FIELD_INPUT} ${isRtl ? 'text-right' : ''}`}
                     />
                   </div>
 
                   <div className="space-y-1.5">
-                    <label className="text-sm font-bold text-gray-700 dark:text-gray-300">{t.employeeStatus}</label>
-                    <div className="grid grid-cols-3 gap-2">
+                    <label htmlFor="emp-salary" className={FIELD_LABEL}>{t.salary}</label>
+                    <div className="flex gap-2">
+                      <input
+                        id="emp-salary"
+                        type="number"
+                        inputMode="decimal"
+                        min={0}
+                        step="any"
+                        placeholder="0"
+                        value={formData.salary || ''}
+                        onChange={(e) => setFormData({...formData, salary: Number(e.target.value)})}
+                        className={`${FIELD_INPUT} flex-1 min-w-0 font-mono`}
+                      />
+                      <CurrencySelect
+                        value={isPosCurrency(formData.currency) ? formData.currency : systemCurrency}
+                        onChange={(code) => setFormData({ ...formData, currency: code })}
+                        isRtl={isRtl}
+                        disabled={salaryCurrencyLocked}
+                        aria-label={isRtl ? 'عملة الراتب' : 'Salary currency'}
+                        className="w-44 shrink-0"
+                      />
+                    </div>
+                    <p className="text-xs text-gray-400">
+                      {salaryCurrencyLocked
+                        ? (isRtl ? 'لا يمكن تغيير عملة الراتب بعد وجود مسير لهذا الموظف.' : 'Salary currency cannot change after a payroll record exists.')
+                        : (isRtl
+                          ? 'إذا صُرف الراتب بعملة أخرى يُحوَّل بسعر الصرف وقت الصرف.'
+                          : 'Paying in another currency converts the salary at the rate on the day of payment.')}
+                    </p>
+                  </div>
+                  <div className="space-y-1.5">
+                    <span className={FIELD_LABEL}>{t.employeeStatus}</span>
+                    <div className="grid grid-cols-3 gap-2" role="group" aria-label={t.employeeStatus}>
                       {['active', 'on-leave', 'terminated'].map(status => (
                         <button
                           key={status}
                           type="button"
+                          aria-pressed={formData.status === status}
                           onClick={() => setFormData({...formData, status: status as any})}
-                          className={`py-2.5 rounded-xl border-2 font-bold text-[10px] uppercase tracking-widest transition-all ${
+                          className={`py-2.5 px-1 rounded-xl border-2 font-bold text-sm transition-all ${
                             formData.status === status
                               ? 'border-indigo-600 bg-indigo-50 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-400'
-                              : 'border-gray-100 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-400 hover:border-gray-200'
+                              : 'border-gray-100 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-500 hover:border-gray-200'
                           }`}
                         >
-                          {t[status as keyof typeof t]}
+                          {statusLabel(t, status)}
                         </button>
                       ))}
                     </div>
                   </div>
                 </div>
 
-                <div className="flex gap-3 pt-4">
-                  <TactileButton
-                    type="button"
-                    variant="secondary"
-                    fullWidth
-                    onClick={() => { setIsModalOpen(false); resetForm(); }}
-                  >
+                <div className={SHEET_FOOTER}>
+                  <TactileButton type="button" variant="secondary" className="flex-1 px-3 whitespace-nowrap" onClick={closeEmployeeForm}>
                     {t.cancel}
                   </TactileButton>
-                  <TactileButton
-                    type="submit"
-                    fullWidth
-                  >
+                  <TactileButton type="submit" className="flex-[2] px-3 whitespace-nowrap">
                     {t.saveEmployee}
                   </TactileButton>
                 </div>
@@ -738,109 +818,122 @@ export default function EmployeeManagement({ language, settings }: Props) {
         )}
       </AnimatePresence>
 
-      {/* Upgraded Glassmorphic Salary Payment configuration Modal */}
+      {/* Salary payment dialog */}
       <AnimatePresence>
         {selectedPayEmployee && (
-          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 overflow-y-auto">
-            {/* Backdrop with heavy blur */}
+          <div className={SHEET_OVERLAY}>
             <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               onClick={() => { if (!isPaying) setSelectedPayEmployee(null); }}
-              className="absolute inset-0 bg-slate-950/60 backdrop-blur-md"
+              className="absolute inset-0 bg-slate-950/60 backdrop-blur-sm"
             />
-            {/* Modal Box */}
             <motion.div
-              initial={{ scale: 0.95, opacity: 0, y: 15 }}
-              animate={{ scale: 1, opacity: 1, y: 0 }}
-              exit={{ scale: 0.95, opacity: 0, y: 15 }}
-              transition={{ type: "spring", damping: 25, stiffness: 350 }}
-              className="relative w-full max-w-lg backdrop-blur-2xl bg-white/80 dark:bg-slate-900/80 border border-white/20 dark:border-slate-800/50 rounded-[2.5rem] shadow-[0_25px_50px_-12px_rgba(0,0,0,0.5),inset_0_1px_1px_rgba(255,255,255,0.4)] dark:shadow-[0_25px_50px_-12px_rgba(0,0,0,0.8),inset_0_1px_0px_rgba(255,255,255,0.1)] overflow-hidden p-8 text-center space-y-6"
+              initial={{ opacity: 0, y: 40 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 40 }}
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="payroll-form-title"
+              onKeyDown={(e) => { if (e.key === 'Escape' && !isPaying) setSelectedPayEmployee(null); }}
+              className={SHEET_PANEL}
             >
-              {/* Outer 3D reflection border */}
-              <div className="absolute inset-0 rounded-[2.5rem] border border-white/30 dark:border-white/5 pointer-events-none" />
-
-              {/* Glowing animated visual header */}
-              <div className="mx-auto w-12 h-12 rounded-full bg-gradient-to-tr from-cyan-500 to-indigo-600 flex items-center justify-center text-white shadow-lg shadow-cyan-500/20 relative group">
-                <DollarSign size={24} className="animate-pulse" />
-                <span className="absolute inset-0 rounded-full bg-cyan-400/30 blur-md scale-110 -z-10 animate-pulse" />
+              <div className={SHEET_HEADER}>
+                <div className="p-2.5 bg-indigo-600 rounded-xl text-white">
+                  <DollarSign size={20} />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <h3 id="payroll-form-title" className="text-lg font-bold text-gray-900 dark:text-white">
+                    {isRtl ? 'صرف راتب' : 'Pay salary'}
+                  </h3>
+                  <p className="text-sm font-bold text-indigo-600 dark:text-indigo-400 truncate">
+                    {selectedPayEmployee.name} · {selectedPayEmployee.role}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  disabled={isPaying}
+                  onClick={() => setSelectedPayEmployee(null)}
+                  aria-label={isRtl ? 'إغلاق' : 'Close'}
+                  className="p-2 rounded-xl text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-50"
+                >
+                  <X size={18} />
+                </button>
               </div>
 
-              <div className="space-y-1">
-                <h3 className="text-xl font-black text-gray-900 dark:text-white tracking-tight">
-                  {isRtl ? 'مسير رواتب الموظف' : 'Employee Payroll Configuration'}
-                </h3>
-                <p className="text-indigo-600 dark:text-indigo-400 font-extrabold text-sm">
-                  {selectedPayEmployee.name} ({selectedPayEmployee.role})
-                </p>
-              </div>
-
-              {/* Multi-field Setup */}
-              <div className="space-y-4 text-left" dir={isRtl ? 'rtl' : 'ltr'}>
-                {/* Month Year Period */}
-                <div className="space-y-1">
-                  <label className="text-xs font-bold text-gray-500 dark:text-gray-400">
-                    {isRtl ? 'فترة الراتب (الشهر والسنة)' : 'Salary Period (Month/Year)'}
+              <div className={SHEET_BODY}>
+                <div className="space-y-1.5">
+                  <label htmlFor="pay-month" className={FIELD_LABEL}>
+                    {isRtl ? 'فترة الراتب (الشهر والسنة)' : 'Salary period (month/year)'}
                   </label>
                   <input
+                    id="pay-month"
                     type="month"
                     value={payrollMonthYear}
                     onChange={(e) => setPayrollMonthYear(e.target.value)}
-                    className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-950 border border-gray-100 dark:border-gray-800 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none text-sm dark:text-white text-center font-bold"
+                    className={`${FIELD_INPUT} font-bold`}
                   />
                 </div>
 
-                <div className="grid grid-cols-2 gap-4">
-                  {/* Allowances */}
-                  <div className="space-y-1">
-                    <label className="text-xs font-bold text-gray-500 dark:text-gray-400 flex items-center gap-1.5">
+                <div className="space-y-1.5">
+                  <label htmlFor="pay-currency" className={FIELD_LABEL}>
+                    {isRtl ? 'عملة صرف الراتب' : 'Payroll currency'}
+                  </label>
+                  <CurrencySelect
+                    id="pay-currency"
+                    value={payrollCurrency}
+                    onChange={setPayrollCurrency}
+                    isRtl={isRtl}
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div className="space-y-1.5">
+                    <label htmlFor="pay-allowances" className={`${FIELD_LABEL} flex items-center gap-1.5`}>
                       <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full"></span>
-                      {isRtl ? 'علاوات وإضافات' : 'Allowances / Additions'}
+                      {isRtl ? 'علاوات وإضافات' : 'Allowances / additions'}
                     </label>
                     <input
+                      id="pay-allowances"
                       type="number"
                       min="0"
-                      value={payrollAllowances}
-                      onChange={(e) => setPayrollAllowances(Number(e.target.value) || 0)}
-                      className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-950 border border-gray-100 dark:border-gray-800 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none font-mono text-sm dark:text-white font-bold"
+                      inputMode="decimal"
+                      placeholder="0"
+                      value={payrollAllowances || ''}
+                      onChange={(e) => setPayrollAllowances(Math.max(0, Number(e.target.value) || 0))}
+                      className={`${FIELD_INPUT} font-mono font-bold`}
                     />
                   </div>
 
-                  {/* Deductions */}
-                  <div className="space-y-1">
-                    <label className="text-xs font-bold text-gray-500 dark:text-gray-400 flex items-center gap-1.5">
+                  <div className="space-y-1.5">
+                    <label htmlFor="pay-deductions" className={`${FIELD_LABEL} flex items-center gap-1.5`}>
                       <span className="w-1.5 h-1.5 bg-rose-500 rounded-full"></span>
                       {isRtl ? 'استقطاعات وخصومات' : 'Deductions'}
                     </label>
                     <input
+                      id="pay-deductions"
                       type="number"
                       min="0"
-                      value={payrollDeductions}
-                      onChange={(e) => setPayrollDeductions(Number(e.target.value) || 0)}
-                      className="w-full px-4 py-2.5 bg-gray-50 dark:bg-gray-950 border border-gray-100 dark:border-gray-800 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none font-mono text-sm dark:text-white font-bold"
+                      inputMode="decimal"
+                      placeholder="0"
+                      value={payrollDeductions || ''}
+                      onChange={(e) => setPayrollDeductions(Math.max(0, Number(e.target.value) || 0))}
+                      className={`${FIELD_INPUT} font-mono font-bold`}
                     />
                   </div>
                 </div>
 
-                {/* Currency Selector */}
-                <CurrencyPicker
-                  value={payrollCurrency}
-                  onChange={setPayrollCurrency}
-                  isRtl={isRtl}
-                  label={isRtl ? 'عملة صرف الراتب' : 'Payroll currency'}
-                />
-
-                {/* Payment Status Switcher */}
-                <div className="space-y-1">
-                  <label className="text-xs font-bold text-gray-500 dark:text-gray-400">
-                    {isRtl ? 'حالة الصرف والمسير' : 'Salary Payment Status'}
-                  </label>
-                  <div className="grid grid-cols-2 gap-2">
+                <div className="space-y-1.5">
+                  <span className={FIELD_LABEL}>
+                    {isRtl ? 'حالة الصرف' : 'Payment status'}
+                  </span>
+                  <div className="grid grid-cols-2 gap-2" role="group">
                     <button
                       type="button"
+                      aria-pressed={payrollStatus === 'paid'}
                       onClick={() => setPayrollStatus('paid')}
-                      className={`py-2 rounded-xl text-xs font-bold transition-all border ${
+                      className={`py-2.5 rounded-xl text-sm font-bold transition-all border ${
                         payrollStatus === 'paid'
                           ? 'border-emerald-500 bg-emerald-50/50 dark:bg-emerald-950/20 text-emerald-600 dark:text-emerald-400'
                           : 'border-gray-100 dark:border-gray-800 bg-white/30 dark:bg-gray-950/30 text-gray-400'
@@ -850,14 +943,15 @@ export default function EmployeeManagement({ language, settings }: Props) {
                     </button>
                     <button
                       type="button"
+                      aria-pressed={payrollStatus === 'pending'}
                       onClick={() => setPayrollStatus('pending')}
-                      className={`py-2 rounded-xl text-xs font-bold transition-all border ${
+                      className={`py-2.5 rounded-xl text-sm font-bold transition-all border ${
                         payrollStatus === 'pending'
                           ? 'border-amber-500 bg-amber-50/50 dark:bg-amber-950/20 text-amber-600 dark:text-amber-400'
                           : 'border-gray-100 dark:border-gray-800 bg-white/30 dark:bg-gray-950/30 text-gray-400'
                       }`}
                     >
-                      {isRtl ? 'تعليق في المسير (Unpaid)' : 'Pending / Unpaid'}
+                      {isRtl ? 'معلّق (غير مدفوع)' : 'Pending (unpaid)'}
                     </button>
                   </div>
                 </div>
@@ -870,7 +964,13 @@ export default function EmployeeManagement({ language, settings }: Props) {
                       {formatMoney(baseSalaryIn(selectedPayEmployee, payrollCurrency), payrollCurrency, isRtl ? 'ar' : 'en-US')}
                     </span>
                   </div>
-                  {salaryCurrencyOf(selectedPayEmployee) !== payrollCurrency && (
+                  {payRateMissing ? (
+                    <p className="text-[11px] font-bold text-rose-600 dark:text-rose-400">
+                      {isRtl
+                        ? `لا يوجد سعر صرف حديث من ${salaryCurrencyOf(selectedPayEmployee)} إلى ${payrollCurrency}. اتصل بالإنترنت لتحديث الأسعار، أو أدخل أسعارك يدوياً من الإعدادات، أو اصرف الراتب بعملته.`
+                        : `No recent ${salaryCurrencyOf(selectedPayEmployee)} → ${payrollCurrency} rate. Go online to refresh rates, set manual rates in Settings, or pay in the salary currency.`}
+                    </p>
+                  ) : salaryCurrencyOf(selectedPayEmployee) !== payrollCurrency && (
                     <p className="text-[11px] text-slate-400">
                       {isRtl
                         ? `محوّل من ${money(selectedPayEmployee.salary, salaryCurrencyOf(selectedPayEmployee))} بسعر الصرف الحالي.`
@@ -894,23 +994,26 @@ export default function EmployeeManagement({ language, settings }: Props) {
                 </div>
               </div>
 
-              {/* Action Buttons */}
-              <div className="flex gap-4 pt-2">
+              <div className={SHEET_FOOTER}>
                 <button
                   type="button"
                   disabled={isPaying}
                   onClick={() => { setSelectedPayEmployee(null); sounds.playClick(); }}
-                  className="w-full py-3 px-6 bg-slate-200/50 hover:bg-slate-200/80 dark:bg-slate-800/40 dark:hover:bg-slate-800/60 text-slate-800 dark:text-slate-200 border border-slate-300/30 dark:border-slate-700/30 rounded-2xl font-bold uppercase tracking-widest text-xs transition-all duration-200 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed shadow-inner"
+                  className="flex-1 py-3 px-3 whitespace-nowrap bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-200 rounded-2xl font-bold hover:bg-gray-200 dark:hover:bg-gray-600 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {t.cancel}
                 </button>
                 <button
                   type="button"
-                  disabled={isPaying}
+                  disabled={isPaying || payRateMissing}
                   onClick={handleConfirmPayment}
-                  className="w-full py-3 px-6 bg-gradient-to-r from-cyan-500 to-indigo-600 hover:from-cyan-400 hover:to-indigo-500 text-white font-bold uppercase tracking-widest text-xs rounded-2xl shadow-[0_10px_20px_rgba(6,182,212,0.25)] dark:shadow-[0_10px_20px_rgba(6,182,212,0.35)] transition-all duration-300 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed hover:-translate-y-0.5 active:translate-y-0 relative overflow-hidden"
+                  className="flex-[2] py-3 px-3 whitespace-nowrap bg-indigo-600 text-white rounded-2xl font-bold hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-200 dark:shadow-none disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  {isPaying ? (isRtl ? 'جاري الحفظ...' : 'Processing...') : (isRtl ? 'حفظ وصرف المسير' : 'Process & Save')}
+                  {isPaying
+                    ? (isRtl ? 'جارٍ الحفظ...' : 'Saving...')
+                    : payrollStatus === 'paid'
+                      ? (isRtl ? 'صرف الراتب من الخزنة' : 'Pay from vault')
+                      : (isRtl ? 'حفظ كمعلّق' : 'Save as pending')}
                 </button>
               </div>
             </motion.div>

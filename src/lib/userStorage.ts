@@ -1,3 +1,5 @@
+import { clearRows } from './rowCache';
+
 const LEGACY_PREFIX = 'mustawdae_';
 
 export const USER_CACHE_KEYS = [
@@ -124,6 +126,7 @@ export function migrateLegacyUserCache(uid: string): void {
 
 export function clearUserCache(uid: string | null | undefined): void {
   if (typeof window === 'undefined' || !uid) return;
+  void clearRows(`${uid}|`);
   const prefix = `mustawdae:${uid}:`;
   for (const k of Array.from(pendingWrites.keys())) if (k.startsWith(prefix) && k !== `${prefix}offline_invoices`) pendingWrites.delete(k);
   try {

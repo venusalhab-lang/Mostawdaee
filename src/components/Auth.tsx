@@ -60,7 +60,12 @@ function classifyAuthError(err: any): AuthErrorKey {
 
 function authMessage(key: AuthErrorKey, isRtl: boolean): string {
   const t = (ar: string, en: string) => (isRtl ? ar : en);
-  if (typeof key === 'object') return key.raw;
+  if (typeof key === 'object') {
+    // Our own messages are already localized; raw server text is not shown to merchants.
+    if (/[\u0600-\u06FF]/.test(key.raw)) return key.raw;
+    console.warn('[Auth] unclassified error:', key.raw);
+    return t('تعذّر إكمال العملية. حاول مرة أخرى، وإن تكرر ذلك تواصل مع الدعم.', 'Something went wrong. Please try again, and contact support if it keeps happening.');
+  }
   switch (key) {
     case 'empty': return t('يرجى إدخال البريد الإلكتروني وكلمة المرور.', 'Please enter your email and password.');
     case 'invalid': return t('البريد الإلكتروني أو كلمة المرور غير صحيحة.', 'Incorrect email or password.');
@@ -131,7 +136,7 @@ export default function Auth({ language = 'ar', onLanguageToggle = () => {}, onL
         return;
       }
       setLoading(true);
-      setLoadingStage(isRtl ? 'جاري حفظ كلمة المرور...' : 'Saving your new password...');
+      setLoadingStage(isRtl ? 'جارٍ حفظ كلمة المرور...' : 'Saving your new password...');
       setAuthError(null);
       try {
         const { error } = await supabase.auth.updateUser({ password });
@@ -156,7 +161,7 @@ export default function Auth({ language = 'ar', onLanguageToggle = () => {}, onL
         return;
       }
       setLoading(true);
-      setLoadingStage(isRtl ? 'جاري إرسال رابط إعادة التعيين...' : 'Sending the reset link...');
+      setLoadingStage(isRtl ? 'جارٍ إرسال رابط إعادة التعيين...' : 'Sending the reset link...');
       setAuthError(null);
       try {
         const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), {
@@ -181,8 +186,8 @@ export default function Auth({ language = 'ar', onLanguageToggle = () => {}, onL
 
     setLoading(true);
     setLoadingStage(isSignUp
-      ? (isRtl ? 'جاري إنشاء الحساب...' : 'Creating your account...')
-      : (isRtl ? 'جاري تسجيل الدخول...' : 'Signing you in...'));
+      ? (isRtl ? 'جارٍ إنشاء الحساب...' : 'Creating your account...')
+      : (isRtl ? 'جارٍ تسجيل الدخول...' : 'Signing you in...'));
     setAuthError(null);
     setSuccessKey(null);
 
@@ -213,7 +218,7 @@ export default function Auth({ language = 'ar', onLanguageToggle = () => {}, onL
   const handleGoogleSignIn = async () => {
     sounds.playClick();
     setLoading(true);
-    setLoadingStage(isRtl ? 'جاري فتح Google...' : 'Opening Google...');
+    setLoadingStage(isRtl ? 'جارٍ فتح Google...' : 'Opening Google...');
     setAuthError(null);
     try {
       await safeLoginWithGoogle();
@@ -293,7 +298,7 @@ export default function Auth({ language = 'ar', onLanguageToggle = () => {}, onL
         
         <p className="text-sm text-gray-500 mt-2.5 mb-5 leading-relaxed font-normal">
           {isRtl 
-            ? 'أدر مخزونك، ومبيعاتك، وفواتيرك بأمان تام وسهولة متناهية.' 
+            ? 'أدر مخزونك ومبيعاتك وفواتيرك ومستودعاتك.' 
             : 'Manage your inventory, payments, invoices, and warehouses efficiently.'}
         </p>
 
@@ -338,7 +343,7 @@ export default function Auth({ language = 'ar', onLanguageToggle = () => {}, onL
           )}
           <span>
             {loading
-              ? (isRtl ? 'جاري الفتح...' : 'Opening...')
+              ? (isRtl ? 'جارٍ الفتح...' : 'Opening...')
               : (isRtl ? 'الدخول عبر Google' : 'Continue with Google')}
           </span>
         </button>
@@ -555,7 +560,7 @@ export default function Auth({ language = 'ar', onLanguageToggle = () => {}, onL
                     <ShieldCheck size={18} />
                   </div>
                   <h3 className="text-base font-bold text-gray-900">
-                    {isRtl ? "سياسة الخصوصية لـ مستودعي" : "Privacy Policy for Mostawdaee"}
+                    {isRtl ? "سياسة الخصوصية لتطبيق مستودعي" : "Privacy Policy for Mostawdaee"}
                   </h3>
                 </div>
                 <button
@@ -611,7 +616,7 @@ export default function Auth({ language = 'ar', onLanguageToggle = () => {}, onL
                     <FileText size={18} />
                   </div>
                   <h3 className="text-base font-bold text-gray-900">
-                    {isRtl ? "شروط الخدمة لـ مستودعي" : "Terms of Service for Mostawdaee"}
+                    {isRtl ? "شروط الخدمة لتطبيق مستودعي" : "Terms of Service for Mostawdaee"}
                   </h3>
                 </div>
                 <button
@@ -712,7 +717,7 @@ export default function Auth({ language = 'ar', onLanguageToggle = () => {}, onL
                     <AlertTriangle size={18} />
                   </div>
                   <h3 className="text-base font-bold text-gray-900">
-                    {isRtl ? "إخلاء المسؤولية لـ مستودعي" : "Disclaimer of Liability"}
+                    {isRtl ? "إخلاء المسؤولية لتطبيق مستودعي" : "Disclaimer of Liability for Mostawdaee"}
                   </h3>
                 </div>
                 <button

@@ -1577,54 +1577,6 @@ body, html {
   filter: drop-shadow(0 0 10px rgba(255, 255, 255, 0.95)) drop-shadow(0 0 20px rgba(0, 229, 255, 0.4)); /* توهج الكود المعتمد المطور للياقة البصرية */
 }
 
-/* فئة مخصصة لاختبار التأثير الزجاجي - لا تؤثر على التموضع */
-.glass-card-test {
-    background: rgba(255, 255, 255, 0.08) !important; /* خلفية شبه شفافة */
-    backdrop-filter: blur(16px) !important; /* تأثير الزجاج الضبابي */
-    -webkit-backdrop-filter: blur(16px) !important; /* لدعم متصفحات سفاري */
-    border: 1px solid rgba(255, 255, 255, 0.15) !important; /* حدود رقيقة لتعزيز الواقعية */
-    border-radius: 16px !important; /* زوايا ناعمة */
-    box-shadow: 0 4px 30px rgba(0, 0, 0, 0.05) !important; /* ظل خفيف لإعطاء عمق 3D */
-    transition: transform 0.3s ease, box-shadow 0.3s ease, background 0.3s ease !important; /* انتقال سلس */
-}
-
-/* تأثير تفاعلي عند مرور مؤشر الماوس (Hover) */
-.glass-card-test:hover {
-    background: rgba(255, 255, 255, 0.12) !important;
-    transform: translateY(-4px) !important; /* بروز خفيف للأعلى */
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1) !important;
-}
-
-/* تنسيق فئة إجمالي الرواتب لدعم المطلب بالكامل وبصورة جمالية */
-.salary-card-layout {
-    padding: 1.25rem !important;
-    display: flex !important;
-    flex-direction: column !important;
-    justify-content: center !important;
-    min-height: 100px !important;
-}
-
-.salary-card-layout h3 {
-    font-size: 0.875rem !important;
-    font-weight: 800 !important;
-    color: #4b5563 !important; /* text-gray-600 */
-    text-transform: uppercase !important;
-    letter-spacing: 0.05em !important;
-    margin: 0 !important;
-}
-
-.dark .salary-card-layout h3 {
-    color: #d1d5db !important; /* text-gray-300 */
-}
-
-.salary-card-layout p {
-    font-size: 1.75rem !important;
-    font-weight: 900 !important;
-    color: #10b981 !important; /* emerald green-500 */
-    margin: 0.25rem 0 0 0 !important;
-    font-family: monospace, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas;
-}
-
 /* responsive actions alignment styling */
 .main-actions {
     display: flex;

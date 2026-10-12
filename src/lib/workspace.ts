@@ -96,47 +96,76 @@ function publish(next: Workspace | null) {
 }
 
 const CONTEXT_TIMEOUT_MS = 4000;
+const RETRY_DELAYS_MS = [1000, 2000, 4000, 8000, 15000];
 
-async function fetchWorkspace(userId: string): Promise<Workspace> {
+/** One question to the server. Null when it could not answer (offline, timeout, unexpected payload). */
+async function askServer(userId: string, timeoutMs = CONTEXT_TIMEOUT_MS): Promise<Workspace | null> {
   try {
     const { data, error } = await Promise.race([
       supabase.rpc('team_context'),
-      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('team_context timeout')), CONTEXT_TIMEOUT_MS)),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('team_context timeout')), timeoutMs)),
     ]);
     if (!error) {
       const parsed = parseTeamContext(userId, data);
-      if (parsed) {
-        writeCached(parsed);
-        return parsed;
-      }
-    } else if (isMissingRpc(error)) {
-      return soloWorkspace(userId);
+      if (parsed) writeCached(parsed);
+      return parsed;
     }
-  } catch { /* offline: fall back to what this device last saw */ }
-  return readCached(userId) || soloWorkspace(userId);
+    if (isMissingRpc(error)) {
+      const solo = soloWorkspace(userId);
+      writeCached(solo);
+      return solo;
+    }
+  } catch { /* offline or slow */ }
+  return null;
+}
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/**
+ * A member must never be treated as the owner of an empty store of their own because the network was slow:
+ * their sales would be written to the wrong books. Without a server answer or a store seen on this device, keep asking.
+ */
+async function fetchWorkspace(userId: string, stillWanted: () => boolean): Promise<Workspace> {
+  for (let attempt = 0; ; attempt++) {
+    const answer = await askServer(userId, CONTEXT_TIMEOUT_MS * Math.min(attempt + 1, 3));
+    if (answer) return answer;
+    const cached = readCached(userId);
+    if (cached) return cached;
+    if (!stillWanted()) throw Object.assign(new Error('Workspace lookup cancelled'), { code: 'cancelled' });
+    await sleep(RETRY_DELAYS_MS[Math.min(attempt, RETRY_DELAYS_MS.length - 1)]);
+    if (!stillWanted()) throw Object.assign(new Error('Workspace lookup cancelled'), { code: 'cancelled' });
+  }
 }
 
 /** Resolves the store for this session once; every read and write waits on it. */
 export function ensureWorkspace(userId: string): Promise<Workspace> {
   if (current?.userId === userId) return Promise.resolve(current);
   if (pending?.userId === userId) return pending.promise;
-  const promise = fetchWorkspace(userId).then((workspace) => {
-    if (pending?.promise === promise) {
-      pending = null;
-      publish(workspace);
-    }
-    return workspace;
-  });
+  const promise: Promise<Workspace> = fetchWorkspace(userId, () => pending?.promise === promise).then(
+    (workspace) => {
+      if (pending?.promise === promise) {
+        pending = null;
+        publish(workspace);
+      }
+      return workspace;
+    },
+    (error) => {
+      if (pending?.promise === promise) pending = null;
+      throw error;
+    },
+  );
   pending = { userId, promise };
   return promise;
 }
 
 /** Asks the server again (after an invite, or when the network returns). */
 export async function refreshWorkspace(userId: string): Promise<Workspace> {
-  pending = null;
-  const next = await fetchWorkspace(userId);
-  if (next.source === 'server' || current?.userId !== userId) publish(next);
-  return current?.userId === userId ? current : next;
+  const next = await askServer(userId);
+  if (next) {
+    publish(next);
+    return next;
+  }
+  return ensureWorkspace(userId);
 }
 
 export function currentWorkspace(): Workspace | null {
@@ -231,7 +260,7 @@ export const leaveStore = () => call<void>('team_leave');
 export function teamErrorMessage(error: unknown, ar: boolean): string {
   const code = error instanceof TeamError ? error.code : 'failed';
   const messages: Record<TeamErrorCode, [string, string]> = {
-    not_installed: ['ميزة الفريق غير مفعّلة على الخادم بعد. شغّل ملف الإعداد في Supabase.', 'Teams are not enabled on the server yet. Run the setup file in Supabase.'],
+    not_installed: ['ميزة الفريق غير متاحة حالياً. تواصل مع الدعم.', 'The team feature is not available right now. Contact support.'],
     offline: ['لا يوجد اتصال بالإنترنت. أعد المحاولة عند الاتصال.', 'No internet connection. Try again when online.'],
     subscription_required: ['يلزم اشتراك فعّال لإضافة أعضاء إلى الفريق.', 'An active subscription is required to add team members.'],
     invalid_role: ['الدور غير صالح.', 'Invalid role.'],

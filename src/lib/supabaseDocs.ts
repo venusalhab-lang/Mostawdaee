@@ -1,6 +1,7 @@
 import { supabase } from '../supabaseClient';
 import { isOfflineError } from './offlineQueue';
 import { ensureWorkspace, resetWorkspace } from './workspace';
+import { allowRows, readRows, writeRows } from './rowCache';
 
 export const db = { kind: 'supabase-docs' as const };
 
@@ -22,10 +23,11 @@ export interface CollectionRef {
 }
 
 /**
- * 'cached' re-emits from the in-memory copy; 'reload' reads the whole collection from the server;
- * 'shared' also reads it, but joins a read of the same collection that is already running.
+ * 'cached' re-emits from the in-memory copy; 'fetch' brings the collection up to date from the server
+ * (only the changes once it is in memory), joining a read of the same collection that is already running.
  */
-type Listener = (mode: 'cached' | 'reload' | 'shared') => void;
+type SyncMode = 'cached' | 'fetch';
+type Listener = (mode: SyncMode) => void;
 
 const listeners = new Map<string, Set<Listener>>();
 let channel: { unsubscribe: () => void } | null = null;
@@ -61,6 +63,10 @@ export function resetSync() {
   listeners.clear();
   collectionCache.clear();
   inflight.clear();
+  persistTimers.forEach((timer) => clearTimeout(timer));
+  persistTimers.clear();
+  deviceScope = null;
+  generation += 1;
   resetWorkspace();
 }
 
@@ -91,6 +97,9 @@ function schemaError(error: { message?: string; code?: string; details?: string 
   }
   if (/vault is newer/i.test(text)) {
     return Object.assign(new Error('vault is newer'), { code: 'vault-newer' });
+  }
+  if (/einvoice locked/i.test(text)) {
+    return Object.assign(new Error('This invoice was accepted by the national e-invoicing system'), { code: 'einvoice-locked' });
   }
   if (/append-only/i.test(text)) {
     return Object.assign(new Error('The activity log cannot be changed'), { code: 'permission-denied' });
@@ -152,7 +161,14 @@ async function requireUid(): Promise<string> {
     }
     throw Object.assign(new Error('No active session'), { code: 'unauthenticated' });
   }
-  return (await ensureWorkspace(uid)).ownerId;
+  const workspace = await ensureWorkspace(uid);
+  // A new role sees different rows (cashiers never see the vault), so it starts from its own saved copy.
+  const scope = `${uid}|${workspace.ownerId}|${workspace.role}|`;
+  if (scope !== deviceScope) {
+    allowRows(`${uid}|`);
+    deviceScope = scope;
+  }
+  return workspace.ownerId;
 }
 
 async function fetchDoc(ref: DocRef) {
@@ -184,8 +200,38 @@ function applyRow(name: string, id: string, row: CollectionRow | null) {
   if (rows) {
     if (row) rows.set(id, row);
     else rows.delete(id);
+    schedulePersist(name);
   }
   notify(name, 'cached');
+}
+
+/** `<session user>|<store owner>|<role>|`; set once the workspace is known, cleared on sign-out. */
+let deviceScope: string | null = null;
+/** Bumped by resetSync so work started for the previous account never lands in the new one. */
+let generation = 0;
+const persistTimers = new Map<string, ReturnType<typeof setTimeout>>();
+export const PERSIST_DELAY_MS = 2000;
+
+function schedulePersist(name: string) {
+  const scope = deviceScope;
+  if (!scope || persistTimers.has(name)) return;
+  const gen = generation;
+  persistTimers.set(name, setTimeout(() => {
+    persistTimers.delete(name);
+    const rows = collectionCache.get(name);
+    if (gen !== generation || !rows) return;
+    void writeRows(scope + name, [...rows.values()]);
+  }, PERSIST_DELAY_MS));
+}
+
+/** Loads the copy saved on this device into memory, so the next sync downloads only what changed since. */
+async function restoreSaved(name: string): Promise<void> {
+  const scope = deviceScope;
+  if (!scope) return;
+  const gen = generation;
+  const saved = await readRows(scope + name);
+  if (!saved || gen !== generation || collectionCache.has(name)) return;
+  collectionCache.set(name, new Map(saved.map((row) => [row.doc_id, row])));
 }
 
 /** After a successful commit, refresh only the documents it touched. */
@@ -200,7 +246,7 @@ async function applyCommitted(ops: Array<{ op: 'set' | 'delete'; collection: str
       const row = await fetchDoc({ kind: 'doc', collection: op.collection, id: op.id });
       applyRow(op.collection, op.id, row ? { doc_id: op.id, ...row } : null);
     } catch {
-      notify(op.collection, 'reload');
+      notify(op.collection, 'fetch');
     }
   }));
 }
@@ -229,26 +275,113 @@ async function fetchCollection(name: string) {
   }
 }
 
+/**
+ * A commit's rows carry the time they were written but become visible when the transaction ends,
+ * so a refresh re-reads everything changed this long before the newest row already held.
+ */
+export const DELTA_OVERLAP_MS = 2 * 60_000;
+
+const stampOf = (row: CollectionRow) => {
+  const t = Date.parse(row.updated_at);
+  return Number.isFinite(t) ? t : -Infinity;
+};
+
+async function fetchPaged<T>(page: (from: number, to: number) => PromiseLike<{ data: unknown; error: any }>): Promise<T[]> {
+  const out: T[] = [];
+  for (let from = 0; ; from += COLLECTION_PAGE_SIZE) {
+    const { data, error } = await page(from, from + COLLECTION_PAGE_SIZE - 1);
+    if (error) throw schemaError(error);
+    const rows = (data || []) as T[];
+    out.push(...rows);
+    if (rows.length < COLLECTION_PAGE_SIZE) return out;
+  }
+}
+
+/** Ids handed to `in (...)` per request, so the URL stays short. */
+const ID_CHUNK = 150;
+
+/**
+ * Brings a collection already in memory up to date by downloading only what changed: rows written since the newest one held,
+ * plus a row count. Only when the count shows that rows were deleted (or missed) is the list of ids read, never the documents.
+ */
+async function syncCollection(name: string): Promise<CollectionRow[]> {
+  const uid = await requireUid();
+  if (!collectionCache.has(name)) await restoreSaved(name);
+  const rows = collectionCache.get(name);
+  let newest = -Infinity;
+  if (rows) for (const row of rows.values()) newest = Math.max(newest, stampOf(row));
+  if (!rows || !Number.isFinite(newest)) {
+    const fresh = await fetchCollection(name);
+    schedulePersist(name);
+    return fresh;
+  }
+
+  const since = new Date(newest - DELTA_OVERLAP_MS).toISOString();
+  const base = () => supabase.from('merchant_documents');
+  const [changed, counted] = await Promise.all([
+    fetchPaged<CollectionRow>((from, to) => base()
+      .select('doc_id, data, updated_at')
+      .eq('user_id', uid)
+      .eq('collection', name)
+      .gte('updated_at', since)
+      .order('doc_id', { ascending: true })
+      .range(from, to)),
+    base().select('doc_id', { count: 'exact', head: true }).eq('user_id', uid).eq('collection', name),
+  ]);
+  if (counted.error) throw schemaError(counted.error);
+
+  // Realtime may have applied a newer copy while this was downloading; never go back to an older one.
+  const keep = (row: CollectionRow) => {
+    const current = rows.get(row.doc_id);
+    if (!current || stampOf(row) >= stampOf(current)) rows.set(row.doc_id, row);
+  };
+  changed.forEach(keep);
+
+  if (rows.size !== counted.count) {
+    const ids = await fetchPaged<{ doc_id: string }>((from, to) => base()
+      .select('doc_id')
+      .eq('user_id', uid)
+      .eq('collection', name)
+      .order('doc_id', { ascending: true })
+      .range(from, to));
+    const live = new Set(ids.map((r) => r.doc_id));
+    // Rows that arrived by realtime during this refresh are newer than `newest` and stay.
+    for (const [id, row] of rows) if (!live.has(id) && stampOf(row) <= newest) rows.delete(id);
+    const missing = [...live].filter((id) => !rows.has(id));
+    for (let i = 0; i < missing.length; i += ID_CHUNK) {
+      const { data, error } = await base()
+        .select('doc_id, data, updated_at')
+        .eq('user_id', uid)
+        .eq('collection', name)
+        .in('doc_id', missing.slice(i, i + ID_CHUNK));
+      if (error) throw schemaError(error);
+      ((data || []) as CollectionRow[]).forEach(keep);
+    }
+  }
+  schedulePersist(name);
+  return cachedRows(name) || [];
+}
+
 const inflight = new Map<string, Promise<CollectionRow[]>>();
 
 /** Several screens open the same collection at once; they share one download. */
 function sharedFetchCollection(name: string) {
   let pending = inflight.get(name);
   if (!pending) {
-    pending = fetchCollection(name).finally(() => inflight.delete(name));
+    pending = syncCollection(name).finally(() => inflight.delete(name));
     inflight.set(name, pending);
   }
   return pending;
 }
 
-function notify(collectionName: string, mode: 'cached' | 'reload' | 'shared' = 'reload') {
+function notify(collectionName: string, mode: SyncMode = 'fetch') {
   listeners.get(collectionName)?.forEach((listener) => listener(mode));
 }
 
-/** Re-reads every open collection once, after realtime may have missed changes. */
+/** Catches up every open collection once (changes only), after realtime may have missed some. */
 function refreshOpenCollections() {
   for (const name of [...collectionCache.keys()]) if (!listeners.has(name)) collectionCache.delete(name);
-  for (const name of listeners.keys()) notify(name, 'shared');
+  for (const name of listeners.keys()) notify(name, 'fetch');
 }
 
 let windowWatchInstalled = false;
@@ -280,15 +413,18 @@ async function openChannel() {
     .on(
       'postgres_changes',
       { event: '*', schema: 'public', table: 'merchant_documents', filter: `user_id=eq.${uid}` },
-      (payload: { eventType?: string; new?: Partial<CollectionRow> & { collection?: string }; old?: Partial<CollectionRow> & { collection?: string } }) => {
+      (payload: { eventType?: string; new?: Partial<CollectionRow> & { collection?: string; user_id?: string }; old?: Partial<CollectionRow> & { collection?: string; user_id?: string } }) => {
         // REPLICA IDENTITY FULL puts the whole row in the event, so it can be applied without another read.
         if (payload.eventType === 'DELETE') {
+          // Realtime applies neither the filter nor row-level security to deletes: other stores' deletes arrive too.
+          if (payload.old?.user_id !== uid) return;
           const name = payload.old?.collection;
           if (name && payload.old?.doc_id) applyRow(name, payload.old.doc_id, null);
           else if (name) notify(name);
           return;
         }
         const row = payload.new;
+        if (row?.user_id && row.user_id !== uid) return;
         if (row?.collection && row.doc_id && row.data && row.updated_at) {
           applyRow(row.collection, row.doc_id, { doc_id: row.doc_id, data: row.data, updated_at: row.updated_at });
         } else if (row?.collection) {
@@ -322,15 +458,14 @@ export function onSnapshot(
   onError?: (error: any) => void,
 ) {
   let active = true;
-  const emit = async (mode: 'cached' | 'reload' | 'shared' = 'reload') => {
+  const emit = async (mode: SyncMode = 'fetch') => {
     try {
       const cached = mode === 'cached' ? collectionCache.get(ref.collection) : undefined;
       if (ref.kind === 'doc') {
         const row = cached ? cached.get(ref.id) ?? null : await fetchDoc(ref);
         if (active) onNext(new DocumentSnapshot(row));
       } else {
-        const rows = (cached && cachedRows(ref.collection))
-          || await (mode === 'shared' ? sharedFetchCollection(ref.collection) : fetchCollection(ref.collection));
+        const rows = (cached && cachedRows(ref.collection)) || await sharedFetchCollection(ref.collection);
         if (active) onNext(new QuerySnapshot(rows));
       }
     } catch (error) {
@@ -344,7 +479,7 @@ export function onSnapshot(
   set.add(listener);
   listeners.set(ref.collection, set);
   installWindowWatch();
-  void emit(channelLive && collectionCache.has(ref.collection) ? 'cached' : 'shared');
+  void emit(channelLive && collectionCache.has(ref.collection) ? 'cached' : 'fetch');
   void ensureChannel().catch((error) => onError?.(error));
   return () => {
     active = false;

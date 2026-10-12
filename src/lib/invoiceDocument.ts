@@ -1,5 +1,6 @@
 import { appName } from './brand';
 import { formatMoney } from './exchangeRates';
+import { lineQuantityText } from './packs';
 import type { Invoice, InvoiceItem, Product } from '../types';
 
 export function escapeHtml(value: string | number | undefined | null): string {
@@ -98,6 +99,8 @@ export interface InvoicePrintContext {
   businessEmail?: string;
   taxRegistrationNumber?: string;
   companyLogoUrl?: string;
+  /** Present only when the national e-invoicing system accepted this invoice. */
+  einvoice?: { qrDataUrl: string; number?: string };
 }
 
 export function buildInvoicePrintHtml(ctx: InvoicePrintContext): string {
@@ -111,6 +114,7 @@ export function buildInvoicePrintHtml(ctx: InvoicePrintContext): string {
     businessEmail,
     taxRegistrationNumber,
     companyLogoUrl,
+    einvoice,
   } = ctx;
 
   const currency = inv.currency || 'USD';
@@ -138,7 +142,7 @@ export function buildInvoicePrintHtml(ctx: InvoicePrintContext): string {
           <div style="font-weight:700;color:#0f172a">${escapeHtml(item.description)}</div>
           ${sku ? `<div style="font-size:10px;color:#64748b;margin-top:2px;font-family:ui-monospace,monospace">${skuLabel}: ${escapeHtml(sku)}</div>` : ''}
         </td>
-        <td style="padding:10px 12px;border-bottom:1px solid #e2e8f0;text-align:center">${escapeHtml(item.quantity)}</td>
+        <td style="padding:10px 12px;border-bottom:1px solid #e2e8f0;text-align:center">${escapeHtml(lineQuantityText(item, isRtl))}</td>
         <td style="padding:10px 12px;border-bottom:1px solid #e2e8f0;text-align:center;font-family:ui-monospace,monospace">${money(item.unitPrice)}</td>
         <td style="padding:10px 12px;border-bottom:1px solid #e2e8f0;text-align:${isRtl ? 'left' : 'right'};font-family:ui-monospace,monospace;font-weight:700">${money(item.total)}</td>
       </tr>`;
@@ -236,6 +240,15 @@ export function buildInvoicePrintHtml(ctx: InvoicePrintContext): string {
       <div><span>${isRtl ? 'الضريبة' : 'VAT'} (${escapeHtml(vat)}%)</span><span>${money(inv.taxAmount)}</span></div>
       <div class="grand"><span>${isRtl ? 'الإجمالي' : 'Total'}</span><span>${money(inv.totalAmount)}</span></div>
     </div>
+
+    ${einvoice?.qrDataUrl ? `
+    <div style="display:flex;align-items:center;gap:14px;margin-top:24px;padding:12px;border:1px solid #e2e8f0;border-radius:10px">
+      <img src="${escapeHtml(einvoice.qrDataUrl)}" alt="QR" style="width:110px;height:110px" />
+      <div style="font-size:11px;color:#334155">
+        <div style="font-weight:700">${isRtl ? 'فاتورة مسجّلة في نظام الفوترة الوطني الأردني' : "Registered with Jordan's National Invoicing System"}</div>
+        ${einvoice.number ? `<div style="margin-top:4px;font-family:ui-monospace,monospace">${escapeHtml(einvoice.number)}</div>` : ''}
+      </div>
+    </div>` : ''}
 
     <p class="notes">${isRtl ? 'يرجى مراجعة الكميات والمبالغ عند الاستلام.' : 'Please verify quantities and amounts on receipt.'}</p>
 

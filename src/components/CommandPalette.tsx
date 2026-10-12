@@ -10,9 +10,19 @@ interface Props {
   language: Language;
   products: Product[];
   onAction: (action: string, payload?: any) => void;
+  /** Screens this account's role may open; actions leading elsewhere are not offered. */
+  canOpenScreen: (screen: string) => boolean;
 }
 
-export default function CommandPalette({ isOpen, onClose, language, products, onAction }: Props) {
+const ACTION_SCREEN: Record<string, string> = {
+  'new-sale': 'pos',
+  'new-purchase': 'purchases-expenses',
+  'add-product': 'inventory',
+  employees: 'employees',
+  settings: 'settings',
+};
+
+export default function CommandPalette({ isOpen, onClose, language, products, onAction, canOpenScreen }: Props) {
   const t = translations[language];
   const isRtl = language === 'ar';
   const [query, setQuery] = useState('');
@@ -25,16 +35,13 @@ export default function CommandPalette({ isOpen, onClose, language, products, on
   }, [isOpen]);
 
   useEffect(() => {
+    if (!isOpen) return;
     const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
-        e.preventDefault();
-        onClose(); // Toggle if already open or just let the parent handle toggle
-      }
       if (e.key === 'Escape') onClose();
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [onClose]);
+  }, [isOpen, onClose]);
 
   const filteredActions = [
     { id: 'new-sale', icon: <ShoppingCart size={18} />, label: t.newSale, category: t.quickActions },
@@ -42,9 +49,9 @@ export default function CommandPalette({ isOpen, onClose, language, products, on
     { id: 'add-product', icon: <Package size={18} />, label: t.addNewProduct, category: t.quickActions },
     { id: 'employees', icon: <Users size={18} />, label: t.employees, category: t.quickActions },
     { id: 'settings', icon: <Settings size={18} />, label: t.settings, category: t.appPreferences },
-  ].filter(a => a.label.toLowerCase().includes(query.toLowerCase()));
+  ].filter(a => canOpenScreen(ACTION_SCREEN[a.id]) && a.label.toLowerCase().includes(query.toLowerCase()));
 
-  const filteredProducts = products.filter(p => 
+  const filteredProducts = !canOpenScreen('inventory') ? [] : products.filter(p => 
     p.name.toLowerCase().includes(query.toLowerCase()) || 
     p.sku.toLowerCase().includes(query.toLowerCase())
   ).slice(0, 5);

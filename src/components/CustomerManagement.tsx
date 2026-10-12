@@ -24,8 +24,10 @@ import {
 import { Language, Customer, CustomerTransaction, AppSettings, Currency } from '../types';
 import { motion, AnimatePresence } from 'motion/react';
 import { useFirebase } from './FirebaseProvider';
-import { CURRENCY_SYMBOLS, POS_CURRENCY_CODES, currencyDecimals, formatMoney } from '../lib/exchangeRates';
+import { CURRENCY_SYMBOLS, POS_CURRENCY_CODES, currencyDecimals, formatAmount, formatMoney, roundMoney } from '../lib/exchangeRates';
 import CurrencyPicker from './CurrencyPicker';
+import ShowMoreBar from './ui/ShowMoreBar';
+import { useProgressiveList } from '../hooks/useProgressiveList';
 import { matchesQuery, phoneMatches } from '../lib/search';
 import { useScreenSearch } from '../lib/screenSearch';
 import { TactileButton } from './ui/TactileButton';
@@ -123,10 +125,10 @@ export default function CustomerManagement({ language, settings }: Props) {
     addDebt: isRtl ? 'زيادة مديونية' : 'Add Credit/Debit',
     amount: isRtl ? 'المبلغ المالي' : 'Financial Amount',
     note: isRtl ? 'بيان الحركة (ملاحظات)' : 'Transaction Note / Reference',
-    syncVault: isRtl ? 'تسجيل الحركة في الخزنة كإيراد/مصروف مالي للعملة' : 'Log sync write inside Physical Vault as Safe deposit/withdrawal',
+    syncVault: isRtl ? 'يُسجَّل المبلغ المستلم في الخزنة كإيداع' : 'The received amount is deposited in the vault',
     sendMessage: isRtl ? 'إرسال إشعار تذكير' : 'Send Reminder Alert',
     whatsappTitle: isRtl ? 'إرسال رسالة واتساب' : 'Instantly Dispatch WhatsApp Message',
-    waHeader: isRtl ? 'اختر قالب الرسالة لإرساله للعميل على هاتف' : 'Choose prefilled dialogue to dispatch to mobile',
+    waHeader: isRtl ? 'اختر قالب الرسالة لإرسالها إلى العميل عبر واتساب' : 'Choose a message template to send to the customer on WhatsApp',
     selectTemplate: isRtl ? 'قالب المراسلة المفضل' : 'Messaging Template Selection',
     reminderTmpl: isRtl ? 'تذكير ودي بالرصيد المستحق' : 'Friendly Debt Outstanding Reminder',
     statementTmpl: isRtl ? 'تفاصيل الرصيد الحالي' : 'Current Account Statement Notification',
@@ -134,7 +136,7 @@ export default function CustomerManagement({ language, settings }: Props) {
     previewMsg: isRtl ? 'معاينة نص الرسالة الصادرة للواتساب' : 'WhatsApp Outbound Text Preview',
     sendNow: isRtl ? 'إرسال للواتساب الآن' : 'Launch Live WhatsApp Chat',
     confirmDelete: isRtl ? 'هل أنت متأكد من حذف العميل؟ لن يتم مسح بيانات الخزنة التاريخية.' : 'Are you sure you want to purge this customer? Historical safekeep balances remain safe.',
-    noCustomers: isRtl ? 'لا يوجد عملاء مضافين حالياً.' : 'No customer directory accounts registered.',
+    noCustomers: isRtl ? 'لا يوجد عملاء بعد.' : 'No customers yet.',
     noMatchingCustomers: isRtl ? 'لا يوجد عملاء يطابقون خيارات البحث الحالية.' : 'No customer profiles match current parameters.',
   };
 
@@ -156,7 +158,7 @@ export default function CustomerManagement({ language, settings }: Props) {
         let message = sender ? `*كشف حساب - ${sender}*\n\n` : `*كشف حساب*\n\n`;
         message += `المحترم/ة: *${customer.name}*\n`;
         message += `تحية طيبة وبعد، إليكم ملخص حسابكم الحالي حتى تاريخ اليوم:\n\n`;
-        message += `📊 *إجمالي الدين المستحق:* *${customer.totalDebt.toLocaleString()} ${customer.currency}*\n`;
+        message += `📊 *إجمالي الدين المستحق:* *${formatMoney(customer.totalDebt, customer.currency, 'en-US')}*\n`;
         message += `-----------------------------------\n`;
         message += `📜 *آخر العمليات على حسابكم:*\n`;
 
@@ -166,7 +168,7 @@ export default function CustomerManagement({ language, settings }: Props) {
           recentTx.forEach(tx => {
             const typeEmoji = tx.type === 'invoice' ? "➕ فاتورة" : "➖ دفعة مستلمة";
             const dateStr = tx.date ? tx.date.substring(0, 10) : '';
-            message += `${typeEmoji} بتاريخ ${dateStr} بقيمة *${tx.amount.toLocaleString()} ${tx.currency}*\n`;
+            message += `${typeEmoji} بتاريخ ${dateStr} بقيمة *${formatMoney(tx.amount, tx.currency, 'en-US')}*\n`;
             if (tx.notes) {
               message += `   _(البيان: ${tx.notes})_\n`;
             }
@@ -180,7 +182,7 @@ export default function CustomerManagement({ language, settings }: Props) {
         let message = sender ? `*Account Statement - ${sender}*\n\n` : `*Account Statement*\n\n`;
         message += `Dear *${customer.name}*,\n`;
         message += `Please find below a summary of your current account status:\n\n`;
-        message += `📊 *Outstanding Balance:* *${customer.totalDebt.toLocaleString()} ${customer.currency}*\n`;
+        message += `📊 *Outstanding Balance:* *${formatMoney(customer.totalDebt, customer.currency, 'en-US')}*\n`;
         message += `-----------------------------------\n`;
         message += `📜 *Recent Transactions Status:*\n`;
 
@@ -190,7 +192,7 @@ export default function CustomerManagement({ language, settings }: Props) {
           recentTx.forEach(tx => {
             const typeEmoji = tx.type === 'invoice' ? "➕ Credit Invoice" : "➖ Payment Received";
             const dateStr = tx.date ? tx.date.substring(0, 10) : '';
-            message += `${typeEmoji} on ${dateStr} for *${tx.amount.toLocaleString()} ${tx.currency}*\n`;
+            message += `${typeEmoji} on ${dateStr} for *${formatMoney(tx.amount, tx.currency, 'en-US')}*\n`;
             if (tx.notes) {
               message += `   _(Ref: ${tx.notes})_\n`;
             }
@@ -203,13 +205,13 @@ export default function CustomerManagement({ language, settings }: Props) {
       }
     } else {
       return isRtl 
-        ? `الأخوة الكرام في ${customer.name}، نسعد دائماً بخدمتكم${sender ? ` في ${sender}` : ''}. يسعدنا البقاء على تواصل معكم.`
+        ? `الإخوة الكرام في ${customer.name}، نسعد دائماً بخدمتكم${sender ? ` في ${sender}` : ''}. يسعدنا البقاء على تواصل معكم.`
         : `Dear ${customer.name}, thank you for dealing with ${sender || 'us'}. We are always happy to serve you.`;
     }
   };
 
   // Aggregates computed on the fly
-  const filteredCustomers = customers.filter(customer => {
+  const filteredCustomers = React.useMemo(() => customers.filter(customer => {
     const matchesSearch =
       matchesQuery([customer.name, customer.customerId], searchQuery) ||
       phoneMatches(customer.phone, searchQuery);
@@ -222,7 +224,8 @@ export default function CustomerManagement({ language, settings }: Props) {
       (debtFilter === 'CLEAR' && customer.totalDebt <= 0);
 
     return matchesSearch && matchesCurrency && matchesDebt;
-  });
+  }), [customers, searchQuery, currencyFilter, debtFilter]);
+  const customerPage = useProgressiveList(filteredCustomers, `${searchQuery}|${currencyFilter}|${debtFilter}`);
 
   // Calculate currency summaries
   // One independent total per currency (debts of different currencies are never added together)
@@ -255,13 +258,18 @@ export default function CustomerManagement({ language, settings }: Props) {
     setIsModalOpen(true);
   };
 
+  const hasBalance = (customer: Customer) =>
+    roundMoney(Number(customer.totalDebt) || 0, (customer.currency || settings.currency || 'JOD') as Currency) !== 0;
+
   const handleDelete = async (customer: Customer) => {
+    if (hasBalance(customer)) return;
     if (confirm(t.confirmDelete)) {
       try {
         await deleteCustomer(customer.id);
         toast.success(isRtl ? 'تم حذف حساب العميل بنجاح' : 'Customer successfully deleted');
-      } catch (e) {
-        toast.error(isRtl ? 'حدث خطأ أثناء الحذف' : 'Failed to delete customer account');
+      } catch (e: any) {
+        const known = ['customer-has-balance', 'offline', 'aborted', 'schema-missing', 'unauthenticated', 'subscription-required', 'permission-denied'].includes(e?.code);
+        toast.error(known && e?.message ? e.message : (isRtl ? 'حدث خطأ أثناء الحذف' : 'Failed to delete customer account'));
       }
     }
   };
@@ -365,14 +373,23 @@ export default function CustomerManagement({ language, settings }: Props) {
   const handleDeleteLedgerTransaction = async (tx: CustomerTransaction) => {
     const cust = customers.find(c => c.id === tx.customerId);
     if (!cust) return;
+    if (tx.invoiceId || tx.id.startsWith('inv-')) {
+      toast.error(isRtl
+        ? 'هذا القيد ناتج عن فاتورة بيع آجل. احذف الفاتورة نفسها من شاشة الفواتير ليُعكس الدين والمخزون معاً.'
+        : 'This entry comes from a credit sale. Delete the invoice itself so the debt and stock are reversed together.');
+      return;
+    }
 
     // A payment that entered the vault must give the cash back when it is deleted.
     // Entries created before this feature have no vaultRecordId, so they are matched by customer/amount/time.
     const entryTime = new Date(tx.date).getTime();
+    const linkedVaultIds = new Set(customerTransactions.map(c => c.vaultRecordId).filter(Boolean));
+    const txCurrency = tx.currency || cust.currency || 'JOD';
     const reachedVault = tx.type === 'payment' && (
       !!tx.vaultRecordId ||
       (vaultTransactions || []).some(v =>
-        v.source === 'customer_payment' && v.refId === tx.customerId &&
+        v.source === 'customer_payment' && v.refId === tx.customerId && !linkedVaultIds.has(v.id) &&
+        (v.currency || 'JOD') === txCurrency &&
         Math.abs((Number(v.amount) || 0) - tx.amount) < 1e-6 && Math.abs(v.timestamp - entryTime) < 60_000)
     );
 
@@ -387,17 +404,17 @@ export default function CustomerManagement({ language, settings }: Props) {
     if (!confirm(message)) return;
     try {
       await deleteCustomerLedgerTransaction(tx.id, { reverseVault: reachedVault });
-      toast.success(isRtl ? 'تم حذف الحركة وإعادة معايرة المديونية بنجاح' : 'Ledger entry deleted and customer debt recalculated');
+      toast.success(isRtl ? 'حُذفت الحركة وأُعيد حساب المديونية' : 'Ledger entry deleted and customer debt recalculated');
 
       if (selectedLedgerCustomer && selectedLedgerCustomer.id === cust.id) {
         const diff = tx.type === 'invoice' ? -tx.amount : tx.amount;
         setSelectedLedgerCustomer({
           ...selectedLedgerCustomer,
-          totalDebt: Math.max(0, (selectedLedgerCustomer.totalDebt || 0) + diff)
+          totalDebt: roundMoney((selectedLedgerCustomer.totalDebt || 0) + diff, tx.currency || cust.currency)
         });
       }
     } catch (err: any) {
-      if (!err?.notified) toast.error(isRtl ? 'حدث خطأ أثناء حذف الحركة' : 'Failed to delete transaction');
+      if (!err?.notified) toast.error(err?.code && err?.message ? err.message : (isRtl ? 'حدث خطأ أثناء حذف الحركة' : 'Failed to delete transaction'));
     }
   };
 
@@ -576,7 +593,7 @@ export default function CustomerManagement({ language, settings }: Props) {
             layout 
             className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"
           >
-            {filteredCustomers.map((customer, index) => {
+            {customerPage.visible.map((customer, index) => {
               const currentSymbol = symbolOf(customer.currency);
               const hasDebt = customer.totalDebt > 0;
               
@@ -587,7 +604,7 @@ export default function CustomerManagement({ language, settings }: Props) {
                   initial={{ opacity: 0, scale: 0.95 }}
                   animate={{ opacity: 1, scale: 1 }}
                   exit={{ opacity: 0, scale: 0.95 }}
-                  transition={{ duration: 0.25, delay: index * 0.03 }}
+                  transition={{ duration: 0.25, delay: Math.min(index, 12) * 0.03 }}
                   className="bg-white dark:bg-gray-800 rounded-[2.2rem] border border-gray-100 dark:border-gray-700 p-6 shadow-sm hover:shadow-xl dark:shadow-indigo-900/5 hover:border-indigo-100/80 transition-all flex flex-col justify-between group relative overflow-hidden"
                 >
                   
@@ -616,8 +633,10 @@ export default function CustomerManagement({ language, settings }: Props) {
                       </button>
                       <button 
                         onClick={() => handleDelete(customer)}
-                        className="p-2 bg-gray-50 hover:bg-rose-50 dark:bg-gray-700/50 dark:hover:bg-rose-950/40 text-gray-400 hover:text-rose-600 rounded-lg transition-colors cursor-pointer"
-                        title={t.confirmDelete} aria-label={t.confirmDelete}
+                        disabled={hasBalance(customer)}
+                        className="p-2 bg-gray-50 hover:bg-rose-50 dark:bg-gray-700/50 dark:hover:bg-rose-950/40 text-gray-400 hover:text-rose-600 rounded-lg transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-gray-50 disabled:hover:text-gray-400"
+                        title={hasBalance(customer) ? (isRtl ? 'لا يمكن حذف عميل رصيد حسابه غير صفر' : 'A customer with a non-zero balance cannot be deleted') : t.confirmDelete}
+                        aria-label={t.confirmDelete}
                       >
                         <Trash2 size={13} />
                       </button>
@@ -713,6 +732,7 @@ export default function CustomerManagement({ language, settings }: Props) {
                 </motion.div>
               );
             })}
+            <ShowMoreBar isRtl={isRtl} shown={customerPage.shown} total={customerPage.total} pageSize={customerPage.pageSize} onMore={customerPage.showMore} onAll={customerPage.showAll} className="col-span-full" />
           </motion.div>
         ) : (
           <div className="h-[250px] bg-white dark:bg-gray-800 rounded-[2rem] border border-gray-100 dark:border-gray-700 shadow-sm flex flex-col items-center justify-center text-center p-8">
@@ -941,8 +961,7 @@ export default function CustomerManagement({ language, settings }: Props) {
                   />
                 </div>
 
-                {/* Sync to safe box check box */}
-                <div className="p-4 bg-gray-50 dark:bg-gray-900/40 rounded-2xl flex items-start gap-3 border border-gray-100 dark:border-gray-700">
+                {debtAction === 'subtract' && <div className="p-4 bg-gray-50 dark:bg-gray-900/40 rounded-2xl flex items-start gap-3 border border-gray-100 dark:border-gray-700">
                   <input
                     type="checkbox"
                     id="syncVault"
@@ -951,10 +970,10 @@ export default function CustomerManagement({ language, settings }: Props) {
                     className="w-4 h-4 text-indigo-600 focus:ring-indigo-500 border-gray-300 rounded mt-1 accent-indigo-600 cursor-pointer"
                   />
                   <label htmlFor="syncVault" className="text-xs text-gray-500 dark:text-gray-300 select-none cursor-pointer">
-                    <p className="font-bold text-gray-700 dark:text-gray-200">{isRtl ? 'تسجيل في حساب الصندوق/الخزنة' : 'Sync balance with Safe Cash register'}</p>
+                    <p className="font-bold text-gray-700 dark:text-gray-200">{isRtl ? 'تسجيل الحركة في الخزنة' : 'Record in the vault'}</p>
                     <p className="text-[10px] mt-0.5">{t.syncVault}</p>
                   </label>
-                </div>
+                </div>}
 
                 <div className="flex gap-3 pt-4">
                   <TactileButton 
@@ -975,7 +994,7 @@ export default function CustomerManagement({ language, settings }: Props) {
                     {isActionLoading ? (
                       <>
                         <Loader2 className="animate-spin w-4 h-4" />
-                        <span>{isRtl ? 'جاري الحفظ...' : 'Saving...'}</span>
+                        <span>{isRtl ? 'جارٍ الحفظ...' : 'Saving...'}</span>
                       </>
                     ) : (
                       <span>{isRtl ? 'تطبيق المعاملة' : 'Submit Adjustment'}</span>
@@ -1196,10 +1215,13 @@ export default function CustomerManagement({ language, settings }: Props) {
                         {isRtl ? 'إجمالي الدفعات المسددة' : 'Total Paid Received'}
                       </p>
                       <p className="text-lg font-black text-emerald-400 tracking-tight font-mono">
-                        {customerTransactions
-                          .filter(tx => tx.customerId === selectedLedgerCustomer.id && tx.type === 'payment')
-                          .reduce((acc, current) => acc + current.amount, 0)
-                          .toLocaleString()}{' '}
+                        {formatAmount(
+                          customerTransactions
+                            .filter(tx => tx.customerId === selectedLedgerCustomer.id && tx.type === 'payment')
+                            .reduce((acc, current) => acc + current.amount, 0),
+                          selectedLedgerCustomer.currency,
+                          'en-US'
+                        )}{' '}
                         <span className="text-[10px] text-white/50">{selectedLedgerCustomer.currency}</span>
                       </p>
                     </div>
@@ -1209,10 +1231,13 @@ export default function CustomerManagement({ language, settings }: Props) {
                         {isRtl ? 'إجمالي المبيعات بالآجل' : 'Total Invoices Sum'}
                       </p>
                       <p className="text-lg font-black text-amber-400 tracking-tight font-mono">
-                        {customerTransactions
-                          .filter(tx => tx.customerId === selectedLedgerCustomer.id && tx.type === 'invoice')
-                          .reduce((acc, current) => acc + current.amount, 0)
-                          .toLocaleString()}{' '}
+                        {formatAmount(
+                          customerTransactions
+                            .filter(tx => tx.customerId === selectedLedgerCustomer.id && tx.type === 'invoice')
+                            .reduce((acc, current) => acc + current.amount, 0),
+                          selectedLedgerCustomer.currency,
+                          'en-US'
+                        )}{' '}
                         <span className="text-[10px] text-white/50">{selectedLedgerCustomer.currency}</span>
                       </p>
                     </div>
@@ -1304,13 +1329,13 @@ export default function CustomerManagement({ language, settings }: Props) {
 
                               <div className="flex sm:flex-col items-end justify-between w-full sm:w-auto border-t sm:border-t-0 border-white/5 pt-2 sm:pt-0">
                                 <span className={`text-sm font-mono font-black ${isPayment ? 'text-emerald-400' : 'text-rose-400'}`}>
-                                  {isPayment ? '-' : '+'}{tx.amount.toLocaleString(undefined, { minimumFractionDigits: 1 })}{' '}
+                                  {isPayment ? '-' : '+'}{formatAmount(tx.amount, tx.currency, 'en-US')}{' '}
                                   <span className="text-[10px] text-white/70">{tx.currency}</span>
                                 </span>
                                 <div className="flex items-center gap-2 mt-1">
                                   <span className="text-[10px] text-slate-400 font-bold">
                                     {isRtl ? 'الرصيد بعد الحركة:' : 'Balance After:'}{' '}
-                                    <span className="text-white font-mono font-black">{tx.remainingBalanceAfter.toLocaleString()}{' '}{tx.currency}</span>
+                                    <span className="text-white font-mono font-black">{formatAmount(tx.remainingBalanceAfter, tx.currency, 'en-US')}{' '}{tx.currency}</span>
                                   </span>
                                   <button
                                     onClick={() => handleDeleteLedgerTransaction(tx)}

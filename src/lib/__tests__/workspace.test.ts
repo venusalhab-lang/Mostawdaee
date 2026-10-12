@@ -86,6 +86,22 @@ describe('store scope', () => {
     await readOnce('customers');
     expect(scopes).toEqual([OWNER]);
   });
+
+  it('a new device that cannot reach the server waits instead of opening an empty store of its own', async () => {
+    vi.useFakeTimers();
+    try {
+      context = { data: null, error: { message: 'TypeError: Failed to fetch' } };
+      const read = readOnce('inventory');
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(scopes).toEqual([]);
+      context = { data: memberContext, error: null };
+      await vi.advanceTimersByTimeAsync(10000);
+      await read;
+      expect(scopes).toEqual([OWNER]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('team context', () => {
@@ -120,7 +136,7 @@ describe('role permissions', () => {
     for (const screen of ['dashboard', 'inventory', 'vault', 'purchases-expenses', 'profits-dashboard', 'cheques', 'inventory-audit']) {
       expect(canOpenScreen('manager', screen)).toBe(true);
     }
-    for (const screen of ['employees', 'google-drive', 'admin-dashboard']) expect(canOpenScreen('manager', screen)).toBe(false);
+    for (const screen of ['employees', 'accounting', 'google-drive', 'admin-dashboard']) expect(canOpenScreen('manager', screen)).toBe(false);
     expect(can('manager', 'delete_records')).toBe(true);
     expect(can('manager', 'manage_team')).toBe(false);
     expect(can('manager', 'billing')).toBe(false);

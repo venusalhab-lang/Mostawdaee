@@ -4,6 +4,9 @@ import { formatMoney } from './exchangeRates';
 import { computeStockStatus } from './stock';
 import { normalizeSearchText, rankMatches } from './search';
 import { readVaultBalances } from './vaultMath';
+import { arCount } from './arabicPlural';
+
+const AR_INVOICES = { one: 'فاتورة واحدة', two: 'فاتورتان', few: '{n} فواتير', many: '{n} فاتورة', other: '{n} فاتورة' };
 
 export interface AssistantData {
   products: Product[];
@@ -133,7 +136,7 @@ export function answerLocally(query: string, data: AssistantData, lang: 'ar' | '
     }
     const lines = [...totals].map(([code, sum]) => `- **${money(sum, code)}**`);
     const top = debtors.slice(0, 10).map((c) => `- ${c.name}: **${money(c.totalDebt, isCurrency(c.currency) ? c.currency : data.defaultCurrency)}**`);
-    const more = debtors.length > 10 ? [ar ? `و${debtors.length - 10} زبائن آخرين.` : `Plus ${debtors.length - 10} more.`] : [];
+    const more = debtors.length > 10 ? [ar ? `و${arCount(debtors.length - 10, { one: 'زبون آخر', two: 'زبونان آخران', few: '{n} زبائن آخرون', many: '{n} زبوناً آخر', other: '{n} زبون آخر' })}.` : `Plus ${debtors.length - 10} more.`] : [];
     return [
       ar ? `**ديون قائمة على ${debtors.length} من الزبائن**، مجموعها لكل عملة:` : `**${debtors.length} customers owe money**, totals per currency:`,
       ...lines,
@@ -161,9 +164,9 @@ export function answerLocally(query: string, data: AssistantData, lang: 'ar' | '
       return `- ${p.name}${p.sku ? ` (${p.sku})` : ''}: **${label}**`;
     });
     return [
-      ar ? `**${flagged.length} أصناف تحتاج متابعة:** ${out} نافد، و${flagged.length - out} تحت حد التنبيه.` : `**${flagged.length} products need attention:** ${out} out, ${flagged.length - out} below alert level.`,
+      ar ? `**${arCount(flagged.length, { one: 'صنف واحد يحتاج متابعة', two: 'صنفان يحتاجان متابعة', few: '{n} أصناف تحتاج متابعة', many: '{n} صنفاً تحتاج متابعة', other: '{n} صنف تحتاج متابعة' })}:** ${out} نافد، و${flagged.length - out} تحت حد التنبيه.` : `**${flagged.length} products need attention:** ${out} out, ${flagged.length - out} below alert level.`,
       ...rows,
-      ...(flagged.length > 12 ? [ar ? `و${flagged.length - 12} أصناف أخرى في شاشة المنتجات.` : `Plus ${flagged.length - 12} more on the Products screen.`] : []),
+      ...(flagged.length > 12 ? [ar ? `و${arCount(flagged.length - 12, { one: 'صنف آخر', two: 'صنفان آخران', few: '{n} أصناف أخرى', many: '{n} صنفاً آخر', other: '{n} صنف آخر' })} في شاشة المنتجات.` : `Plus ${flagged.length - 12} more on the Products screen.`] : []),
     ].join('\n');
   }
 
@@ -179,8 +182,8 @@ export function answerLocally(query: string, data: AssistantData, lang: 'ar' | '
     const rows = summarizeSales(data.invoices, now);
     if (!rows.length) return ar ? '**لا مبيعات مسجلة هذا الشهر.**' : '**No sales recorded this month.**';
     const today = rows.filter((r) => r.todayCount > 0)
-      .map((r) => `- **${money(r.todayTotal, r.currency)}** (${r.todayCount} ${ar ? 'فاتورة' : 'invoices'})`);
-    const month = rows.map((r) => `- **${money(r.monthTotal, r.currency)}** (${r.monthCount} ${ar ? 'فاتورة' : 'invoices'})`);
+      .map((r) => `- **${money(r.todayTotal, r.currency)}** (${ar ? arCount(r.todayCount, AR_INVOICES) : `${r.todayCount} invoices`})`);
+    const month = rows.map((r) => `- **${money(r.monthTotal, r.currency)}** (${ar ? arCount(r.monthCount, AR_INVOICES) : `${r.monthCount} invoices`})`);
     return [
       ar ? '**مبيعات اليوم:**' : '**Today:**',
       ...(today.length ? today : [ar ? '- لا مبيعات اليوم بعد.' : '- No sales yet today.']),
@@ -199,7 +202,7 @@ export function answerLocally(query: string, data: AssistantData, lang: 'ar' | '
       .sort((a, b) => a.margin - b.margin);
     const lines: string[] = [];
     if (thin.length) {
-      lines.push(ar ? `**${thin.length} أصناف هامش ربحها أقل من 15%:**` : `**${thin.length} products have a margin under 15%:**`);
+      lines.push(ar ? `**${arCount(thin.length, { one: 'صنف واحد هامش ربحه', two: 'صنفان هامش ربحهما', few: '{n} أصناف هامش ربحها', many: '{n} صنفاً هامش ربحها', other: '{n} صنف هامش ربحها' })} أقل من 15%:**` : `**${thin.length} products have a margin under 15%:**`);
       for (const { p, margin } of thin.slice(0, 10)) {
         const code = productCurrency(p, data.defaultCurrency);
         lines.push(`- ${p.name}: ${ar ? 'تكلفة' : 'cost'} ${money(p.unitCost, code)}، ${ar ? 'بيع' : 'price'} ${money(p.sellingPrice, code)} — **${(margin * 100).toFixed(1)}%**${margin < 0 ? (ar ? ' (يُباع بخسارة)' : ' (sold at a loss)') : ''}`);
@@ -208,7 +211,7 @@ export function answerLocally(query: string, data: AssistantData, lang: 'ar' | '
       lines.push(ar ? `**كل الأصناف المسعّرة (${priced.length}) هامشها 15% أو أكثر.**` : `**All ${priced.length} priced products have a margin of 15% or more.**`);
     }
     if (unpriced.length) {
-      lines.push('', ar ? `**${unpriced.length} أصناف بلا سعر بيع**، لا يمكن حساب ربحها.` : `**${unpriced.length} products have no selling price**, so their margin is unknown.`);
+      lines.push('', ar ? `**${arCount(unpriced.length, { one: 'صنف واحد', two: 'صنفان', few: '{n} أصناف', many: '{n} صنفاً', other: '{n} صنف' })} بلا سعر بيع**، لا يمكن حساب ربحها.` : `**${unpriced.length} products have no selling price**, so their margin is unknown.`);
     }
     return lines.length ? lines.join('\n') : (ar ? 'لا توجد أصناف لحساب الهوامش.' : 'No products to compute margins.');
   }
@@ -221,7 +224,7 @@ export function answerLocally(query: string, data: AssistantData, lang: 'ar' | '
         const code = productCurrency(p, data.defaultCurrency);
         return `- **${p.name}**${p.sku ? ` (${p.sku})` : ''}: ${ar ? 'الكمية' : 'qty'} **${p.quantity}**، ${ar ? 'سعر البيع' : 'price'} ${p.sellingPrice > 0 ? money(p.sellingPrice, code) : (ar ? 'غير محدد' : 'not set')}`;
       });
-      return [...rows, ...(total > items.length ? [ar ? `و${total - items.length} نتائج أخرى.` : `Plus ${total - items.length} more.`] : [])].join('\n');
+      return [...rows, ...(total > items.length ? [ar ? `و${arCount(total - items.length, { one: 'نتيجة أخرى', two: 'نتيجتان أخريان', few: '{n} نتائج أخرى', many: '{n} نتيجة أخرى', other: '{n} نتيجة أخرى' })}.` : `Plus ${total - items.length} more.`] : [])].join('\n');
     }
   }
 

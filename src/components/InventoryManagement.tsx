@@ -1,4 +1,5 @@
 import { printHtmlDocument } from '../lib/printHtml';
+import { INVENTORY_INTENT_EVENT, takeInventoryIntent } from '../lib/inventoryIntent';
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { 
   Package, 
@@ -42,19 +43,24 @@ import { TactileButton } from './ui/TactileButton';
 import { useSuccessCelebration } from '../hooks/useSuccessCelebration';
 import { sounds } from '../lib/sounds';
 import { matchesQuery } from '../lib/search';
+import { arCount } from '../lib/arabicPlural';
 import { useScreenSearch } from '../lib/screenSearch';
 import BarcodeScannerScanner from './ui/BarcodeScannerScanner';
 import { parseProductRows, ParsedProductRow } from '../lib/productImport';
 import { computeStockStatus, resolveLowStockThreshold, isExpiryCritical, isExpired } from '../lib/stock';
+import { formatPackStock, isValidPackSize, packFields, packIssues, suggestedPackPrice, unitPriceInPack, lineUnits, type PackIssue } from '../lib/packs';
+import { sameSku, skuOwner } from '../lib/productLookup';
 import { CURRENCY_SYMBOLS, buildUsdUnitRates, convertMoney, formatMoney, readCachedLiveRates, roundMoney, POS_CURRENCY_CODES } from '../lib/exchangeRates';
 import CurrencyPicker from './CurrencyPicker';
+
+const PRODUCT_FORMS = { one: 'منتج واحد', two: 'منتجين', few: '{n} منتجات', many: '{n} منتجاً', other: '{n} منتج' };
 
 interface Props {
   language: Language;
   products: Product[];
   settings?: AppSettings;
   onAddProduct: (p: Product, options?: { reason?: string }) => void | Promise<void>;
-  onUpdateProduct: (p: Product, options?: { reason?: string; baseQuantity?: number }) => void | Promise<void>;
+  onUpdateProduct: (p: Product, options?: { reason?: string; baseQuantity?: number; baseProduct?: Product }) => void | Promise<void>;
   onDeleteProduct: (id: string) => void | Promise<void>;
   transactions: Invoice[];
 }
@@ -224,6 +230,10 @@ function ProductRow({
                 : 'text-slate-800 dark:text-slate-200'
           }`}>
             {product.quantity}
+            {(() => {
+              const packs = formatPackStock(product.quantity, product, isRtl);
+              return packs ? <span className="block text-[10px] font-bold text-slate-400 whitespace-nowrap">{packs}</span> : null;
+            })()}
           </span>
           
           <button 
@@ -294,6 +304,7 @@ export default function InventoryManagement({
   
   const { warehouses = [], stockMovements = [] } = useFirebase();
   const [stockReason, setStockReason] = useState('');
+  const [sellByPack, setSellByPack] = useState(false);
 
   // Pagination ("show more") so big catalogues stay fast
   const PAGE_SIZE = 50;
@@ -313,7 +324,7 @@ export default function InventoryManagement({
     nameOnly: isRtl ? 'اسم المنتج' : 'Item Name',
     barcodeOnly: isRtl ? 'الباركود SKU' : 'SKU/Barcode',
     categoryOnly: isRtl ? 'التصنيف' : 'Category',
-    advancedSettings: isRtl ? 'خيارات الفلترة والبحث المتقدمة' : 'Advanced Search & Filters',
+    advancedSettings: isRtl ? 'خيارات التصفية والبحث المتقدمة' : 'Advanced Search & Filters',
     priceRange: isRtl ? 'نطاق سعر البيع' : 'Selling Price Range',
     min: isRtl ? 'الأدنى' : 'Min',
     max: isRtl ? 'الأقصى' : 'Max',
@@ -323,7 +334,7 @@ export default function InventoryManagement({
     expiryDateStatus: isRtl ? 'حالة تاريخ الصلاحية' : 'Expiry Date Status',
     allExpiries: isRtl ? 'كل تواريخ الصلاحية' : 'All Expiry States',
     hasExpiry: isRtl ? 'يملك تاريخ صلاحية' : 'Has Expiry Date',
-    criticalExpiry: isRtl ? 'موشك على الانتهاء (< 6 أشهر)' : 'Critical Expiry (< 6 Months)',
+    criticalExpiry: isRtl ? 'ينتهي خلال أقل من 6 أشهر' : 'Expires within 6 months',
     noExpiry: isRtl ? 'لا يملك تاريخ صلاحية' : 'No Expiry Date',
     resultsCount: (found: number, total: number) => isRtl 
       ? `🔍 تم العثور على ${found} صنف من أصل ${total}` 
@@ -408,25 +419,22 @@ export default function InventoryManagement({
   };
 
   useEffect(() => {
-    const handleOpenModal = () => {
+    const handleIntent = () => {
+      const intent = takeInventoryIntent();
+      if (!intent) return;
+      if (intent.type === 'view') {
+        handleViewProduct(intent.product);
+        return;
+      }
       setEditingProduct(null);
       setNewProduct(initialFormState);
+      setSellByPack(false);
       setIsModalOpen(true);
     };
 
-    const handleViewProductEvent = (event: Event) => {
-      const customEvent = event as CustomEvent<Product>;
-      if (customEvent?.detail && typeof customEvent.detail === 'object') {
-        handleViewProduct(customEvent.detail);
-      }
-    };
-
-    window.addEventListener('open-add-product', handleOpenModal);
-    window.addEventListener('view-product', handleViewProductEvent);
-    return () => {
-      window.removeEventListener('open-add-product', handleOpenModal);
-      window.removeEventListener('view-product', handleViewProductEvent);
-    };
+    handleIntent();
+    window.addEventListener(INVENTORY_INTENT_EVENT, handleIntent);
+    return () => window.removeEventListener(INVENTORY_INTENT_EVENT, handleIntent);
   }, []);
 
   const [sortConfig, setSortConfig] = useState<{ key: keyof Product; direction: 'asc' | 'desc' }>({ key: 'name', direction: 'asc' });
@@ -579,7 +587,7 @@ export default function InventoryManagement({
   const statusText = (p: Product) => {
     const st = computeStockStatus(p.quantity, p.lowStockThreshold, lowStockDefault);
     return isRtl
-      ? (st === 'Out of Stock' ? 'نفذت الكمية' : st === 'Low Stock' ? 'منخفض' : 'متوفر')
+      ? (st === 'Out of Stock' ? 'نفدت الكمية' : st === 'Low Stock' ? 'منخفض' : 'متوفر')
       : st;
   };
 
@@ -752,7 +760,7 @@ export default function InventoryManagement({
           </table>
 
           <div class="footer">
-            ${isRtl ? 'نظام مستودعي لإدارة المستودعات والحسابات الشاملة (تقرير إلكتروني موثق)' : 'Mostawdaee Enterprise ERP System - Certified Account Audit PDF'}
+            ${isRtl ? 'تقرير المخزون – مستودعي' : 'Inventory report – Mostawdaee'}
           </div>
         </body>
         </html>
@@ -790,9 +798,30 @@ export default function InventoryManagement({
     if (quantity < 0 || unitCost < 0 || sellingPrice < 0) return fail('لا يمكن إدخال قيم سالبة', 'Values cannot be negative');
     if (newProduct.lowStockThreshold !== undefined && Number(newProduct.lowStockThreshold) < 0) return fail('حد نقص المخزون لا يمكن أن يكون سالباً', 'Low-stock level cannot be negative');
 
-    const duplicate = products.find(p => p.id !== editingProduct?.id && (p.sku || '').trim().toLowerCase() === sku.toLowerCase());
+    const duplicate = skuOwner(products, sku, editingProduct, newProduct.warehouseId);
     if (duplicate) {
       return fail(`الباركود مستخدم مسبقاً للمنتج: ${duplicate.name}`, `This SKU is already used by: ${duplicate.name}`);
+    }
+    const packOwner = products.find((p) => p.id !== editingProduct?.id && !sameSku(p.sku, sku) && sameSku(p.packBarcode, sku));
+    if (packOwner) {
+      return fail(`الباركود مستخدم كباركود عبوة للمنتج: ${packOwner.name}`, `This barcode is the pack barcode of: ${packOwner.name}`);
+    }
+
+    const packSize = Number(newProduct.packSize);
+    const packInput = {
+      ...newProduct,
+      sku,
+      packPrice: newProduct.packPrice ?? suggestedPackPrice(sellingPrice, packSize),
+    };
+    if (sellByPack) {
+      const PACK_ISSUE_TEXT: Record<PackIssue, [string, string]> = {
+        pack_size: [`عدد الوحدات في العبوة يجب أن يكون رقماً صحيحاً من 2 إلى 10,000`, 'Units per pack must be a whole number from 2 to 10,000'],
+        pack_price: ['سعر العبوة يجب أن يكون أكبر من صفر', 'Pack price must be greater than zero'],
+        pack_barcode_same: ['باركود العبوة يجب أن يختلف عن باركود الوحدة', 'The pack barcode must differ from the unit barcode'],
+        pack_barcode_taken: ['باركود العبوة مستخدم لمنتج آخر', 'The pack barcode is used by another product'],
+      };
+      const issue = packIssues(packInput, products.filter((p) => p.id !== editingProduct?.id))[0];
+      if (issue) return fail(...PACK_ISSUE_TEXT[issue]);
     }
 
     try {
@@ -823,13 +852,15 @@ export default function InventoryManagement({
         warehouseId: newProduct.warehouseId || '',
         baseCostPrice: newProduct.baseCostPrice || undefined,
         taxRate: newProduct.taxRate ?? undefined,
-        additionalCosts: newProduct.additionalCosts || undefined
+        additionalCosts: newProduct.additionalCosts || undefined,
+        ...packFields(sellByPack, packInput),
       };
 
       if (editingProduct) {
         await onUpdateProduct(productToSave, {
           reason: stockReason || (isRtl ? 'تعديل من نموذج المنتج' : 'Edited from product form'),
           baseQuantity: Number(editingProduct.quantity) || 0,
+          baseProduct: editingProduct,
         });
       } else {
         await onAddProduct(productToSave, { reason: isRtl ? 'رصيد افتتاحي' : 'Opening stock' });
@@ -841,6 +872,7 @@ export default function InventoryManagement({
       setShowSuccessVisual(true);
       setEditingProduct(null);
       setNewProduct(initialFormState);
+      setSellByPack(false);
       setStockReason('');
       
       setTimeout(() => {
@@ -896,12 +928,19 @@ export default function InventoryManagement({
       }
 
       const parsed = parseProductRows(sheetRows, baseCurrency, isRtl);
-      const bySku = new Map(products.map(p => [(p.sku || '').trim().toLowerCase(), p]));
       const creates: Product[] = [];
       const updates: Product[] = [];
 
       parsed.rows.forEach((row: ParsedProductRow) => {
-        const existing = bySku.get(row.sku.toLowerCase());
+        const matches = products.filter(p => sameSku(p.sku, row.sku));
+        if (matches.length > 1) {
+          // One file quantity can't be split between warehouses; updating one row would double-count the others.
+          parsed.errors.push(isRtl
+            ? `الباركود ${row.sku}: الصنف موزّع على أكثر من مستودع؛ عدّل كمية كل مستودع من شاشة المخزون.`
+            : `Barcode ${row.sku}: this product is split across warehouses; update each warehouse's quantity in the inventory screen.`);
+          return;
+        }
+        const existing = matches[0];
         const quantity = row.quantity ?? existing?.quantity ?? 0;
         const unitCost = row.unitCost ?? existing?.unitCost ?? 0;
         const base: Product = {
@@ -963,9 +1002,9 @@ export default function InventoryManagement({
     setImportPlan(null);
     if (failed === 0) {
       triggerCelebration();
-      toast.success(isRtl ? `تم استيراد ${ok} منتج بنجاح` : `${ok} products imported successfully`);
+      toast.success(isRtl ? `تم استيراد ${arCount(ok, PRODUCT_FORMS)} بنجاح` : `${ok} products imported successfully`);
     } else {
-      toast.warning(isRtl ? `تم استيراد ${ok} منتج وفشل ${failed}` : `${ok} imported, ${failed} failed`);
+      toast.warning(isRtl ? `تم استيراد ${arCount(ok, PRODUCT_FORMS)} وفشل ${failed}` : `${ok} imported, ${failed} failed`);
     }
   };
 
@@ -1006,6 +1045,7 @@ export default function InventoryManagement({
     setEditingProduct(p);
     setStockReason('');
     setNewProduct(p);
+    setSellByPack(isValidPackSize(p.packSize));
     setIsModalOpen(true);
   };
 
@@ -1021,7 +1061,7 @@ export default function InventoryManagement({
           productId: item.productId,
           action: isSale ? 'sale' : 'purchase',
           changeType: isSale ? 'decrement' : 'increment',
-          quantityDelta: isSale ? -(Number(item.quantity) || 0) : (Number(item.quantity) || 0),
+          quantityDelta: isSale ? -lineUnits(item) : lineUnits(item),
           previousValue: 0,
           newValue: 0,
           timestamp: inv.date,
@@ -1090,6 +1130,7 @@ export default function InventoryManagement({
           onClick={() => {
             setEditingProduct(null);
             setNewProduct(initialFormState);
+            setSellByPack(false);
             setIsModalOpen(true);
           }}
           className="px-6 py-3 rounded-xl bg-cyan-400 text-black hover:bg-cyan-300 transition-all font-black text-xs flex items-center gap-2 shadow-[0_4px_15px_rgba(6,182,212,0.25)] hover:-translate-y-0.5"
@@ -1182,7 +1223,7 @@ export default function InventoryManagement({
               <option value="all" className="dark:bg-[#0c1221]">{isRtl ? 'حسب الحالة' : 'By Status'}</option>
               <option value="in" className="dark:bg-[#0c1221]">{isRtl ? 'متوفر' : t.inStock}</option>
               <option value="low" className="dark:bg-[#0c1221]">{isRtl ? 'نواقص' : t.lowStock}</option>
-              <option value="out" className="dark:bg-[#0c1221]">{isRtl ? 'نفذت الكمية' : t.outOfStock}</option>
+              <option value="out" className="dark:bg-[#0c1221]">{isRtl ? 'نفدت الكمية' : t.outOfStock}</option>
             </select>
           </div>
 
@@ -1198,7 +1239,7 @@ export default function InventoryManagement({
             title={filterT.advancedSettings} aria-label={filterT.advancedSettings}
           >
             <Filter size={14} className={showAdvancedFilters ? 'animate-pulse' : ''} />
-            <span>{isRtl ? 'فلترة متقدمة' : 'Advanced'}</span>
+            <span>{isRtl ? 'تصفية متقدمة' : 'Advanced'}</span>
           </button>
 
           {/* Quick Data Exports */}
@@ -1451,7 +1492,7 @@ export default function InventoryManagement({
                 <tr>
                   <td colSpan={6} className="text-center py-20 text-slate-400 text-xs font-bold uppercase tracking-widest bg-slate-500/[0.02]">
                     <Boxes size={40} className="mx-auto mb-3 text-slate-300 dark:text-slate-700 animate-bounce" />
-                    {isRtl ? 'لا توجد منتجات مطابقة لخيارات الفلترة' : 'No matching items found'}
+                    {isRtl ? 'لا توجد منتجات مطابقة لخيارات التصفية' : 'No matching items found'}
                   </td>
                 </tr>
               )}
@@ -1463,7 +1504,7 @@ export default function InventoryManagement({
           <div className="flex flex-col sm:flex-row items-center justify-between gap-3 px-5 py-3 border-t border-slate-200/40 dark:border-white/5 text-xs font-bold text-slate-500">
             <span>
               {isRtl
-                ? `عرض ${Math.min(visibleCount, filteredProducts.length)} من ${filteredProducts.length} منتج`
+                ? `عرض ${Math.min(visibleCount, filteredProducts.length)} من ${arCount(filteredProducts.length, PRODUCT_FORMS)}`
                 : `Showing ${Math.min(visibleCount, filteredProducts.length)} of ${filteredProducts.length} products`}
             </span>
             {visibleCount < filteredProducts.length && (
@@ -1563,7 +1604,7 @@ export default function InventoryManagement({
                   onClick={confirmImport}
                   className="px-5 py-2.5 rounded-xl text-sm font-black text-white bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 dark:disabled:bg-slate-700/50 disabled:cursor-not-allowed cursor-pointer"
                 >
-                  {isImporting ? (isRtl ? 'جاري الاستيراد...' : 'Importing...') : (isRtl ? `استيراد ${importPlan.creates.length + importPlan.updates.length} منتج` : `Import ${importPlan.creates.length + importPlan.updates.length} products`)}
+                  {isImporting ? (isRtl ? 'جارٍ الاستيراد...' : 'Importing...') : (isRtl ? `استيراد ${arCount(importPlan.creates.length + importPlan.updates.length, PRODUCT_FORMS)}` : `Import ${importPlan.creates.length + importPlan.updates.length} products`)}
                 </button>
               </div>
             </motion.div>
@@ -1764,19 +1805,60 @@ export default function InventoryManagement({
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
                   <div className="space-y-1.5">
                     <label className="text-sm font-bold text-slate-700 dark:text-slate-300">{isRtl ? 'الكمية المتوفرة' : t.stock}</label>
-                    <div className="relative">
-                      <input 
-                        required 
-                        type="number" 
-                        min={0}
-                        step="any"
-                        value={newProduct.quantity !== undefined ? newProduct.quantity : 0}
-                        onChange={e => setNewProduct({...newProduct, quantity: Number(e.target.value)})}
-                        onFocus={e => e.target.select()}
-                        className="w-full px-4 py-3 bg-white dark:bg-white/[0.02] border border-slate-200 dark:border-white/10 rounded-xl focus:border-blue-500 outline-none transition-all dark:text-white font-mono font-bold text-lg"
-                      />
-                      <ArrowRightLeft className={`absolute top-1/2 -translate-y-1/2 ${isRtl ? 'left-4' : 'right-4'} text-slate-400`} size={16} />
-                    </div>
+                    {sellByPack && isValidPackSize(newProduct.packSize) ? (() => {
+                      const size = Number(newProduct.packSize);
+                      const total = Number(newProduct.quantity) || 0;
+                      const packs = Math.floor(total / size + 1e-9);
+                      const loose = Math.round((total - packs * size) * 1000) / 1000;
+                      const setQty = (p: number, l: number) => setNewProduct({ ...newProduct, quantity: Math.max(0, p) * size + Math.max(0, l) });
+                      const box = newProduct.packName?.trim() || (isRtl ? 'عبوة' : 'pack');
+                      const unit = newProduct.unitName?.trim() || (isRtl ? 'وحدة' : 'unit');
+                      return (
+                        <div className="space-y-1.5">
+                          <div className="grid grid-cols-2 gap-2">
+                            <label className="relative block">
+                              <input
+                                type="number" min={0} step={1}
+                                value={packs}
+                                onChange={e => setQty(Math.floor(Number(e.target.value) || 0), loose)}
+                                onFocus={e => e.target.select()}
+                                aria-label={box}
+                                className="w-full px-3 py-3 bg-white dark:bg-white/[0.02] border border-slate-200 dark:border-white/10 rounded-xl focus:border-blue-500 outline-none dark:text-white font-mono font-bold text-lg"
+                              />
+                              <span className={`absolute top-1/2 -translate-y-1/2 ${isRtl ? 'left-3' : 'right-3'} text-xs font-bold text-slate-400`}>{box}</span>
+                            </label>
+                            <label className="relative block">
+                              <input
+                                type="number" min={0} step="any"
+                                value={loose}
+                                onChange={e => setQty(packs, Number(e.target.value) || 0)}
+                                onFocus={e => e.target.select()}
+                                aria-label={unit}
+                                className="w-full px-3 py-3 bg-white dark:bg-white/[0.02] border border-slate-200 dark:border-white/10 rounded-xl focus:border-blue-500 outline-none dark:text-white font-mono font-bold text-lg"
+                              />
+                              <span className={`absolute top-1/2 -translate-y-1/2 ${isRtl ? 'left-3' : 'right-3'} text-xs font-bold text-slate-400`}>{unit}</span>
+                            </label>
+                          </div>
+                          <p className="text-[11px] font-bold text-slate-500">
+                            {isRtl ? `المجموع: ${total} ${unit}` : `Total: ${total} ${unit}`}
+                          </p>
+                        </div>
+                      );
+                    })() : (
+                      <div className="relative">
+                        <input 
+                          required 
+                          type="number" 
+                          min={0}
+                          step="any"
+                          value={newProduct.quantity !== undefined ? newProduct.quantity : 0}
+                          onChange={e => setNewProduct({...newProduct, quantity: Number(e.target.value)})}
+                          onFocus={e => e.target.select()}
+                          className="w-full px-4 py-3 bg-white dark:bg-white/[0.02] border border-slate-200 dark:border-white/10 rounded-xl focus:border-blue-500 outline-none transition-all dark:text-white font-mono font-bold text-lg"
+                        />
+                        <ArrowRightLeft className={`absolute top-1/2 -translate-y-1/2 ${isRtl ? 'left-4' : 'right-4'} text-slate-400`} size={16} />
+                      </div>
+                    )}
                   </div>
                   
                   <div className="space-y-1.5">
@@ -1859,6 +1941,73 @@ export default function InventoryManagement({
                   </div>
                 </div>
 
+                {/* Selling by the pack: stock stays in single units, a pack is N units at its own price */}
+                <div className="p-5 rounded-2xl border border-slate-200 dark:border-white/5 space-y-4">
+                  <label className="flex items-center justify-between gap-3 cursor-pointer">
+                    <span className="flex flex-col">
+                      <span className="text-sm font-bold text-slate-700 dark:text-slate-300">{isRtl ? 'يُباع أيضاً بالجملة (صندوق / كرتونة)' : 'Also sold by the pack (box / carton)'}</span>
+                      <span className="text-[11px] text-slate-400 font-bold">
+                        {isRtl ? 'المخزون يبقى بالوحدة؛ بيع صندوق ينقص عدد وحداته تلقائياً.' : 'Stock stays in units; selling a pack takes its units out automatically.'}
+                      </span>
+                    </span>
+                    <input
+                      type="checkbox"
+                      checked={sellByPack}
+                      onChange={e => setSellByPack(e.target.checked)}
+                      className="w-5 h-5 accent-indigo-600 shrink-0"
+                    />
+                  </label>
+
+                  {sellByPack && (() => {
+                    const size = Number(newProduct.packSize);
+                    const unitPrice = Number(newProduct.sellingPrice) || 0;
+                    const suggested = isValidPackSize(size) ? suggestedPackPrice(unitPrice, size) : 0;
+                    const price = newProduct.packPrice ?? suggested;
+                    const curr = newProduct.currency || settings?.currency || 'JOD';
+                    const field = 'w-full px-3 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-white/10 rounded-xl focus:border-blue-500 outline-none font-bold text-sm dark:text-white';
+                    return (
+                      <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                        <div className="space-y-1.5">
+                          <label className="text-[11px] font-bold text-slate-600 dark:text-slate-300">{isRtl ? 'اسم الوحدة' : 'Unit name'}</label>
+                          <input type="text" maxLength={20} value={newProduct.unitName || ''} placeholder={isRtl ? 'علبة، حبة، قطعة' : 'can, piece'}
+                            onChange={e => setNewProduct({ ...newProduct, unitName: e.target.value })} className={field} />
+                        </div>
+                        <div className="space-y-1.5">
+                          <label className="text-[11px] font-bold text-slate-600 dark:text-slate-300">{isRtl ? 'اسم العبوة' : 'Pack name'}</label>
+                          <input type="text" maxLength={20} value={newProduct.packName || ''} placeholder={isRtl ? 'صندوق، كرتونة' : 'box, carton'}
+                            onChange={e => setNewProduct({ ...newProduct, packName: e.target.value })} className={field} />
+                        </div>
+                        <div className="space-y-1.5">
+                          <label className="text-[11px] font-bold text-slate-600 dark:text-slate-300">{isRtl ? 'عدد الوحدات في العبوة' : 'Units per pack'}</label>
+                          <input type="number" min={2} max={10000} step={1} required value={newProduct.packSize ?? ''} placeholder="20"
+                            onChange={e => setNewProduct({ ...newProduct, packSize: e.target.value ? Number(e.target.value) : undefined })}
+                            className={`${field} font-mono`} />
+                        </div>
+                        <div className="space-y-1.5">
+                          <label className="text-[11px] font-bold text-slate-600 dark:text-slate-300">{isRtl ? 'سعر العبوة (جملة)' : 'Pack price (wholesale)'}</label>
+                          <input type="number" min={0} step="any" value={newProduct.packPrice ?? ''} placeholder={suggested ? String(suggested) : ''}
+                            onChange={e => setNewProduct({ ...newProduct, packPrice: e.target.value ? Number(e.target.value) : undefined })}
+                            onFocus={e => e.target.select()}
+                            className={`${field} font-mono`} />
+                          {isValidPackSize(size) && price > 0 && (
+                            <p className="text-[10px] font-bold text-slate-400">
+                              {isRtl
+                                ? `الوحدة داخل العبوة: ${formatMoney(unitPriceInPack(price, size), curr)}${unitPrice > 0 ? ` · المفرد: ${formatMoney(unitPrice, curr)}` : ''}`
+                                : `Unit inside the pack: ${formatMoney(unitPriceInPack(price, size), curr)}${unitPrice > 0 ? ` · single: ${formatMoney(unitPrice, curr)}` : ''}`}
+                            </p>
+                          )}
+                        </div>
+                        <div className="space-y-1.5 col-span-2">
+                          <label className="text-[11px] font-bold text-slate-600 dark:text-slate-300">{isRtl ? 'باركود العبوة (اختياري)' : 'Pack barcode (optional)'}</label>
+                          <input type="text" maxLength={64} value={newProduct.packBarcode || ''}
+                            onChange={e => setNewProduct({ ...newProduct, packBarcode: e.target.value })}
+                            className={`${field} font-mono`} />
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </div>
+
                 {/* Optional Financial Cost Audit and breakdown config */}
                 <div className="bg-slate-500/[0.03] dark:bg-slate-500/[0.01] p-5 rounded-2xl border border-slate-200/50 dark:border-white/5 space-y-3">
                   <div className="flex flex-col">
@@ -1926,7 +2075,7 @@ export default function InventoryManagement({
                         <div className="mt-2 text-xs bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 p-3 rounded-xl border border-indigo-500/20 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 font-arabic font-extrabold select-none">
                           <span>
                             {isRtl 
-                              ? `💡 الإجمالي المحتسب: ${calculatedCost.toFixed(2)} ${curr} (${base} أصلي + ${tax}% ضرائب + ${extra} إضافيات)`
+                              ? `💡 الإجمالي المحتسب: \u2066${calculatedCost.toFixed(2)} ${curr}\u2069 (\u2066${base}\u2069 أصلي + \u2066${tax}%\u2069 ضرائب + \u2066${extra}\u2069 إضافيات)`
                               : `💡 Total calculated: ${calculatedCost.toFixed(2)} ${curr} (${base} base + ${tax}% tax + ${extra} overheads)`
                             }
                           </span>
@@ -2046,7 +2195,7 @@ export default function InventoryManagement({
                         className="flex items-center gap-2 px-5 py-2.5 bg-[#0b1329] text-cyan-400 border border-cyan-500/30 font-bold rounded-xl text-sm hover:bg-slate-800 dark:bg-white/5 dark:hover:bg-white/10 transition-all shadow-[0_0_15px_rgba(34,211,238,0.15)] cursor-pointer disabled:opacity-50"
                       >
                         <Check className="w-4 h-4 text-cyan-400" />
-                        <span>{isSubmitting ? (isRtl ? 'جاري الحفظ...' : 'Saving...') : (isRtl ? 'حفظ التعديلات الفورية' : 'Save Immediate Changes')}</span>
+                        <span>{isSubmitting ? (isRtl ? 'جارٍ الحفظ...' : 'Saving...') : (isRtl ? 'حفظ التعديلات الفورية' : 'Save Immediate Changes')}</span>
                       </button>
                     </>
                   ) : (
@@ -2070,7 +2219,7 @@ export default function InventoryManagement({
                               <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                               <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                             </svg>
-                            <span>{isRtl ? 'جاري الحفظ...' : 'Saving...'}</span>
+                            <span>{isRtl ? 'جارٍ الحفظ...' : 'Saving...'}</span>
                           </>
                         ) : (
                           <>
@@ -2117,7 +2266,7 @@ export default function InventoryManagement({
                       {isRtl ? `تدقيق ومراجعة: ${logTarget?.name}` : `Audit & Verify: ${logTarget?.name}`}
                     </h3>
                     <p className="text-[10px] text-slate-400 dark:text-slate-500 font-mono">
-                      SKU: {logTarget?.sku} • {isRtl ? 'العملة الإفتراضية' : 'Default Currency'}: {logTarget?.currency || settings?.currency || 'JOD'}
+                      SKU: {logTarget?.sku} • {isRtl ? 'العملة الافتراضية' : 'Default Currency'}: {logTarget?.currency || settings?.currency || 'JOD'}
                     </p>
                   </div>
                 </div>

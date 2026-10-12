@@ -1,5 +1,6 @@
 import React, { Component, ErrorInfo } from 'react';
 import { AlertTriangle, RefreshCw, RotateCcw } from 'lucide-react';
+import { isChunkLoadError } from '../lib/lazyWithRetry';
 
 interface Props {
   children: React.ReactNode;
@@ -40,6 +41,8 @@ export default class ErrorBoundary extends Component<Props, State> {
     if (!this.state.error) return this.props.children;
 
     const { variant = 'app', isRtl } = this.props;
+    // A screen bundle that failed to download stays failed until the page reloads.
+    const canRetry = variant === 'screen' && !isChunkLoadError(this.state.error);
     const ar = {
       title: 'تعذّر عرض هذه الشاشة',
       body: 'البيانات المحفوظة على الخادم لم تتأثر. ما أدخلته في هذه الشاشة ولم تحفظه قد يضيع.',
@@ -77,7 +80,7 @@ export default class ErrorBoundary extends Component<Props, State> {
             </div>
           )}
           <div className="w-full flex flex-col gap-2">
-            {variant === 'screen' && (
+            {canRetry && (
               <button
                 type="button"
                 onClick={this.retry}
@@ -91,7 +94,7 @@ export default class ErrorBoundary extends Component<Props, State> {
               type="button"
               onClick={this.reload}
               className={`w-full py-3 rounded-2xl font-bold text-sm flex items-center justify-center gap-2 ${
-                variant === 'screen'
+                canRetry
                   ? 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-200 hover:bg-gray-200 dark:hover:bg-gray-600'
                   : 'bg-indigo-600 hover:bg-indigo-700 text-white'
               }`}

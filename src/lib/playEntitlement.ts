@@ -9,6 +9,8 @@ const ENTITLED_STATES = new Set([
 export interface PlayTokenState {
   state: string;
   expiry: string | null;
+  /** The expiry Google reported for this token last time; a refund moves `expiry` back below it. */
+  previousExpiry?: string | null;
 }
 
 export interface CurrentSubscription {
@@ -39,7 +41,8 @@ export function reconcilePlaySubscription(
 ): SubscriptionChange {
   if (!tokens.length) return null;
 
-  const playMax = Math.max(...tokens.map((t) => time(t.expiry)));
+  // A date Play itself once reported is not an owner grant, even after Play moves it back.
+  const playMax = Math.max(...tokens.map((t) => Math.max(time(t.expiry), time(t.previousExpiry))));
   const currentExpiry = time(current?.expiry);
   const ownerGrant = current?.status === 'active' && currentExpiry > playMax && currentExpiry > now;
 

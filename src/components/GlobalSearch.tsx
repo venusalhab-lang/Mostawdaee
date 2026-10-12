@@ -8,6 +8,7 @@ import { loadCheques } from '../lib/chequesStore';
 import { normalizeSearchText, pushRecentSearch, rankMatches, RECENT_SEARCHES_KEY } from '../lib/search';
 import { requestScreenSearch, type ScreenSearchRequest } from '../lib/screenSearch';
 import { readUserCache, writeUserCache } from '../lib/userStorage';
+import { arCount } from '../lib/arabicPlural';
 
 const GROUP_LIMIT = 4;
 const CHEQUES_REFRESH_MS = 15_000;
@@ -85,7 +86,7 @@ function summarizeSuppliers(invoices: readonly Invoice[]): SupplierSummary[] {
 export default function GlobalSearch({ language, inputRef, onNavigate, showShortcutHint }: GlobalSearchProps) {
   const isRtl = language === 'ar';
   const locale = isRtl ? 'ar' : 'en-US';
-  const { products = [], invoices = [], employees = [], customers = [], user } = useFirebase();
+  const { products = [], invoices = [], employees = [], customers = [], user, canOpenScreen } = useFirebase();
   const userId = user?.uid || 'guest';
 
   const [query, setQuery] = useState('');
@@ -105,6 +106,7 @@ export default function GlobalSearch({ language, inputRef, onNavigate, showShort
   }, [userId]);
 
   const refreshCheques = useCallback(async () => {
+    if (!canOpenScreen('cheques')) return;
     if (Date.now() - chequesLoadedAt.current < CHEQUES_REFRESH_MS) return;
     chequesLoadedAt.current = Date.now();
     try {
@@ -113,7 +115,7 @@ export default function GlobalSearch({ language, inputRef, onNavigate, showShort
       // Cheques are optional here: a missing table or signed-out session just hides the group.
       setCheques([]);
     }
-  }, [userId]);
+  }, [userId, canOpenScreen]);
 
   useEffect(() => {
     const onPointerDown = (event: MouseEvent | TouchEvent) => {
@@ -252,7 +254,7 @@ export default function GlobalSearch({ language, inputRef, onNavigate, showShort
         hits: supplierMatches.items.map((s) => ({
           key: `s:${normalizeSearchText(s.name)}`,
           title: s.name,
-          subtitle: isRtl ? `${s.invoiceCount} فاتورة شراء` : `${s.invoiceCount} purchase invoice${s.invoiceCount === 1 ? '' : 's'}`,
+          subtitle: isRtl ? arCount(s.invoiceCount, { one: 'فاتورة شراء واحدة', two: 'فاتورتا شراء', few: '{n} فواتير شراء', many: '{n} فاتورة شراء', other: '{n} فاتورة شراء' }) : `${s.invoiceCount} purchase invoice${s.invoiceCount === 1 ? '' : 's'}`,
           request: { screen: 'invoices', query: s.name },
         })),
       });
@@ -277,8 +279,9 @@ export default function GlobalSearch({ language, inputRef, onNavigate, showShort
       });
     }
 
-    return groups;
-  }, [products, customers, invoicesNewestFirst, cheques, suppliers, employees, isRtl, locale]);
+    // A role only sees results it can open.
+    return groups.filter((group) => canOpenScreen(group.showAll.screen));
+  }, [products, customers, invoicesNewestFirst, cheques, suppliers, employees, isRtl, locale, canOpenScreen]);
 
   const groups = useMemo(() => buildGroups(deferredQuery), [buildGroups, deferredQuery]);
   const totalMatches = groups.reduce((sum, group) => sum + group.total, 0);

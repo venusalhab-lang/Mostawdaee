@@ -6,6 +6,8 @@ import { useFirebase } from './FirebaseProvider';
 import BarcodeScannerScanner from './ui/BarcodeScannerScanner';
 import { formatMoney, roundMoney } from '../lib/exchangeRates';
 import { computeStockStatus } from '../lib/stock';
+import { productsForCode } from '../lib/productLookup';
+import { formatPackStock, productPack, productsForPackCode, splitPacks } from '../lib/packs';
 import {
   auditDifference,
   auditVarianceValue,
@@ -46,7 +48,7 @@ function productCost(product: Product): number {
 
 export default function InventoryAudit({ language, settings }: Props) {
   const isRtl = language === 'ar';
-  const { products, saveProduct, user } = useFirebase();
+  const { products, warehouses, saveProduct, user } = useFirebase();
   const userId = user?.uid || 'guest';
   const [tab, setTab] = useState<'count' | 'archive'>('count');
   const [audit, setAudit] = useState<InventoryAudit>(() => freshAudit(userId));
@@ -66,7 +68,8 @@ export default function InventoryAudit({ language, settings }: Props) {
         if (!cancelled) setArchive(rows);
       })
       .catch((error: Error) => {
-        if (!cancelled) toast.error(error.message || (isRtl ? 'تعذر تحميل سجل الجرد' : 'Could not load stocktakes'));
+        console.error('[InventoryAudit] load failed:', error);
+        if (!cancelled) toast.error(isRtl ? 'تعذر تحميل سجل الجرد. تحقق من الاتصال.' : 'Could not load stocktakes. Check your connection.');
       });
     return () => {
       cancelled = true;
@@ -143,9 +146,17 @@ export default function InventoryAudit({ language, settings }: Props) {
   const scanCode = (raw: string) => {
     const code = raw.trim();
     if (!code) return;
-    const product = catalog.find(
-      (item) => item.sku.trim().toLowerCase() === code.toLowerCase() || item.id === code,
-    );
+    const unitMatches = productsForCode(catalog, code);
+    const matches = unitMatches.length ? unitMatches : productsForPackCode(catalog, code);
+    const product = matches.length === 1 ? matches[0] : undefined;
+    const step = !unitMatches.length && product ? productPack(product)?.size ?? 1 : 1;
+    if (matches.length > 1) {
+      // Counting one shelf into another warehouse's row would show a false surplus and a false shortage.
+      toast.error(isRtl
+        ? 'هذا الباركود موجود في أكثر من مستودع. أضف الصنف من البحث واختر صف المستودع الذي تعدّه، ثم أدخل العدد.'
+        : 'This barcode exists in more than one warehouse. Add the product from search, pick the warehouse row you are counting, then enter the count.');
+      return;
+    }
     if (!product) {
       toast.error(isRtl ? 'لا يوجد صنف بهذا الباركود' : 'No product matches this barcode');
       return;
@@ -162,6 +173,7 @@ export default function InventoryAudit({ language, settings }: Props) {
           currency: product.currency || settings.currency,
         },
         audit.id,
+        step,
       ).lines,
     );
     setBarcode('');
@@ -172,10 +184,16 @@ export default function InventoryAudit({ language, settings }: Props) {
     setLines((prev) =>
       prev.map((line) => {
         if (line.productId !== productId) return line;
-        const nextActual = Number.isFinite(actualQty) ? actualQty : line.actualQty;
-        return { ...line, actualQty: nextActual, difference: auditDifference(line.expectedQty, nextActual) };
+        return { ...line, actualQty, difference: auditDifference(line.expectedQty, actualQty) };
       }),
     );
+  };
+
+  const blankCount = () => {
+    const blank = lines.find((line) => !Number.isFinite(line.actualQty));
+    if (!blank) return false;
+    toast.error(isRtl ? `أدخل العدد الفعلي للصنف «${blank.productName}».` : `Enter the counted quantity for “${blank.productName}”.`);
+    return true;
   };
 
   const persist = async () => {
@@ -193,18 +211,29 @@ export default function InventoryAudit({ language, settings }: Props) {
       toast.error(isRtl ? 'أضف صنفاً واحداً على الأقل' : 'Add at least one product');
       return;
     }
+    if (busy || blankCount()) return;
     setBusy(true);
     try {
       const cloud = await persist();
       if (cloud.cloud) toast.success(isRtl ? 'حُفظت المسودة' : 'Draft saved');
-      else if (cloud.reason === 'failed') toast.error(cloud.message || (isRtl ? 'تعذر حفظ المسودة في السحابة' : 'Could not save the draft'));
+      else if (cloud.reason === 'failed') {
+        console.error('[InventoryAudit] draft save failed:', cloud.message);
+        toast.error(isRtl ? 'تعذر حفظ المسودة في السحابة. حاول مرة أخرى.' : 'Could not save the draft to the cloud. Try again.');
+      }
       else toast.success(isRtl ? 'حُفظت المسودة على هذا الجهاز' : 'Draft saved on this device');
+    } catch {
+      toast.error(isRtl ? 'تعذّر حفظ المسودة. حاول مرة أخرى.' : 'Could not save the draft. Try again.');
     } finally {
       setBusy(false);
     }
   };
 
   const applyAudit = async () => {
+    if (busy) return;
+    if (blankCount()) {
+      setConfirmApply(false);
+      return;
+    }
     const book = Object.fromEntries(catalog.map((product) => [product.id, Number(product.quantity) || 0]));
     const plan = planAuditApply(lines, book);
     if (!plan.ok) {
@@ -223,17 +252,24 @@ export default function InventoryAudit({ language, settings }: Props) {
     try {
       const draftCloud = await persist();
       if (!draftCloud.cloud && draftCloud.reason === 'failed') {
-        toast.error(draftCloud.message || (isRtl ? 'تعذر حفظ الجرد قبل الاعتماد' : 'Could not save the count before applying'));
+        console.error('[InventoryAudit] save before apply failed:', draftCloud.message);
+        toast.error(isRtl ? 'تعذر حفظ الجرد قبل الاعتماد؛ لم يتغيّر المخزون.' : 'Could not save the count before applying; stock was not changed.');
         return;
       }
 
+      const missingLine = plan.lines.find(
+        (line) => line.action === 'update' && line.movement && !catalog.some((item) => item.id === line.productId),
+      );
+      if (missingLine) {
+        toast.error(isRtl ? `الصنف «${missingLine.productName}» لم يعد في المخزون` : `“${missingLine.productName}” is no longer in stock`);
+        return;
+      }
+
+      // From the first stock change on, this count must never be resumed or applied again, even if closing it on the server fails.
+      markLocalCompleted(userId, audit.id);
       for (const line of plan.lines) {
         if (line.action !== 'update' || !line.movement) continue;
-        const product = catalog.find((item) => item.id === line.productId);
-        if (!product) {
-          toast.error(isRtl ? `الصنف «${line.productName}» لم يعد في المخزون` : `“${line.productName}” is no longer in stock`);
-          return;
-        }
+        const product = catalog.find((item) => item.id === line.productId)!;
         await saveProduct(
           {
             ...product,
@@ -246,33 +282,23 @@ export default function InventoryAudit({ language, settings }: Props) {
 
       const cloud = await completeAuditCloud(audit.id);
       if (!cloud.cloud && cloud.reason === 'failed') {
-        toast.error(cloud.message || (isRtl ? 'تحدّث مخزون التطبيق، وبقي الجرد مسودة على الخادم. أعد الاعتماد لإغلاقه.' : 'App stock was updated, but the stocktake is still a draft on the server. Apply again to close it.'));
-        setArchive(await loadAuditArchive(userId));
-        setConfirmApply(false);
-        return;
+        toast.error(isRtl
+          ? 'تحدّث المخزون، لكن تعذّر إغلاق الجرد على الخادم. أُغلق على هذا الجهاز فلن يُطبَّق مرة ثانية.'
+          : 'Stock was updated, but the stocktake could not be closed on the server. It is closed on this device so it cannot be applied twice.');
       }
-      markLocalCompleted(userId, audit.id);
       setArchive(await loadAuditArchive(userId));
-      if (cloud.cloud) {
-        const missing = cloud.missingProducts?.length || 0;
-        toast.success(
-          missing
-            ? (isRtl
-              ? `اعتُمد الجرد وحدّث مخزون التطبيق. ${missing} أصناف غير موجودة في سجل الجرد على الخادم فلم تُحدَّث هناك.`
-              : `Stocktake applied and the app stock was updated. ${missing} products are not in the server stocktake records, so they were left unchanged there.`)
-            : (isRtl ? 'اعتُمد الجرد وحدّث المخزون' : 'Stocktake applied and stock was updated'),
-        );
-      } else {
-        toast.success(isRtl ? 'اعتُمد الجرد وحدّث مخزون هذه الجلسة' : 'Stocktake applied to this session’s stock');
+      if (cloud.cloud || cloud.reason !== 'failed') {
+        toast.success(isRtl ? 'اعتُمد الجرد وحُدّث المخزون' : 'Stocktake applied and stock was updated');
       }
       setOpenReportId(audit.id);
       setTab('archive');
       setConfirmApply(false);
       setLines([]);
       setAudit(freshAudit(userId));
-    } catch (error) {
-      const message = error instanceof Error ? error.message : '';
-      toast.error(message || (isRtl ? 'توقف الاعتماد قبل إنهاء كل الأصناف' : 'Apply stopped before every product was updated'));
+    } catch {
+      toast.error(isRtl
+        ? 'توقف الاعتماد قبل إنهاء كل الأصناف. راجع المخزون وسجل الجرد قبل المتابعة.'
+        : 'Apply stopped before every product was updated. Check stock and the count history before continuing.');
     } finally {
       setBusy(false);
     }
@@ -287,6 +313,8 @@ export default function InventoryAudit({ language, settings }: Props) {
   };
 
   const removeDraft = async (auditId: string) => {
+    if (busy) return;
+    if (!window.confirm(isRtl ? 'حذف مسودة الجرد هذه نهائياً؟' : 'Delete this stocktake draft permanently?')) return;
     setBusy(true);
     try {
       await deleteAuditDraft(userId, auditId);
@@ -295,6 +323,8 @@ export default function InventoryAudit({ language, settings }: Props) {
         setAudit(freshAudit(userId));
         setLines([]);
       }
+    } catch {
+      toast.error(isRtl ? 'تعذّر حذف المسودة. حاول مرة أخرى.' : 'Could not delete the draft. Try again.');
     } finally {
       setBusy(false);
     }
@@ -415,7 +445,14 @@ export default function InventoryAudit({ language, settings }: Props) {
                       onClick={() => addManual(product)}
                       className="w-full text-start px-3 py-2 text-sm hover:bg-slate-50 dark:hover:bg-white/5 flex justify-between gap-3"
                     >
-                      <span className="font-bold">{product.name}</span>
+                      <span className="font-bold">
+                        {product.name}
+                        {product.warehouseId && (
+                          <span className="ms-2 text-[11px] font-semibold text-slate-400">
+                            {warehouses.find((w) => w.id === product.warehouseId)?.name || ''}
+                          </span>
+                        )}
+                      </span>
                       <span className="text-slate-400 font-mono">{product.sku} · {product.quantity}</span>
                     </button>
                   ))}
@@ -451,22 +488,65 @@ export default function InventoryAudit({ language, settings }: Props) {
                 )}
                 {pricedLines.map((line) => {
                   const tone = line.difference < 0 ? 'text-rose-600' : line.difference > 0 ? 'text-emerald-600' : 'text-slate-500';
+                  const product = catalog.find((p) => p.id === line.productId);
+                  const pack = product ? productPack(product) : null;
+                  const counted = Number.isFinite(line.actualQty) ? splitPacks(line.actualQty, pack?.size ?? 0) : null;
+                  const countInput = 'rounded-lg border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-white/5 px-2 py-1 text-end font-mono font-bold';
                   return (
                     <tr key={line.id} className="border-t border-slate-100 dark:border-white/5">
                       <td className="px-3 py-3">
                         <div className="font-bold">{line.productName}</div>
                         <div className="text-xs text-slate-400 font-mono">{line.sku}</div>
                       </td>
-                      <td className="px-3 py-3 text-end font-mono">{line.expectedQty}</td>
+                      <td className="px-3 py-3 text-end font-mono">
+                        {line.expectedQty}
+                        {product && pack && (
+                          <div className="text-[10px] font-bold text-slate-400 whitespace-nowrap">{formatPackStock(line.expectedQty, product, isRtl)}</div>
+                        )}
+                      </td>
                       <td className="px-3 py-3 text-end">
-                        <input
-                          type="number"
-                          min={0}
-                          step="any"
-                          value={Number.isFinite(line.actualQty) ? line.actualQty : ''}
-                          onChange={(event) => setActual(line.productId, event.target.value)}
-                          className="w-16 rounded-lg border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-white/5 px-2 py-1 text-end font-mono font-bold"
-                        />
+                        {product && pack ? (
+                          <div className="flex flex-col items-end gap-1">
+                            <label className="flex items-center gap-1 text-[10px] font-bold text-slate-400">
+                              <input
+                                type="number"
+                                min={0}
+                                step={1}
+                                value={counted ? counted.packs : ''}
+                                onChange={(event) => {
+                                  const packs = Math.max(0, Math.floor(Number(event.target.value) || 0));
+                                  setActual(line.productId, String(packs * pack.size + (counted?.loose ?? 0)));
+                                }}
+                                className={`w-14 ${countInput}`}
+                              />
+                              {pack.name || (isRtl ? 'عبوة' : 'pack')}
+                            </label>
+                            <label className="flex items-center gap-1 text-[10px] font-bold text-slate-400">
+                              <input
+                                type="number"
+                                min={0}
+                                step="any"
+                                value={counted ? counted.loose : ''}
+                                onChange={(event) => {
+                                  const loose = Math.max(0, Number(event.target.value) || 0);
+                                  setActual(line.productId, String((counted?.packs ?? 0) * pack.size + loose));
+                                }}
+                                className={`w-14 ${countInput}`}
+                              />
+                              {product.unitName?.trim() || (isRtl ? 'وحدة' : 'unit')}
+                            </label>
+                            <span className="text-[10px] font-mono text-slate-400">= {Number.isFinite(line.actualQty) ? line.actualQty : '—'}</span>
+                          </div>
+                        ) : (
+                          <input
+                            type="number"
+                            min={0}
+                            step="any"
+                            value={Number.isFinite(line.actualQty) ? line.actualQty : ''}
+                            onChange={(event) => setActual(line.productId, event.target.value)}
+                            className={`w-16 ${countInput}`}
+                          />
+                        )}
                       </td>
                       <td className={`px-3 py-3 text-end font-mono font-black ${tone}`}>
                         {line.difference > 0 ? `+${line.difference}` : line.difference}
@@ -600,7 +680,7 @@ export default function InventoryAudit({ language, settings }: Props) {
                         <button type="button" onClick={() => resume(stored)} className="rounded-xl bg-indigo-600 text-white px-4 py-2 text-sm font-bold">
                           {isRtl ? 'استكمال الجرد' : 'Resume'}
                         </button>
-                        <button type="button" onClick={() => removeDraft(stored.audit.id)} className="rounded-xl px-4 py-2 text-sm font-bold text-rose-600">
+                        <button type="button" disabled={busy} onClick={() => removeDraft(stored.audit.id)} className="rounded-xl px-4 py-2 text-sm font-bold text-rose-600 disabled:opacity-50">
                           {isRtl ? 'حذف المسودة' : 'Delete draft'}
                         </button>
                       </div>

@@ -7,10 +7,13 @@ import { toast } from 'sonner';
 import { setDriveAccessToken } from '../services/googleDrive';
 import { completeOAuthSessionFromLocation, urlLooksLikeOAuthCallback } from '../lib/completeOAuthSession';
 import { clearUserCache, migrateLegacyUserCache, readUserCache, removeUserCache, writeUserCache } from '../lib/userStorage';
-import { computeStockStatus } from '../lib/stock';
+import { computeStockStatus, roundQty } from '../lib/stock';
+import { sameSku } from '../lib/productLookup';
+import { mergeProductEdit } from '../lib/productEdit';
 import { formatMoney } from '../lib/exchangeRates';
 import { snapshotLineCosts, weightedAverageCost } from '../lib/profits';
 import { planStockReversal, quantitiesByProduct } from '../lib/invoiceReversal';
+import { lineUnits } from '../lib/packs';
 import { QueuedInvoice, canQueueOffline, enqueueInvoice, isOfflineError, localSaleShortages, readQueue, writeQueue } from '../lib/offlineQueue';
 import { type Workspace, currentWorkspace, ensureWorkspace, refreshWorkspace, subscribeWorkspace } from '../lib/workspace';
 import { type WorkspaceAction, can as roleCan, canOpenScreen as roleCanOpenScreen } from '../lib/roles';
@@ -67,13 +70,14 @@ interface FirebaseContextType {
   auditLogs: AuditLog[];
   vault: Vault | null;
   saveSettings: (settings: AppSettings) => Promise<void>;
-  saveProduct: (product: Product, options?: { reason?: string; skipMovement?: boolean; baseQuantity?: number }) => Promise<void>;
+  saveProduct: (product: Product, options?: { reason?: string; skipMovement?: boolean; baseQuantity?: number; baseProduct?: Product }) => Promise<void>;
   deleteProduct: (id: string) => Promise<void>;
   stockMovements: StockMovement[];
   /** Resolves with the invoice number actually stored (the server may add a suffix if another device used it). */
   saveInvoice: (invoice: Invoice, options?: { restoreOnly?: boolean }) => Promise<string>;
   deleteInvoice: (id: string) => Promise<void>;
-  recordVaultTransaction: (record: Omit<VaultTransaction, 'id' | 'timestamp' | 'balanceAfter'>) => Promise<void>;
+  /** Pass the same `id` when retrying: a movement already saved under it is not applied again. */
+  recordVaultTransaction: (record: Omit<VaultTransaction, 'id' | 'timestamp' | 'balanceAfter'> & { id?: string }) => Promise<void>;
   saveEmployee: (employee: Employee) => Promise<void>;
   deleteEmployee: (id: string) => Promise<void>;
   savePayrollRecord: (payroll: PayrollRecord) => Promise<void>;
@@ -143,6 +147,11 @@ function syncRejectionMessage(code: string | undefined): string | null {
       ? 'صلاحياتك في هذا المتجر لا تسمح بهذا التغيير، فلم يُحفظ. اطلب من مالك المتجر أو المدير تنفيذه.'
       : 'Your role in this store does not allow this change, so it was not saved. Ask the owner or a manager.';
   }
+  if (code === 'einvoice-locked') {
+    return ar
+      ? 'هذه الفاتورة مقبولة لدى نظام الفوترة الوطني، فلا يمكن تعديلها أو حذفها. تُصحَّح بفاتورة إرجاع.'
+      : 'This invoice was accepted by the national e-invoicing system, so it cannot be edited or deleted. Correct it with a return invoice.';
+  }
   if (code === 'permission-denied') {
     return ar
       ? 'رفض الخادم حفظ هذا التغيير لهذا الحساب.'
@@ -175,12 +184,15 @@ interface CommitInvoiceOptions {
   defaultCurrency: string;
   /** Replaying a sale that already happened offline: record it even if stock goes negative. */
   allowNegativeStock?: boolean;
+  /** Same replay: a sale line whose product was deleted meanwhile is recorded without a stock change. */
+  allowMissingProducts?: boolean;
   ar?: boolean;
 }
 
 interface CommitInvoiceResult {
   status: 'saved' | 'duplicate';
   negativeStock: string[];
+  missingProducts?: string[];
   /** The number actually stored; differs from the requested one when another device already used it. */
   invoiceNumber: string;
 }
@@ -244,15 +256,24 @@ async function commitInvoiceOnce(uid: string, requested: Invoice, opts: CommitIn
     // One stock check per product, even if it appears on several lines.
     const qtyByProduct = quantitiesByProduct(invoice.items);
     const productsRead = new Map<string, Product>();
+    const costChanges: NonNullable<Invoice['costChanges']> = {};
+    // An invoice-level discount on a purchase lowers what each line really cost, in proportion to the line.
+    const linesTotal = invoice.items.reduce((sum, i) => sum + (Number(i.total) || 0), 0);
+    const purchaseDiscount = invoice.type === 'purchase' ? Math.min(Math.max(Number(invoice.discount) || 0, 0), linesTotal) : 0;
+    const costScale = purchaseDiscount > 0 && linesTotal > 0 ? (linesTotal - purchaseDiscount) / linesTotal : 1;
     for (const [productId, { qty: movedQty, description }] of qtyByProduct) {
       const productRef = doc(db, 'users', uid, 'inventory', productId);
       const productSnap = await transaction.get(productRef);
       if (!productSnap.exists()) {
+        if (opts.allowMissingProducts && invoice.type === 'sale') {
+          (result.missingProducts ||= []).push(description || productId);
+          continue;
+        }
         throw Object.assign(new Error(`${PRODUCT_NOT_FOUND}: ${description || productId}`), { code: 'product-not-found', productName: description || productId });
       }
       const productData = { ...(productSnap.data() as Product), id: productId };
       productsRead.set(productId, productData);
-      const currentQty = Number(productData.quantity) || 0;
+      const currentQty = roundQty(Number(productData.quantity) || 0);
       if (invoice.type === 'sale' && currentQty < movedQty) {
         if (!opts.allowNegativeStock) {
           throw Object.assign(new Error(`Insufficient stock for ${productData.name}. Available: ${currentQty}`), {
@@ -261,16 +282,20 @@ async function commitInvoiceOnce(uid: string, requested: Invoice, opts: CommitIn
         }
         result.negativeStock.push(productData.name);
       }
-      const newQuantity = invoice.type === 'sale' ? currentQty - movedQty : currentQty + movedQty;
+      const newQuantity = roundQty(invoice.type === 'sale' ? currentQty - movedQty : currentQty + movedQty);
       const newCost = invoice.type === 'purchase'
         ? weightedAverageCost(
             productData,
             movedQty,
-            invoice.items.filter((i) => i.productId === productId).reduce((sum, i) => sum + (Number(i.total) || 0), 0),
+            invoice.items.filter((i) => i.productId === productId).reduce((sum, i) => sum + (Number(i.total) || 0), 0) * costScale,
             invoice.currency,
             opts.defaultCurrency,
           )
         : null;
+      if (newCost !== null) {
+        const before = Number(productData.unitCost ?? productData.costPrice);
+        costChanges[productId] = { before: Number.isFinite(before) ? before : 0, after: newCost };
+      }
       transaction.update(productRef, {
         quantity: newQuantity,
         status: computeStockStatus(newQuantity, productData.lowStockThreshold, opts.lowStockThreshold),
@@ -282,6 +307,7 @@ async function commitInvoiceOnce(uid: string, requested: Invoice, opts: CommitIn
     const invoiceToWrite: Invoice = {
       ...invoice,
       ...(invoice.type === 'sale' ? { items: snapshotLineCosts(invoice.items, productsRead, opts.defaultCurrency) } : {}),
+      ...(Object.keys(costChanges).length ? { costChanges } : {}),
       vaultPosted: !!plan,
     };
 
@@ -479,7 +505,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const uid = user.uid;
     let known: string | null = null;
     const key = (ws: Workspace) => `${ws.ownerId}:${ws.role}`;
-    void ensureWorkspace(uid).then((ws) => { known = key(ws); });
+    void ensureWorkspace(uid).then((ws) => { known = key(ws); }, () => undefined);
     // Another device may add, remove or re-role this account; its books must never mix with another store's.
     const recheck = () => {
       if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
@@ -491,7 +517,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           return;
         }
         known = key(ws);
-      });
+      }, () => undefined);
     };
     window.addEventListener('online', recheck);
     window.addEventListener('focus', recheck);
@@ -925,6 +951,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       const ar = current?.defaultLanguage !== 'en';
       const remaining: QueuedInvoice[] = [];
       const negative = new Set<string>();
+      const missing = new Set<string>();
       const needsReview: string[] = [];
       let sent = 0;
       try {
@@ -935,10 +962,12 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
               lowStockThreshold: current?.lowStockThreshold,
               defaultCurrency: current?.currency || 'JOD',
               allowNegativeStock: true,
+              allowMissingProducts: true,
               ar: current?.defaultLanguage !== 'en',
             });
             sent += 1;
             r.negativeStock.forEach((name) => negative.add(name));
+            r.missingProducts?.forEach((name) => missing.add(name));
           } catch (err: any) {
             if (isOfflineError(err) || err?.code === 'unauthenticated') {
               remaining.push(...queue.slice(i));
@@ -962,6 +991,11 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         toast.warning(ar
           ? `مبيعات دون اتصال جعلت مخزون هذه الأصناف سالباً، راجع الجرد: ${Array.from(negative).join('، ')}`
           : `Offline sales made stock negative for: ${Array.from(negative).join(', ')}. Please recount.`, { duration: 12000 });
+      }
+      if (missing.size > 0) {
+        toast.warning(ar
+          ? `سُجّلت مبيعات دون اتصال لأصناف حُذفت من المخزون لاحقاً، فلم يتغيّر مخزونها ولا تُعرف تكلفتها: ${Array.from(missing).join('، ')}`
+          : `Offline sales were recorded for items deleted from inventory since; their stock was not changed and their cost is unknown: ${Array.from(missing).join(', ')}`, { duration: 12000 });
       }
       if (needsReview.length > 0) {
         toast.error(ar
@@ -1080,6 +1114,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       writeUserCache(user.uid, 'settings', next);
       return;
     }
+    const previous = settings;
     setSettings(newSettings);
     if (user?.uid) {
       writeUserCache(user.uid, 'settings', newSettings);
@@ -1095,6 +1130,10 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         : `System settings and profile were successfully updated`;
       logUserActivity(finalLabel, finalDetails, 'settings');
     } catch (error) {
+      if (previous) {
+        setSettings(previous);
+        writeUserCache(user.uid, 'settings', previous);
+      }
       handleFirestoreError(error, OperationType.WRITE, `users/${user.uid}/settings/profile`);
     }
   };
@@ -1104,6 +1143,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const after = Number(next.quantity) || 0;
     if (previous && before === after) return null;
     if (!previous && after === 0) return null;
+    const unitCost = Number(next.unitCost ?? next.costPrice);
     return {
       id: crypto.randomUUID(),
       productId: next.id,
@@ -1115,6 +1155,9 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       reason: reason?.trim() || undefined,
       timestamp: Date.now(),
       userName: settings?.userName || (user as any)?.email || undefined,
+      ...(Number.isFinite(unitCost) && unitCost > 0
+        ? { unitCost, costCurrency: next.currency || settings?.currency || 'JOD' }
+        : {}),
     };
   };
 
@@ -1150,8 +1193,9 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   /**
    * `baseQuantity` is the quantity the caller started from (e.g. when the edit form opened).
    * Only the difference is applied to the stored quantity, so a sale made meanwhile is never erased.
+   * `baseProduct` is the whole product as the form loaded it: fields the user did not touch keep the stored value.
    */
-  const saveProduct = async (product: Product, options?: { reason?: string; skipMovement?: boolean; baseQuantity?: number }) => {
+  const saveProduct = async (product: Product, options?: { reason?: string; skipMovement?: boolean; baseQuantity?: number; baseProduct?: Product }) => {
     if (!user) throw guestWriteBlocked();
     // Determine action for logging before state updates
     const exists = products.some(p => p.id === product.id);
@@ -1159,7 +1203,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const actionLabelEn = exists ? 'Edit Product' : 'Add Product';
     const finalActionLabel = settings?.defaultLanguage === 'ar' ? actionLabel : actionLabelEn;
     const finalDetails = settings?.defaultLanguage === 'ar' 
-      ? `تم ${exists ? 'تعديل' : 'إضافة'} المنتج: ${product.name} بنجاح (الترميز: ${product.sku})`
+      ? `تم ${exists ? 'تعديل' : 'إضافة'} المنتج: ${product.name} بنجاح (الباركود: ${product.sku})`
       : `Product successfully ${exists ? 'updated' : 'added'}: ${product.name} (SKU: ${product.sku})`;
 
     // Optimistic state and localStorage update for weak/interrupted connection resilience
@@ -1189,22 +1233,22 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           const productRef = doc(db, 'users', uid, 'inventory', product.id);
           const snap = await transaction.get(productRef);
           const stored = snap.exists() ? ({ ...(snap.data() as Product), id: product.id }) : undefined;
-          let quantity = Number(product.quantity) || 0;
+          let quantity = roundQty(Number(product.quantity) || 0);
+          let fields = product;
           if (stored) {
-            const base = options?.baseQuantity ?? (Number(previousProduct?.quantity) || 0);
-            quantity = (Number(stored.quantity) || 0) + (quantity - base);
+            const base = options?.baseQuantity ?? options?.baseProduct?.quantity ?? (Number(previousProduct?.quantity) || 0);
+            quantity = roundQty((Number(stored.quantity) || 0) + (quantity - base));
             if (quantity < 0) {
               throw Object.assign(new Error('Stock would go negative'), { code: 'negative-stock', available: Number(stored.quantity) || 0 });
             }
+            if (options?.baseProduct) fields = mergeProductEdit(options.baseProduct, product, stored);
           }
-          saved = { ...product, quantity, status: computeStockStatus(quantity, product.lowStockThreshold, settings?.lowStockThreshold) };
+          saved = { ...fields, quantity, status: computeStockStatus(quantity, fields.lowStockThreshold, settings?.lowStockThreshold) };
           transaction.set(productRef, removeUndefined(saved));
           movement = buildStockMovement(stored, saved, options?.reason);
           if (movement) transaction.set(doc(db, 'users', uid, 'stock_movements', movement.id), removeUndefined(movement));
         });
-        if (saved.quantity !== product.quantity) {
-          setProducts(prev => prev.map(p => p.id === saved.id ? saved : p));
-        }
+        setProducts(prev => prev.map(p => p.id === saved.id ? saved : p));
         const committed = movement as StockMovement | null;
         if (committed) setStockMovements(prev => [committed, ...prev]);
       }
@@ -1227,12 +1271,12 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     if (!user) throw guestWriteBlocked();
     const uid = user.uid;
     const ar = settings?.defaultLanguage !== 'en';
-    const qty = Number(quantity) || 0;
+    const qty = roundQty(Number(quantity) || 0);
     if (qty <= 0) throw new Error(ar ? 'كمية النقل يجب أن تكون أكبر من صفر.' : 'Transfer quantity must be greater than zero.');
     const reason = ar ? 'نقل بين المستودعات' : 'Warehouse transfer';
     const local = products.find(p => p.id === productId);
     const destinationId = local
-      ? products.find(p => p.id !== productId && p.sku === local.sku && (p.warehouseId || '') === toWarehouseId)?.id
+      ? products.find(p => p.id !== productId && sameSku(p.sku, local.sku) && (p.warehouseId || '') === toWarehouseId)?.id
       : undefined;
     const movements: StockMovement[] = [];
     const movement = (product: Product, before: number, after: number): StockMovement => ({
@@ -1246,6 +1290,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       reason,
       timestamp: Date.now(),
       userName: settings?.userName || (user as any)?.email || undefined,
+      transfer: true,
     });
 
     try {
@@ -1255,27 +1300,34 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         const sourceSnap = await transaction.get(sourceRef);
         if (!sourceSnap.exists()) throw new Error(ar ? 'المنتج غير موجود.' : 'Product not found.');
         const source = { ...(sourceSnap.data() as Product), id: productId };
-        const available = Number(source.quantity) || 0;
+        const available = roundQty(Number(source.quantity) || 0);
         if (available < qty) {
           throw new Error(ar ? `الكمية المتوفرة ${available} فقط.` : `Only ${available} available.`);
         }
-        if (available === qty) {
+        const destSnap = destinationId ? await transaction.get(doc(db, 'users', uid, 'inventory', destinationId)) : null;
+        const hasDestination = !!destinationId && !!destSnap?.exists();
+        if (available === qty && !hasDestination) {
+          // The whole product moves; no second row is needed.
           transaction.update(sourceRef, { warehouseId: toWarehouseId });
+          const toName = warehouses.find(w => w.id === toWarehouseId)?.name || toWarehouseId;
+          movements.push({ ...movement(source, available, available), reason: `${reason}: ${toName}` });
+          for (const m of movements) {
+            transaction.set(doc(db, 'users', uid, 'stock_movements', m.id), removeUndefined(m));
+          }
           return;
         }
-        const remaining = available - qty;
+        const remaining = roundQty(available - qty);
         transaction.update(sourceRef, {
           quantity: remaining,
           status: computeStockStatus(remaining, source.lowStockThreshold, settings?.lowStockThreshold),
         });
         movements.push(movement(source, available, remaining));
 
-        const destSnap = destinationId ? await transaction.get(doc(db, 'users', uid, 'inventory', destinationId)) : null;
-        if (destinationId && destSnap?.exists()) {
-          const dest = { ...(destSnap.data() as Product), id: destinationId };
-          const before = Number(dest.quantity) || 0;
-          const after = before + qty;
-          transaction.update(doc(db, 'users', uid, 'inventory', destinationId), {
+        if (hasDestination && destSnap) {
+          const dest = { ...(destSnap.data() as Product), id: destinationId! };
+          const before = roundQty(Number(dest.quantity) || 0);
+          const after = roundQty(before + qty);
+          transaction.update(doc(db, 'users', uid, 'inventory', destinationId!), {
             quantity: after,
             status: computeStockStatus(after, dest.lowStockThreshold, settings?.lowStockThreshold),
           });
@@ -1419,8 +1471,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     // --- No connection ---
     if (!canQueueOffline(invoice)) {
       throw notify(ar
-        ? 'لا يوجد اتصال بالإنترنت. فواتير الشراء والبيع الآجل تحتاج اتصالاً لأنها تمسّ الخزنة أو ديون الزبائن، فلم يُحفظ شيء.'
-        : 'No internet connection. Purchases and credit sales need a connection because they touch the vault or customer debt. Nothing was saved.', { code: 'offline' });
+        ? 'انقطع الاتصال بالإنترنت قبل تأكيد الحفظ. فواتير الشراء والبيع الآجل تحتاج اتصالاً لأنها تمسّ الخزنة أو ديون الزبائن. أعد المحاولة عند عودة الاتصال؛ لن تُسجَّل الفاتورة مرتين.'
+        : 'The connection dropped before the save was confirmed. Purchases and credit sales need a connection because they touch the vault or customer debt. Try again when you are back online; the invoice will not be recorded twice.', { code: 'offline' });
     }
     const shortages = localSaleShortages(invoice, products);
     if (shortages.length > 0) {
@@ -1438,9 +1490,9 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
 
     const updatedProducts = products.map((p) => {
-      const sold = invoice.items.filter((i) => i.productId === p.id).reduce((sum, i) => sum + (Number(i.quantity) || 0), 0);
+      const sold = invoice.items.filter((i) => i.productId === p.id).reduce((sum, i) => sum + lineUnits(i), 0);
       if (!sold) return p;
-      const newQty = (Number(p.quantity) || 0) - sold;
+      const newQty = roundQty((Number(p.quantity) || 0) - sold);
       return { ...p, quantity: newQty, status: computeStockStatus(newQty, p.lowStockThreshold, settings?.lowStockThreshold) };
     });
     setProducts(updatedProducts);
@@ -1506,9 +1558,14 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         missing = stock.missing;
         for (const u of stock.updates) {
           const product = current.get(u.productId);
+          // Undo this purchase's cost averaging only while no later purchase has averaged the cost again.
+          const cost = inv.type === 'purchase' ? inv.costChanges?.[u.productId] : undefined;
+          const currentCost = Number(product?.unitCost ?? product?.costPrice);
+          const restoreCost = !!cost && Number.isFinite(cost.before) && Math.abs(currentCost - cost.after) < 1e-6;
           transaction.update(doc(db, 'users', uid, 'inventory', u.productId), {
             quantity: u.quantity,
             status: computeStockStatus(u.quantity, product?.lowStockThreshold, settings?.lowStockThreshold),
+            ...(restoreCost ? { unitCost: cost!.before } : {}),
           });
         }
 
@@ -1597,8 +1654,14 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const commitVaultRecordTransaction = async (
     transaction: any,
     uid: string,
-    record: Omit<VaultTransaction, 'id' | 'timestamp' | 'balanceAfter'>
+    { id: requestedId, ...record }: Omit<VaultTransaction, 'id' | 'timestamp' | 'balanceAfter'> & { id?: string }
   ) => {
+    const vaultRecordId = requestedId || crypto.randomUUID();
+    const vaultRecordRef = doc(db, 'users', uid, 'vault_records', vaultRecordId);
+    if (requestedId) {
+      const saved = await transaction.get(vaultRecordRef);
+      if (saved.exists()) return saved.data() as VaultTransaction;
+    }
     const vaultStateRef = doc(db, 'users', uid, 'settings', 'vault');
     const vaultSnap = await transaction.get(vaultStateRef);
     const currency = (record.currency || 'JOD') as Currency;
@@ -1607,8 +1670,6 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       vaultSnap.exists() ? vaultSnap.data() : {}, currency, record.type === 'income' ? amount : -amount);
     if (record.type === 'expense') assertVaultCanCover(balanceAfter, currency);
 
-    const vaultRecordId = crypto.randomUUID();
-    const vaultRecordRef = doc(db, 'users', uid, 'vault_records', vaultRecordId);
     const vaultRecord: VaultTransaction = {
       ...record,
       id: vaultRecordId,
@@ -1623,7 +1684,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     return vaultRecord;
   };
 
-  const recordVaultTransaction = async (record: Omit<VaultTransaction, 'id' | 'timestamp' | 'balanceAfter'>) => {
+  const recordVaultTransaction = async (record: Omit<VaultTransaction, 'id' | 'timestamp' | 'balanceAfter'> & { id?: string }) => {
     if (!user) throw guestWriteBlocked();
     const uid = user.uid;
 
@@ -1676,8 +1737,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     if (!user) throw guestWriteBlocked();
     const finalLabel = settings?.defaultLanguage === 'ar' ? 'تسجيل راتب' : 'Record Payroll';
     const finalDetails = settings?.defaultLanguage === 'ar'
-      ? `تم تسجيل دفعة راتب للموظف: ${payroll.employeeName} لشهر ${payroll.monthYear} بقيمة صافي: ${payroll.netSalary}`
-      : `Payroll payment recorded for ${payroll.employeeName} (${payroll.monthYear}) - Net: ${payroll.netSalary}`;
+      ? `تم تسجيل راتب الموظف ${payroll.employeeName} لشهر ${payroll.monthYear}، والصافي ${formatMoney(Number(payroll.netSalary) || 0, payroll.currency || settings?.currency || 'JOD', 'en-US')}`
+      : `Payroll recorded for ${payroll.employeeName} (${payroll.monthYear}) - Net: ${formatMoney(Number(payroll.netSalary) || 0, payroll.currency || settings?.currency || 'JOD', 'en-US')}`;
 
     const uid = user.uid;
     try {
@@ -1729,8 +1790,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       logUserActivity(
         settings?.defaultLanguage === 'ar' ? 'صرف راتب' : 'Pay Payroll',
         settings?.defaultLanguage === 'ar'
-          ? `تم صرف راتب ${payroll.employeeName} لشهر ${payroll.monthYear} بقيمة ${amount} ${currency}`
-          : `Salary paid to ${payroll.employeeName} (${payroll.monthYear}) - ${amount} ${currency}`,
+          ? `تم صرف راتب ${payroll.employeeName} لشهر ${payroll.monthYear} بقيمة ${formatMoney(amount, currency, 'en-US')}`
+          : `Salary paid to ${payroll.employeeName} (${payroll.monthYear}) - ${formatMoney(amount, currency, 'en-US')}`,
         'payroll');
     } catch (error: any) {
       const msg = String(error?.message || '');
@@ -1751,11 +1812,17 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       : `Payroll record deleted for ${empName} (${period})`;
 
     try {
-      if (record && record.paymentStatus === 'paid') {
-        // A paid salary already left the vault: deleting the record must return the money (reversal entry).
-        const currency = (record.currency || settings?.currency || 'JOD') as Currency;
-        const amount = roundForCurrency(Number(record.netSalary) || 0, currency);
-        await runTransaction(db, async (transaction) => {
+      let deleted = false;
+      await runTransaction(db, async (transaction) => {
+        const payrollRef = doc(db, 'users', uid, 'payroll', id);
+        const snap = await transaction.get(payrollRef);
+        if (!snap.exists()) return;
+        deleted = true;
+        const stored = snap.data() as PayrollRecord;
+        if (stored.paymentStatus === 'paid') {
+          // A paid salary already left the vault: deleting the record must return the money (reversal entry).
+          const currency = (stored.currency || settings?.currency || 'JOD') as Currency;
+          const amount = roundForCurrency(Number(stored.netSalary) || 0, currency);
           const vaultStateRef = doc(db, 'users', uid, 'settings', 'vault');
           const vaultSnap = await transaction.get(vaultStateRef);
           const { doc: updatedVault, balanceAfter } = applyVaultDelta(vaultSnap.exists() ? vaultSnap.data() : {}, currency, amount);
@@ -1769,17 +1836,15 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             refId: id,
             amount,
             currency,
-            description: `Reversal - deleted payroll ${empName} (${period})`,
+            description: `Reversal - deleted payroll ${stored.employeeName || empName} (${stored.monthYear || period})`,
             timestamp: Date.now(),
             balanceAfter,
           };
           transaction.set(doc(db, 'users', uid, 'vault_records', recId), removeUndefined(reversal));
-          transaction.delete(doc(db, 'users', uid, 'payroll', id));
-        });
-      } else {
-        await deleteDoc(doc(db, 'users', uid, 'payroll', id));
-      }
-      logUserActivity(finalLabel, finalDetails, 'payroll');
+        }
+        transaction.delete(payrollRef);
+      });
+      if (deleted) logUserActivity(finalLabel, finalDetails, 'payroll');
     } catch (error) {
       handleFirestoreError(error, OperationType.DELETE, `users/${uid}/payroll/${id}`);
     }
@@ -1861,11 +1926,31 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       ? `تم حذف العميل: ${custName}`
       : `Customer deleted: ${custName}`;
 
+    const uid = user.uid;
+    const ar = settings?.defaultLanguage !== 'en';
+    const fail = (message: string, code: string) => Object.assign(new Error(message), { code });
     try {
-      await deleteDoc(doc(db, 'users', user.uid, 'customers', id));
+      await runTransaction(db, async (transaction) => {
+        const customerRef = doc(db, 'users', uid, 'customers', id);
+        const snap = await transaction.get(customerRef);
+        if (!snap.exists()) return;
+        const stored = snap.data() as Customer;
+        const currency = (stored.currency || settings?.currency || 'JOD') as Currency;
+        const balance = roundForCurrency(Number(stored.totalDebt) || 0, currency);
+        if (balance !== 0) {
+          throw fail(ar
+            ? `لا يمكن حذف «${stored.name || custName}» لأن رصيد حسابه ${formatMoney(balance, currency)}. سوِّ الحساب أولاً.`
+            : `“${stored.name || custName}” cannot be deleted while the account balance is ${formatMoney(balance, currency)}. Settle it first.`, 'customer-has-balance');
+        }
+        transaction.delete(customerRef);
+      });
       logUserActivity(finalLabel, finalDetails, 'customer');
-    } catch (error) {
-      handleFirestoreError(error, OperationType.DELETE, `users/${user.uid}/customers/${id}`);
+    } catch (error: any) {
+      if (error?.code === 'customer-has-balance') throw error;
+      if (isOfflineError(error)) throw fail(ar ? 'لا يوجد اتصال بالإنترنت؛ لم يُحذف العميل.' : 'No connection: the customer was not deleted.', 'offline');
+      const rejection = syncRejectionMessage(error?.code);
+      if (rejection) throw fail(rejection, error.code);
+      throw error;
     }
   };
 
@@ -1894,12 +1979,21 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const deleteCustomerLedgerTransaction = async (txId: string, options?: { reverseVault?: boolean }) => {
     if (!user) throw guestWriteBlocked();
     const uid = user.uid;
+    const ar = settings?.defaultLanguage !== 'en';
+    const fail = (message: string, code: string) => Object.assign(new Error(message), { code });
     try {
       await runTransaction(db, async (transaction) => {
         const txRef = doc(db, 'users', uid, 'customer_transactions', txId);
         const txSnap = await transaction.get(txRef);
         if (!txSnap.exists()) throw new Error('Ledger entry does not exist');
         const tx = txSnap.data() as CustomerTransaction;
+
+        // A credit sale's debt belongs to its invoice: removing it alone would leave sold goods unpaid.
+        if (tx.invoiceId || txId.startsWith('inv-')) {
+          throw fail(ar
+            ? 'هذا القيد ناتج عن فاتورة بيع آجل. احذف الفاتورة نفسها من شاشة الفواتير ليُعكس الدين والمخزون معاً.'
+            : 'This entry comes from a credit sale. Delete the invoice itself so the debt and stock are reversed together.', 'ledger-owned-by-invoice');
+        }
 
         const customerRef = doc(db, 'users', uid, 'customers', tx.customerId);
         const customerSnap = await transaction.get(customerRef);
@@ -1909,9 +2003,16 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         const vaultSnap = reverseVault ? await transaction.get(vaultStateRef) : null;
 
         if (customerSnap.exists()) {
-          const debt = Number((customerSnap.data() as Customer).totalDebt) || 0;
-          // Deleting an invoice removes the debt it added; deleting a payment brings the debt back.
-          const finalDebt = Math.max(0, debt + (tx.type === 'invoice' ? -tx.amount : tx.amount));
+          const customer = customerSnap.data() as Customer;
+          const debtCurrency = (tx.currency || customer.currency || 'JOD') as Currency;
+          const debt = Number(customer.totalDebt) || 0;
+          // Deleting a debt entry removes the debt it added; deleting a payment brings the debt back.
+          const finalDebt = roundForCurrency(debt + (tx.type === 'invoice' ? -tx.amount : tx.amount), debtCurrency);
+          if (finalDebt < 0) {
+            throw fail(ar
+              ? 'سدّد العميل جزءاً من هذا الدين، فحذفه سيجعل رصيده سالباً. احذف الدفعة المرتبطة أولاً أو سجّل إرجاع المبلغ له.'
+              : 'The customer already paid part of this debt, so deleting it would make the balance negative. Delete the related payment first or record a refund.', 'debt-already-paid');
+          }
           transaction.update(customerRef, { totalDebt: finalDebt });
         }
 
@@ -1919,6 +2020,11 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           const currency = (tx.currency || 'JOD') as Currency;
           const amount = roundForCurrency(Number(tx.amount) || 0, currency);
           const { doc: updatedVault, balanceAfter } = applyVaultDelta(vaultSnap.exists() ? vaultSnap.data() : {}, currency, -amount);
+          if (balanceAfter < 0) {
+            throw fail(ar
+              ? `رصيد الخزنة بعملة ${currency} لا يكفي لإرجاع هذه الدفعة، فلم تُحذف.`
+              : `The ${currency} vault balance cannot cover returning this payment, so it was not deleted.`, 'vault-insufficient');
+          }
           transaction.set(vaultStateRef, removeUndefined(updatedVault), { merge: true });
           const recId = crypto.randomUUID();
           const reversal: VaultTransaction = {
@@ -1940,6 +2046,10 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       });
     } catch (error: any) {
       if (String(error?.message || '').startsWith('Ledger entry does not exist')) throw error;
+      if (['ledger-owned-by-invoice', 'debt-already-paid', 'vault-insufficient'].includes(error?.code)) throw error;
+      if (isOfflineError(error)) throw fail(ar ? 'لا يوجد اتصال بالإنترنت؛ لم يُحذف القيد.' : 'No connection: the entry was not deleted.', 'offline');
+      const rejection = syncRejectionMessage(error?.code);
+      if (rejection) throw fail(rejection, error.code);
       handleFirestoreError(error, OperationType.DELETE, `users/${uid}/customer_transactions/${txId}`);
     }
   };
@@ -2115,13 +2225,13 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
       const logLabel = settings?.defaultLanguage === 'ar' ? 'معايرة الخزنة' : 'Vault Recalibration';
       const logDetails = settings?.defaultLanguage === 'ar'
-        ? `تمت إعادة معايرة رصيد الخزنة بال${currency} إلى قيمة ${target}. السبب: ${reason || 'تسوية يدوية'}`
+        ? `تمت تسوية رصيد الخزنة بعملة ${currency} إلى ${target}. السبب: ${reason || 'تسوية يدوية'}`
         : `Safe vault balance in ${currency} was recalibrated to ${target}. Reason: ${reason || 'Manual settlement'}`;
       logUserActivity(logLabel, logDetails, 'vault');
 
-      toast.success(settings?.defaultLanguage === 'ar' ? `تمت إعادة معايرة رصيد الخزنة بال${currency} بنجاح` : `Safe/Vault ${currency} balance successfully recalibrated`);
+      toast.success(settings?.defaultLanguage === 'ar' ? `تمت تسوية رصيد الخزنة بعملة ${currency}` : `Vault ${currency} balance adjusted`);
     } catch (error) {
-      toast.error(settings?.defaultLanguage === 'ar' ? "فشلت عملية إعادة المعايرة" : "Failed to recalibrate physical safe");
+      toast.error(settings?.defaultLanguage === 'ar' ? "تعذّرت تسوية الرصيد" : "Failed to adjust the vault balance");
       handleFirestoreError(error, OperationType.WRITE, `users/${uid}/settings/vault_recalibrate`);
     }
   };

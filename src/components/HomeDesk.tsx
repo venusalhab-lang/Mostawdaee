@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Barcode, ChevronLeft, ChevronRight, ClipboardCheck, ShoppingBag, Users } from 'lucide-react';
 import type {
   AppSettings, Cheque, Currency, Customer, CustomerTransaction, Invoice, Language, PayrollRecord, Product, StockMovement, Vault, VaultTransaction,
@@ -9,6 +9,10 @@ import { formatMoney, POS_CURRENCY_CODES } from '../lib/exchangeRates';
 import { readVaultBalances } from '../lib/vaultMath';
 import { loadCheques } from '../lib/chequesStore';
 import { readQueue } from '../lib/offlineQueue';
+import { requestInventoryIntent } from '../lib/inventoryIntent';
+import type { Workspace } from '../lib/workspace';
+import type { SellerContext } from '../lib/salesLog';
+import SalesLogCard from './SalesLogCard';
 import { CHEQUE_HORIZON_DAYS, EXPIRY_HORIZON_DAYS, STALE_DEBT_DAYS, type HomeTask, homeTasks } from '../lib/homeTasks';
 import {
   amountInCurrency,
@@ -56,12 +60,8 @@ function openScreen(screen: string) {
 }
 
 function openAddProduct() {
+  requestInventoryIntent({ type: 'add' });
   openScreen('inventory');
-  // Inventory loads on demand, so the open event is repeated until its listener is mounted.
-  // Repeating is safe: the listener only opens the form.
-  for (const delay of [300, 800, 1600]) {
-    window.setTimeout(() => window.dispatchEvent(new CustomEvent('open-add-product')), delay);
-  }
 }
 
 function money(amount: number, currency: string, isRtl: boolean) {
@@ -237,7 +237,7 @@ function SalesPulseBar({
         ? 'توجد مبيعات الآن ولم توجد مبيعات مقابلة، لذلك لا تُعرض نسبة ولا يتحرك المؤشر.'
         : 'There are sales now and none in the matching period, so no percent is shown and the needle stays hidden.')
       : (isRtl
-        ? `${compare}. القرص من −100٪ إلى +100٪، والصفر في الأعلى. اللون يتبع النسبة، والتراجع من 10٪ فأكثر أحمر.`
+        ? `${compare}. القرص من \u2066−100٪\u2069 إلى \u2066+100٪\u2069، والصفر في الأعلى. اللون يتبع النسبة، والتراجع من 10٪ فأكثر أحمر.`
         : `${compare}. The dial runs from −100% to +100%, with zero at the top. Color follows the percent. A drop of 10% or more is red.`);
   const counts = currentCount + previousCount > 0
     ? (isRtl
@@ -487,8 +487,10 @@ export default function HomeDesk({ language, settings }: Props) {
     vaultTransactions = [],
     stockMovements = [],
     canOpenScreen,
+    workspace,
   } = useFirebase() as unknown as {
-    user: { uid?: string } | null;
+    user: { uid?: string; email?: string } | null;
+    workspace: Workspace | null;
     products: Product[];
     transactions: Invoice[];
     customers: Customer[];
@@ -562,6 +564,16 @@ export default function HomeDesk({ language, settings }: Props) {
     };
   })();
 
+  const pendingSales = user?.uid ? readQueue(user.uid) : [];
+  const pendingKey = pendingSales.map((entry) => entry.invoice.id).join('|');
+  const sellers = useMemo<SellerContext>(() => ({
+    userId: user?.uid || '',
+    userEmail: user?.email || '',
+    ownerId: workspace?.ownerId || user?.uid || '',
+    ownerEmail: workspace?.ownerEmail || (workspace?.role === 'owner' ? user?.email : '') || '',
+    pendingIds: new Set(pendingKey ? pendingKey.split('|') : []),
+  }), [user?.uid, user?.email, workspace?.ownerId, workspace?.ownerEmail, workspace?.role, pendingKey]);
+
   const tasks = homeTasks({
     now,
     storeCurrency,
@@ -597,7 +609,7 @@ export default function HomeDesk({ language, settings }: Props) {
         paymentDate: record.paymentDate,
       }))
       : null,
-    pendingUploads: user?.uid ? readQueue(user.uid).length : 0,
+    pendingUploads: pendingSales.length,
   });
   const isNewStore = products.length === 0;
 
@@ -801,6 +813,17 @@ export default function HomeDesk({ language, settings }: Props) {
           )}
         </button>
       </div>
+
+      {!isNewStore && (
+        <SalesLogCard
+          invoices={transactions}
+          range={range}
+          now={now}
+          isRtl={isRtl}
+          storeCurrency={storeCurrency}
+          sellers={sellers}
+        />
+      )}
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         {actions.map((action) => {

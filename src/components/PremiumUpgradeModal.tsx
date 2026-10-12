@@ -6,6 +6,7 @@ import { Capacitor } from '@capacitor/core';
 import { sounds } from '../lib/sounds';
 import { initializeBilling, makePurchase } from '../services/billing';
 import { activatePaidSubscription, restoreOwnedPurchases } from '../lib/activateSubscription';
+import { usePlayPrice } from '../hooks/usePlayPrice';
 
 interface PremiumUpgradeModalProps {
   isOpen: boolean;
@@ -41,7 +42,7 @@ const premiumFeatures = [
   {
     titleAr: 'دعم متعدد العملات',
     titleEn: 'Multi-Currency Support',
-    descAr: 'خزنة وديون ومبيعات منفصلة لكل عملة: JOD وILS وUSD وIQD وSAR وAED وLYD وEGP.',
+    descAr: 'خزنة وديون ومبيعات منفصلة لكل عملة: JOD، ILS، USD، IQD، SAR، AED، LYD، EGP.',
     descEn: 'Separate vault, debts and sales per currency: JOD, ILS, USD, IQD, SAR, AED, LYD and EGP.',
     color: 'from-emerald-500 to-teal-400',
   },
@@ -64,6 +65,7 @@ export default function PremiumUpgradeModal({
   const isRtl = language === 'ar';
   const isNative = Capacitor.isNativePlatform();
   const [processing, setProcessing] = useState(false);
+  const playPrice = usePlayPrice('mostawdaee_premium_100', isNative && isOpen);
 
   const handleRestore = async () => {
     sounds?.playClick();
@@ -155,7 +157,7 @@ export default function PremiumUpgradeModal({
                   <h3 className="text-lg font-black text-white leading-none">
                     {isRenewal
                       ? (isRtl ? 'تجديد الاشتراك' : 'Renew Subscription')
-                      : (isRtl ? 'الترقية للنسخة الكاملة (Premium)' : 'Upgrade to Premium License')}
+                      : (isRtl ? 'الترقية للنسخة الكاملة' : 'Upgrade to Premium License')}
                   </h3>
                   <p className="text-xs text-slate-400 mt-1 font-medium">
                     {isRtl ? 'اشتراك سنوي عبر Google Play' : 'Annual plan billed through Google Play'}
@@ -200,9 +202,16 @@ export default function PremiumUpgradeModal({
                     {isRtl ? 'تغطية شاملة لكامل خدمات النظام والمزامنة السحابية.' : 'Full access including cloud sync, updates and maintenance.'}
                   </span>
                 </div>
-                <div className="flex items-baseline gap-1">
-                  <span className="text-3xl font-black text-white">$100</span>
-                  <span className="text-xs text-slate-400 font-bold">/{isRtl ? 'سنوياً' : 'yr'}</span>
+                <div className="flex flex-col items-center sm:items-end gap-0.5">
+                  <div className="flex items-baseline gap-1" dir="ltr">
+                    <span className="text-3xl font-black text-white">{playPrice || '$100'}</span>
+                    <span className="text-xs text-slate-400 font-bold">/{isRtl ? 'سنوياً' : 'yr'}</span>
+                  </div>
+                  {!playPrice && (
+                    <span className="text-[10px] text-slate-400 font-semibold">
+                      {isRtl ? 'السعر النهائي بعملتك تعرضه Google Play قبل التأكيد' : 'Google Play shows the final price in your currency before you confirm'}
+                    </span>
+                  )}
                 </div>
               </div>
 
@@ -216,15 +225,15 @@ export default function PremiumUpgradeModal({
                   {processing ? (
                     <>
                       <RotateCw className="w-4 h-4 animate-spin" />
-                      <span>{isRtl ? 'جاري المعالجة...' : 'Processing...'}</span>
+                      <span>{isRtl ? 'جارٍ المعالجة...' : 'Processing...'}</span>
                     </>
                   ) : (
                     <>
                       <ShieldCheck className="w-5 h-5" />
                       <span>
                         {isRenewal
-                          ? (isRtl ? 'تجديد عبر Google Play ($100)' : 'Renew with Google Play ($100)')
-                          : (isRtl ? 'اشترك عبر Google Play ($100)' : 'Subscribe with Google Play ($100)')}
+                          ? (isRtl ? 'التجديد عبر Google Play' : 'Renew with Google Play')
+                          : (isRtl ? 'الاشتراك عبر Google Play' : 'Subscribe with Google Play')}
                       </span>
                     </>
                   )}

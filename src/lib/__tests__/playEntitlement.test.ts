@@ -47,6 +47,24 @@ describe('reconcilePlaySubscription', () => {
     expect(change).toEqual({ status: 'expired', expiry: new Date(NOW).toISOString() });
   });
 
+  it('ends access on a refund even when Google moves the expiry back', () => {
+    const change = reconcilePlaySubscription(
+      { status: 'active', expiry: at(300) },
+      [{ state: 'SUBSCRIPTION_STATE_EXPIRED', expiry: at(-1), previousExpiry: at(300) }],
+      NOW,
+    );
+    expect(change).toEqual({ status: 'expired', expiry: new Date(NOW).toISOString() });
+  });
+
+  it('keeps a staff grant set beyond every date Play ever reported', () => {
+    const change = reconcilePlaySubscription(
+      { status: 'active', expiry: at(500) },
+      [{ state: 'SUBSCRIPTION_STATE_EXPIRED', expiry: at(-1), previousExpiry: at(300) }],
+      NOW,
+    );
+    expect(change).toBeNull();
+  });
+
   it('keeps an owner grant that runs past every Play expiry', () => {
     const change = reconcilePlaySubscription(
       { status: 'active', expiry: at(400) },

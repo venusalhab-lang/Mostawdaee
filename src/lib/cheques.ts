@@ -99,6 +99,70 @@ export function isOverdue(cheque: Cheque, today: string): boolean {
   return cheque.status === 'pending' && cheque.dueDate < today;
 }
 
+export const BOUNCE_REASONS: Array<{ ar: string; en: string }> = [
+  { ar: 'الرصيد غير كافٍ', en: 'Insufficient funds' },
+  { ar: 'التوقيع غير مطابق', en: 'Signature mismatch' },
+  { ar: 'الحساب مغلق', en: 'Account closed' },
+  { ar: 'أوقف الساحب صرفه', en: 'Stopped by the drawer' },
+  { ar: 'خطأ في التاريخ أو المبلغ', en: 'Wrong date or amount' },
+];
+
+export function appendNote(notes: string, line: string): string {
+  const extra = line.trim();
+  if (!extra) return notes;
+  return notes.trim() ? `${notes.trim()}\n${extra}` : extra;
+}
+
+export type ChequePaymentPlan =
+  | { ok: true; debtBefore: number; debtAfter: number }
+  | { ok: false; reason: 'currency' | 'no_debt' | 'exceeds'; debtBefore: number };
+
+/**
+ * Whether cashing an incoming customer cheque can be booked as a payment on that customer's account.
+ * Amounts are never converted here: a cheque in another currency must be settled by hand.
+ */
+export function chequePaymentPlan(cheque: Pick<Cheque, 'amount' | 'currency'>, customer: { totalDebt: number; currency: string }): ChequePaymentPlan {
+  const debtBefore = roundMoney(Number(customer.totalDebt) || 0, customer.currency);
+  if (customer.currency !== cheque.currency) return { ok: false, reason: 'currency', debtBefore };
+  if (debtBefore <= 0) return { ok: false, reason: 'no_debt', debtBefore };
+  const amount = roundMoney(cheque.amount, cheque.currency);
+  if (amount > debtBefore) return { ok: false, reason: 'exceeds', debtBefore };
+  return { ok: true, debtBefore, debtAfter: roundMoney(debtBefore - amount, cheque.currency) };
+}
+
+const DAY_MS = 86_400_000;
+
+/** Whole calendar days from `today` to the due date: negative when past due, null for a malformed date. */
+export function daysUntilDue(dueDate: string, today: string): number | null {
+  if (!isValidDate(dueDate) || !isValidDate(today)) return null;
+  return Math.round((Date.parse(`${dueDate}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) / DAY_MS);
+}
+
+export function addDaysIso(day: string, days: number): string {
+  return new Date(Date.parse(`${day}T00:00:00Z`) + days * DAY_MS).toISOString().slice(0, 10);
+}
+
+export const DUE_SOON_DAYS = 7;
+
+/** Pending cheques that are past due, and those due from today through the next DUE_SOON_DAYS days. */
+export function dueCounts(cheques: Cheque[], today: string): { overdue: number; soon: number } {
+  const limit = addDaysIso(today, DUE_SOON_DAYS);
+  let overdue = 0;
+  let soon = 0;
+  for (const cheque of cheques) {
+    if (cheque.status !== 'pending') continue;
+    if (cheque.dueDate < today) overdue += 1;
+    else if (cheque.dueDate <= limit) soon += 1;
+  }
+  return { overdue, soon };
+}
+
+export function dueFilters(kind: 'overdue' | 'soon', today: string): ChequeFilters {
+  return kind === 'overdue'
+    ? { status: 'pending', bank: '', from: '', to: addDaysIso(today, -1), search: '' }
+    : { status: 'pending', bank: '', from: today, to: addDaysIso(today, DUE_SOON_DAYS), search: '' };
+}
+
 export function localToday(now = new Date()): string {
   const y = now.getFullYear();
   const m = String(now.getMonth() + 1).padStart(2, '0');

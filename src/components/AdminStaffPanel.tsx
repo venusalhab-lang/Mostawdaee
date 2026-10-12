@@ -82,7 +82,7 @@ export function AdminStaffManager({ isRtl }: { isRtl: boolean }) {
           <button type="submit" disabled={busy !== null}
             className="px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-sm font-black flex items-center justify-center gap-2 cursor-pointer">
             <UserPlus size={16} />
-            <span>{busy === 'add' ? (isRtl ? 'جاري الحفظ...' : 'Saving...') : (isRtl ? 'إضافة' : 'Add')}</span>
+            <span>{busy === 'add' ? (isRtl ? 'جارٍ الحفظ...' : 'Saving...') : (isRtl ? 'إضافة' : 'Add')}</span>
           </button>
         </div>
         <p className="text-xs text-slate-500">{platformRoleHelp(role, isRtl)}</p>
@@ -90,7 +90,7 @@ export function AdminStaffManager({ isRtl }: { isRtl: boolean }) {
 
       <div className={card}>
         {loading ? (
-          <p className="text-sm text-slate-500">{isRtl ? 'جاري التحميل...' : 'Loading...'}</p>
+          <p className="text-sm text-slate-500">{isRtl ? 'جارٍ التحميل...' : 'Loading...'}</p>
         ) : error ? (
           <p className="text-sm font-bold text-rose-600">{error}</p>
         ) : staff.length === 0 ? (
@@ -115,7 +115,7 @@ export function AdminStaffManager({ isRtl }: { isRtl: boolean }) {
                     onClick={() => void run(`confirm:${member.email}`, () => confirmPlatformStaff(member.email),
                       isRtl ? `تم تأكيد ${member.email}. اللوحة ظاهرة له الآن.` : `${member.email} is confirmed. The console is now available to them.`)}>
                     <Check size={14} />
-                    <span>{busy === `confirm:${member.email}` ? (isRtl ? 'جاري التأكيد...' : 'Confirming...') : (isRtl ? 'تأكيد الحساب' : 'Confirm account')}</span>
+                    <span>{busy === `confirm:${member.email}` ? (isRtl ? 'جارٍ التأكيد...' : 'Confirming...') : (isRtl ? 'تأكيد الحساب' : 'Confirm account')}</span>
                   </button>
                 )}
                 <select value={member.role} disabled={busy !== null} className={`${input} sm:w-40`}
@@ -226,7 +226,7 @@ export function FounderNotices({ isRtl }: { isRtl: boolean }) {
             </p>
             <button type="button" disabled={busy !== null} onClick={() => void ack(notice.id)}
               className="px-3 py-1.5 rounded-lg bg-white border border-amber-300 text-xs font-black text-amber-950 hover:bg-amber-100 disabled:opacity-50 cursor-pointer">
-              {busy === notice.id ? (isRtl ? 'جاري الحفظ...' : 'Saving...') : (isRtl ? 'اطّلعت' : 'Noted')}
+              {busy === notice.id ? (isRtl ? 'جارٍ الحفظ...' : 'Saving...') : (isRtl ? 'اطّلعت' : 'Noted')}
             </button>
           </li>
         ))}

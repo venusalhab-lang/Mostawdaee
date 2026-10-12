@@ -1,5 +1,6 @@
-// What each role may open and do in the app. The database enforces the same limits
-// (merchant_commit, row-level security); this only keeps the UI from offering what will be refused.
+// What each role may open and do in the app. Writes are enforced by the database as well
+// (merchant_commit, row-level security). Reads are not narrowed per field: a member's session can read
+// every document of the store, costs included. Hiding a screen or a cost column here is presentation, not a security boundary.
 
 export type WorkspaceRole = 'owner' | 'manager' | 'cashier';
 
@@ -9,8 +10,8 @@ export function isWorkspaceRole(value: unknown): value is WorkspaceRole {
   return typeof value === 'string' && (WORKSPACE_ROLES as readonly string[]).includes(value);
 }
 
-// Salaries, full backups and the platform console stay with the owner.
-const OWNER_ONLY_SCREENS = new Set(['employees', 'google-drive', 'admin-dashboard']);
+// Salaries (also inside the accounting books), full backups and the platform console stay with the owner.
+const OWNER_ONLY_SCREENS = new Set(['employees', 'accounting', 'google-drive', 'admin-dashboard']);
 const CASHIER_SCREENS = new Set(['pos', 'invoices', 'settings']);
 
 export function canOpenScreen(role: WorkspaceRole, screen: string): boolean {

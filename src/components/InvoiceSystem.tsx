@@ -1,9 +1,10 @@
-import { consumeInvoiceNumber } from '../lib/invoiceNumber';
+import { consumeInvoiceNumber, peekInvoiceNumber } from '../lib/invoiceNumber';
 import { computeInvoiceTotals, resolveVatRate } from '../lib/invoiceTotals';
 import React, { useState, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { translations } from '../translations';
 import { Language, Invoice, InvoiceItem, Product, Currency } from '../types';
+import { formatPackStock, isPackLine, lineAsPack, lineKey, lineQuantityText, lineUnits, productPack, unitsInCart } from '../lib/packs';
 import { useFirebase } from './FirebaseProvider';
 import { usePreferredCurrency } from './CurrencyContext';
 import { toast } from 'sonner';
@@ -33,8 +34,14 @@ import {
   convertMoney,
   buildUsdUnitRates,
   readCachedLiveRates,
+  readCachedLiveRatesTimestamp,
+  conversionBasis,
 } from '../lib/exchangeRates';
 import CurrencyPicker from './CurrencyPicker';
+import ShowMoreBar from './ui/ShowMoreBar';
+import { useProgressiveList } from '../hooks/useProgressiveList';
+import EInvoicePanel from './EInvoicePanel';
+import { type EInvoiceSubmission, eInvoiceQrDataUrl, fetchEInvoiceSubmissions } from '../lib/einvoiceApi';
 import {
   buildInvoicePrintHtml,
   escapeHtml,
@@ -55,7 +62,7 @@ interface InvoiceSystemProps {
 export default function InvoiceSystem({ language, initialView = 'list' }: InvoiceSystemProps) {
   const t = translations[language];
   const isRtl = language === 'ar';
-  const { products, invoices, saveInvoice, settings, user, customers, can } = useFirebase();
+  const { products, invoices, saveInvoice, settings, user, customers, can, workspace } = useFirebase();
   const { preferredCurrency } = usePreferredCurrency();
   const activeCurrency = preferredCurrency === 'DEFAULT' ? (settings?.currency || 'JOD') : preferredCurrency;
 
@@ -113,6 +120,9 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
   const [invoiceCurrency, setInvoiceCurrency] = useState<Currency>(settings?.currency || 'JOD');
   const [selectedCustomerId, setSelectedCustomerId] = useState('');
   const [paymentMethod, setPaymentMethod] = useState<'cash' | 'card' | 'credit'>('cash');
+  const draftIdRef = useRef<string | null>(null);
+  const submittingRef = useRef(false);
+  React.useEffect(() => { draftIdRef.current = null; }, [invoiceItems, customerName, supplierName, invoiceType, invoiceCurrency, selectedCustomerId, paymentMethod]);
 
   const resetDraft = () => {
     setCustomerName('');
@@ -294,9 +304,17 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
     }
   };
 
-  const exportSingleInvoiceToPDF = (inv: Invoice) => {
+  const exportSingleInvoiceToPDF = async (inv: Invoice) => {
     try {
+      let einvoice: { qrDataUrl: string; number?: string } | undefined;
+      if (user && inv.type === 'sale') {
+        const sent = (await fetchEInvoiceSubmissions([inv.id]).catch(() => ({} as Record<string, EInvoiceSubmission>)))[inv.id];
+        if (sent?.status === 'accepted' && sent.qr) {
+          einvoice = { qrDataUrl: await eInvoiceQrDataUrl(sent.qr), number: sent.einv_num || undefined };
+        }
+      }
       printDocument(buildInvoicePrintHtml({
+        einvoice,
         invoice: inv,
         products,
         isRtl,
@@ -316,11 +334,31 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
 
   const currentRates = () => buildUsdUnitRates(settings, readCachedLiveRates());
 
+  const creditCustomer = invoiceType === 'sale' && paymentMethod === 'credit'
+    ? customers.find((c) => c.id === selectedCustomerId)
+    : undefined;
+  const debtCurrency = (creditCustomer?.currency || invoiceCurrency) as Currency;
+  const debtBasis = creditCustomer && debtCurrency !== invoiceCurrency
+    ? conversionBasis(invoiceCurrency, debtCurrency, settings, readCachedLiveRates(), readCachedLiveRatesTimestamp())
+    : null;
+
   /** A product is priced in its own currency; the invoice line must be in the invoice currency. */
-  const linePrice = (product: Product) => {
-    const base = Number(invoiceType === 'sale' ? product.sellingPrice : product.unitCost) || 0;
+  const linePrice = (product: Product, asPack = false) => {
+    const pack = asPack ? productPack(product) : null;
+    const base = invoiceType === 'sale'
+      ? (pack ? pack.price : Number(product.sellingPrice) || 0)
+      : (Number(product.unitCost) || 0) * (pack ? pack.size : 1);
     const from = product.currency || settings?.currency || 'JOD';
     return from === invoiceCurrency ? base : convertMoney(base, from, invoiceCurrency, currentRates());
+  };
+
+  /** Sale: this product's lines, with one line set to `qty`, must fit in stock. */
+  const fitsStock = (product: Product | undefined, item: InvoiceItem, qty: number) => {
+    if (invoiceType !== 'sale' || !product) return true;
+    const available = Number(product.quantity) || 0;
+    if (unitsInCart(invoiceItems, product.id, lineKey(item)) + lineUnits({ ...item, quantity: qty }) <= available) return true;
+    toast.error(`${t.stock}: ${formatPackStock(available, product, isRtl) ?? available}`);
+    return false;
   };
 
   const changeInvoiceCurrency = (code: Currency) => {
@@ -336,65 +374,89 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
     setInvoiceCurrency(code);
   };
 
-  const addItem = (product: Product) => {
+  const addItem = (product: Product, asPack = false) => {
     // Check stock for sales
     if (invoiceType === 'sale' && product.quantity <= 0) {
       toast.error(t.outOfStock);
       return;
     }
 
-    const price = linePrice(product);
-    const existing = invoiceItems.find(item => item.productId === product.id);
+    const pack = asPack ? productPack(product) : null;
+    const key = lineKey({ productId: product.id, packSize: pack?.size });
+    const price = linePrice(product, !!pack);
+    const existing = invoiceItems.find(item => lineKey(item) === key);
     
     if (existing) {
-      const existingQty = Number(existing.quantity) || 0;
-      const productQty = Number(product.quantity) || 0;
-      if (invoiceType === 'sale' && existingQty >= productQty) {
-        toast.error(`${t.stock}: ${productQty}`);
-        return;
-      }
+      const newQty = (Number(existing.quantity) || 0) + 1;
+      if (!fitsStock(product, existing, newQty)) return;
       setInvoiceItems(invoiceItems.map(item => {
-        if (item.productId === product.id) {
-          const newQty = (Number(item.quantity) || 0) + 1;
+        if (lineKey(item) === key) {
           const uPrice = Number(item.unitPrice) || 0;
           return { ...item, quantity: newQty, total: roundMoney(newQty * uPrice, invoiceCurrency) };
         }
         return item;
       }));
     } else {
-      setInvoiceItems([...invoiceItems, {
+      const newItem: InvoiceItem = {
         productId: product.id,
         description: product.name,
         quantity: 1,
         unitPrice: price,
         total: price,
-        sku: product.sku
-      }]);
+        sku: product.sku,
+        ...(pack ? { packSize: pack.size, packName: lineAsPack(pack).packName } : {}),
+      };
+      if (!fitsStock(product, newItem, 1)) return;
+      setInvoiceItems([...invoiceItems, newItem]);
     }
   };
 
-  const updateItem = (productId: string, quantity: number, unitPrice: number) => {
-    const product = products.find(p => p.id === productId);
-    const targetQty = Number(quantity) || 0;
-    const targetPrice = Number(unitPrice) || 0;
-    const productQty = Number(product?.quantity) || 0;
-    
-    if (invoiceType === 'sale' && product && targetQty > productQty) {
-      toast.error(`${t.stock}: ${productQty}`);
-      return;
-    }
+  const updateItem = (key: string, quantity: number, unitPrice: number) => {
+    const current = invoiceItems.find(item => lineKey(item) === key);
+    if (!current) return;
+    const product = products.find(p => p.id === current.productId);
+    const finalQty = Math.max(1, Number(quantity) || 0);
+    const targetPrice = Math.max(0, Number(unitPrice) || 0);
+    if (finalQty > (Number(current.quantity) || 0) && !fitsStock(product, current, finalQty)) return;
 
     setInvoiceItems(invoiceItems.map(item => {
-      if (item.productId === productId) {
-        const finalQty = Math.max(1, targetQty);
+      if (lineKey(item) === key) {
         return { ...item, quantity: finalQty, unitPrice: targetPrice, total: roundMoney(finalQty * targetPrice, invoiceCurrency) };
       }
       return item;
     }));
   };
 
-  const removeItem = (productId: string) => {
-    setInvoiceItems(invoiceItems.filter(item => item.productId !== productId));
+  /** Switches a line between the single unit and the pack at the product's price for that unit, keeping the count. */
+  const toggleItemPack = (key: string) => {
+    const item = invoiceItems.find(i => lineKey(i) === key);
+    const product = item ? products.find(p => p.id === item.productId) : undefined;
+    const pack = product ? productPack(product) : null;
+    if (!item || !product || !pack) return;
+    const toPack = !isPackLine(item);
+    const nextKey = lineKey({ productId: item.productId, packSize: toPack ? pack.size : undefined });
+    const other = invoiceItems.find(i => lineKey(i) === nextKey);
+    const qty = (Number(item.quantity) || 0) + (Number(other?.quantity) || 0);
+    const unitPrice = linePrice(product, toPack);
+    const next: InvoiceItem = {
+      ...item,
+      quantity: qty,
+      unitPrice,
+      total: roundMoney(qty * unitPrice, invoiceCurrency),
+      packSize: toPack ? pack.size : undefined,
+      packName: toPack ? lineAsPack(pack).packName : undefined,
+    };
+    const rest = invoiceItems.filter(i => lineKey(i) !== key && lineKey(i) !== nextKey);
+    if (invoiceType === 'sale' && unitsInCart(rest, product.id) + lineUnits(next) > (Number(product.quantity) || 0)) {
+      toast.error(`${t.stock}: ${formatPackStock(Number(product.quantity) || 0, product, isRtl) ?? product.quantity}`);
+      return;
+    }
+    const at = Math.min(invoiceItems.findIndex(i => lineKey(i) === key), rest.length);
+    setInvoiceItems([...rest.slice(0, at), next, ...rest.slice(at)]);
+  };
+
+  const removeItem = (key: string) => {
+    setInvoiceItems(invoiceItems.filter(item => lineKey(item) !== key));
   };
 
   const vatRate = resolveVatRate(settings?.defaultVatRate);
@@ -405,7 +467,7 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
   });
 
   const handleCreateInvoice = async (shouldPrint = false) => {
-    if (invoiceItems.length === 0) return;
+    if (invoiceItems.length === 0 || submittingRef.current) return;
     if (invoiceType === 'sale' && !customerName.trim()) {
       toast.error(t.clientName);
       return;
@@ -418,15 +480,24 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
       toast.error(isRtl ? 'يرجى إدخال اسم المورد' : 'Supplier name is required');
       return;
     }
+    if (debtBasis && !debtBasis.ok) {
+      toast.error(isRtl
+        ? `لا يوجد سعر صرف حديث من ${invoiceCurrency} إلى ${debtCurrency} لتسجيل الدين. اتصل بالإنترنت لتحديث الأسعار، أو أدخل أسعارك يدوياً من الإعدادات، أو اجعل الفاتورة بعملة العميل.`
+        : `No recent ${invoiceCurrency} → ${debtCurrency} rate to record this debt. Go online to refresh rates, set manual rates in Settings, or bill in the customer's currency.`);
+      return;
+    }
 
+    submittingRef.current = true;
     setIsSubmitting(true);
     const { subtotal, taxAmount: tax, total: totalAmount } = draftTotals;
 
-    const invoiceNo = consumeInvoiceNumber(invoiceType === 'sale' ? 'SAL' : 'PUR', user?.uid || 'guest');
+    const numberPrefix = invoiceType === 'sale' ? 'SAL' : 'PUR';
+    const sessionUid = user?.uid || 'guest';
+    const invoiceNo = peekInvoiceNumber(numberPrefix, sessionUid, workspace?.ownerId);
     const chosenCustomer = customers.find((c) => c.id === selectedCustomerId);
 
     const newInvoice: Invoice = {
-      id: crypto.randomUUID(),
+      id: (draftIdRef.current ||= crypto.randomUUID()),
       invoiceNumber: invoiceNo,
       customerName: invoiceType === 'sale' ? customerName.trim() : undefined,
       supplierName: invoiceType === 'purchase' ? supplierName.trim() : undefined,
@@ -452,6 +523,8 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
 
     try {
       newInvoice.invoiceNumber = await saveInvoice(newInvoice);
+      consumeInvoiceNumber(numberPrefix, sessionUid, workspace?.ownerId);
+      draftIdRef.current = null;
 
       if (shouldPrint) {
         setSelectedInvoice(newInvoice);
@@ -478,14 +551,17 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
         toast.error(isRtl ? "فشلت عملية حفظ الفاتورة" : "Failed to record invoice");
       }
     } finally {
+      submittingRef.current = false;
       setIsSubmitting(false);
     }
   };
 
-  const filteredProducts = products.filter(p => 
-    p.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
-    p.sku.toLowerCase().includes(searchTerm.toLowerCase())
-  );
+  const filteredProducts = React.useMemo(() => {
+    const q = searchTerm.toLowerCase();
+    return products.filter(p => p.name.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q));
+  }, [products, searchTerm]);
+  const invoicePage = useProgressiveList(sortedInvoices, `${invSearchTerm}|${listCurrency}|${sortConfig.key}|${sortConfig.direction}`);
+  const productPage = useProgressiveList(filteredProducts, `${searchTerm}|${invoiceType}`);
 
   const quickSellProducts = React.useMemo(() => {
     if (invoiceType !== 'sale') return [];
@@ -598,7 +674,7 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-              {sortedInvoices.map((inv) => (
+              {invoicePage.visible.map((inv) => (
                 <motion.div 
                   key={inv.id}
                   whileHover={{ y: -5, scale: 1.02 }}
@@ -645,6 +721,7 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
               </motion.div>
             ))}
           </div>
+          <ShowMoreBar isRtl={isRtl} shown={invoicePage.shown} total={invoicePage.total} pageSize={invoicePage.pageSize} onMore={invoicePage.showMore} onAll={invoicePage.showAll} className="mt-4" />
         </motion.div>
       )}
 
@@ -698,7 +775,7 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
                             className="p-3 bg-indigo-50 dark:bg-indigo-900/20 border border-indigo-100 dark:border-indigo-800/50 rounded-2xl text-right hover:border-indigo-400 transition-all group"
                           >
                             <div className="font-bold text-xs text-indigo-900 dark:text-indigo-100 truncate group-hover:text-indigo-600 transition-colors">{p.name}</div>
-                            <div className="text-[10px] font-black text-indigo-600 dark:text-indigo-400 font-mono mt-0.5">{formatCurrency(p.sellingPrice)}</div>
+                            <div className="text-[10px] font-black text-indigo-600 dark:text-indigo-400 font-mono mt-0.5">{formatCurrency(p.sellingPrice, p.currency)}</div>
                           </button>
                         ))}
                       </div>
@@ -716,7 +793,7 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
                     />
                   </div>
                   <div className="space-y-3 max-h-[600px] overflow-y-auto custom-scrollbar pr-2">
-                    {filteredProducts.map(p => (
+                    {productPage.visible.map(p => (
                       <button
                         key={p.id}
                         onClick={() => addItem(p)}
@@ -726,12 +803,13 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
                         <div>
                           <div className="font-bold text-gray-900 dark:text-white">{p.name}</div>
                           <div className="flex items-center gap-3 mt-1">
-                            <span className="text-[10px] bg-gray-50 dark:bg-gray-900 px-2 py-0.5 rounded-lg text-gray-500 font-mono">Stock: {p.quantity}</span>
-                            <span className="text-xs font-black text-indigo-600 dark:text-indigo-400 font-mono">{formatCurrency(invoiceType === 'sale' ? p.sellingPrice : p.unitCost)}</span>
+                            <span className="text-[10px] bg-gray-50 dark:bg-gray-900 px-2 py-0.5 rounded-lg text-gray-500 font-mono">{isRtl ? 'المتوفر' : 'Stock'}: {formatPackStock(p.quantity, p, isRtl) ?? p.quantity}</span>
+                            <span className="text-xs font-black text-indigo-600 dark:text-indigo-400 font-mono">{formatCurrency(invoiceType === 'sale' ? p.sellingPrice : p.unitCost, p.currency)}</span>
                           </div>
                         </div>
                       </button>
                     ))}
+                    <ShowMoreBar isRtl={isRtl} shown={productPage.shown} total={productPage.total} pageSize={productPage.pageSize} onMore={productPage.showMore} onAll={productPage.showAll} />
                   </div>
                 </div>
 
@@ -825,6 +903,27 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
                             </button>
                           ))}
                         </div>
+                        {debtBasis && (
+                          <p className={`text-[11px] font-bold leading-relaxed ${debtBasis.ok ? 'text-gray-500 dark:text-gray-400' : 'text-rose-600 dark:text-rose-400'}`}>
+                            {debtBasis.ok ? (
+                              <>
+                                {isRtl ? 'يُسجَّل الدين بعملة العميل: ' : 'Debt is recorded in the customer\'s currency: '}
+                                <span dir="ltr" className="font-mono">
+                                  {formatMoney(convertMoney(draftTotals.total, invoiceCurrency, debtCurrency, currentRates()), debtCurrency, 'en-US')}
+                                  {` · 1 ${invoiceCurrency} = ${Number(debtBasis.rate.toPrecision(6)).toLocaleString('en-US', { maximumFractionDigits: 8 })} ${debtCurrency}`}
+                                </span>
+                                {' · '}
+                                {debtBasis.manual
+                                  ? (isRtl ? 'سعرك اليدوي' : 'your manual rate')
+                                  : `${isRtl ? 'سعر محدَّث' : 'rate as of'} ${new Date(debtBasis.liveAt!).toLocaleString(isRtl ? 'ar' : 'en', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}`}
+                              </>
+                            ) : (
+                              isRtl
+                                ? `لا يوجد سعر صرف حديث من ${invoiceCurrency} إلى ${debtCurrency}. اتصل بالإنترنت أو أدخل أسعارك يدوياً من الإعدادات، أو اجعل الفاتورة بعملة العميل.`
+                                : `No recent ${invoiceCurrency} → ${debtCurrency} rate. Go online, set manual rates in Settings, or bill in the customer's currency.`
+                            )}
+                          </p>
+                        )}
                       </div>
                     )}
 
@@ -836,25 +935,52 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
                         </div>
                       ) : (
                         <div className="space-y-4">
-                          {invoiceItems.map(item => (
-                            <div key={item.productId} className="flex items-center justify-between bg-white dark:bg-gray-800 p-5 rounded-3xl shadow-sm border border-gray-100 dark:border-gray-700 group hover:shadow-md transition-all">
-                              <button onClick={() => removeItem(item.productId)} className="text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-900/30 p-2 rounded-xl transition-colors" aria-label={isRtl ? 'حذف' : 'Delete'}>
+                          {invoiceItems.map(item => {
+                            const key = lineKey(item);
+                            const origin = products.find(p => p.id === item.productId);
+                            const pack = origin ? productPack(origin) : null;
+                            const unitName = origin?.unitName?.trim() || (isRtl ? 'وحدة' : 'unit');
+                            const packName = pack?.name || (isRtl ? 'عبوة' : 'pack');
+                            return (
+                            <div key={key} className="flex items-center justify-between bg-white dark:bg-gray-800 p-5 rounded-3xl shadow-sm border border-gray-100 dark:border-gray-700 group hover:shadow-md transition-all">
+                              <button onClick={() => removeItem(key)} className="text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-900/30 p-2 rounded-xl transition-colors" aria-label={isRtl ? 'حذف' : 'Delete'}>
                                 <Trash2 size={18} />
                               </button>
                               
                               <div className="flex-1 flex flex-col items-center gap-2">
                                 <div className="flex items-center gap-4 bg-gray-50 dark:bg-gray-900 px-3 py-1 rounded-xl">
-                                  <button onClick={() => updateItem(item.productId, item.quantity - 1, item.unitPrice)} className="text-gray-400 hover:text-indigo-600 font-black text-lg">-</button>
+                                  <button onClick={() => updateItem(key, item.quantity - 1, item.unitPrice)} className="text-gray-400 hover:text-indigo-600 font-black text-lg">-</button>
                                   <span className="font-mono font-black text-gray-900 dark:text-white w-8 text-center">{item.quantity}</span>
-                                  <button onClick={() => updateItem(item.productId, item.quantity + 1, item.unitPrice)} className="text-gray-400 hover:text-indigo-600 font-black text-lg">+</button>
+                                  <button onClick={() => updateItem(key, item.quantity + 1, item.unitPrice)} className="text-gray-400 hover:text-indigo-600 font-black text-lg">+</button>
                                 </div>
+                                {pack && (
+                                  <span className="inline-flex rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden text-[10px] font-black" role="group" aria-label={isRtl ? 'بالوحدة أو بالعبوة' : 'By unit or pack'}>
+                                    {[false, true].map((asPack) => {
+                                      const active = isPackLine(item) === asPack;
+                                      return (
+                                        <button
+                                          key={String(asPack)}
+                                          type="button"
+                                          aria-pressed={active}
+                                          onClick={() => { if (!active) toggleItemPack(key); }}
+                                          className={`px-2 py-0.5 ${active ? 'bg-indigo-600 text-white' : 'text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700'}`}
+                                        >
+                                          {asPack ? `${packName} (${pack.size})` : unitName}
+                                        </button>
+                                      );
+                                    })}
+                                  </span>
+                                )}
                                 <div className="flex items-center gap-1 font-mono text-[10px] font-black text-gray-400">
                                   <span>{CURRENCY_SYMBOLS[invoiceCurrency] || invoiceCurrency}</span>
                                   <input 
                                     type="number" 
+                                    min={0}
+                                    step="any"
                                     value={item.unitPrice} 
-                                    onChange={(e) => updateItem(item.productId, item.quantity, parseFloat(e.target.value) || 0)}
+                                    onChange={(e) => updateItem(key, item.quantity, parseFloat(e.target.value) || 0)}
                                     className="w-16 bg-transparent outline-none text-center focus:text-indigo-600"
+                                    aria-label={isPackLine(item) ? (isRtl ? `سعر ${packName}` : `${packName} price`) : (isRtl ? 'سعر الوحدة' : 'Unit price')}
                                   />
                                 </div>
                               </div>
@@ -864,7 +990,8 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
                                 <div className="text-[10px] font-black text-indigo-600 dark:text-indigo-400 mt-1 font-mono">{formatCurrency(item.total, invoiceCurrency)}</div>
                               </div>
                             </div>
-                          ))}
+                            );
+                          })}
                         </div>
                       )}
                     </div>
@@ -973,6 +1100,8 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
               </button>
             </div>
 
+            <EInvoicePanel invoice={selectedInvoice} isRtl={isRtl} />
+
             <div
               id="invoice-capture"
               ref={printRef}
@@ -1052,7 +1181,7 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
                             <div className="font-bold text-slate-900 dark:text-slate-100">{item.description}</div>
                             {sku && <div className="text-[11px] text-slate-400 font-mono mt-0.5">{isRtl ? 'رمز الصنف' : 'SKU'}: {sku}</div>}
                           </td>
-                          <td className="py-3 px-4 text-center">{item.quantity}</td>
+                          <td className="py-3 px-4 text-center">{lineQuantityText(item, isRtl)}</td>
                           <td className="py-3 px-4 text-center font-mono text-slate-500">{formatCurrency(item.unitPrice, selectedInvoice.currency)}</td>
                           <td className={`py-3 px-4 font-mono font-bold ${isRtl ? 'text-left' : 'text-right'}`}>{formatCurrency(item.total, selectedInvoice.currency)}</td>
                         </tr>
@@ -1067,6 +1196,12 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
                   <span className="text-slate-400">{isRtl ? 'المجموع الفرعي' : 'Subtotal'}</span>
                   <span className="font-mono">{formatCurrency(selectedInvoice.subtotal, selectedInvoice.currency)}</span>
                 </div>
+                {Number(selectedInvoice.discount) > 0 && (
+                  <div className="flex justify-between">
+                    <span className="text-slate-400">{isRtl ? 'الخصم' : 'Discount'}</span>
+                    <span className="font-mono">-{formatCurrency(Number(selectedInvoice.discount), selectedInvoice.currency)}</span>
+                  </div>
+                )}
                 <div className="flex justify-between">
                   <span className="text-slate-400">{isRtl ? 'الضريبة' : 'VAT'} ({invoiceVatRate(selectedInvoice)}%)</span>
                   <span className="font-mono">{formatCurrency(selectedInvoice.taxAmount, selectedInvoice.currency)}</span>

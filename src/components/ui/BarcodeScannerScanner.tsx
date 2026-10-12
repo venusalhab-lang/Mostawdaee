@@ -148,7 +148,7 @@ export default function BarcodeScannerScanner({ onScan, isRtl, onClose }: Props)
         <div className="flex items-center gap-2">
           <Camera className={`h-5 w-5 ${isScanning ? 'text-emerald-400 animate-pulse' : 'text-slate-400'}`} />
           <span className="text-xs font-black tracking-wide uppercase">
-            {isRtl ? 'الماسح الضوئي الذكي' : 'Camera Intelligence Scannner'}
+            {isRtl ? 'ماسح الباركود' : 'Barcode scanner'}
           </span>
         </div>
 

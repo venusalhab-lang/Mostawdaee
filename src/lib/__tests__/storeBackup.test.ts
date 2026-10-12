@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
-  BACKUP_APP, backupCounts, buildStoreBackup, isLegacyTableBackup, isStoreBackup, restoreStoreBackup, stockCsv,
+  BACKUP_APP, backupCounts, buildStoreBackup, isLegacyTableBackup, isStoreBackup, newerLiveActivity, restoreStoreBackup, stockCsv,
   type RestoreActions,
 } from '../storeBackup';
+
+const noLive = { invoices: [], vaultTransactions: [], customerTransactions: [] };
 
 const product = (over: Record<string, unknown> = {}) => ({
   id: 'p1', name: 'Rice "5kg"', category: 'Food', warehouseId: 'w1', quantity: 4, sellingPrice: 12.5,
@@ -50,10 +52,32 @@ describe('store backup', () => {
       customerTransactions: [{ id: 'ct1' }] as any,
       vaultTransactions: [{ id: 'v1' }, { amount: 3 }] as any,
       vault: { currentBalance: 10, lastUpdated: 5 },
-    }, actions);
+    }, actions, noLive);
     expect(calls).toEqual([
       'settings', 'warehouse', 'product', 'invoice', 'employee', 'payroll', 'customer', 'customerTx', 'vaultRecord', 'vault',
     ]);
+  });
+
+  it('refuses an old backup before writing anything when the store has newer activity', async () => {
+    const calls: string[] = [];
+    const rec = (name: string) => async (..._args: unknown[]) => { calls.push(name); };
+    const actions = {
+      saveSettings: rec('settings'), saveWarehouse: rec('warehouse'), saveProduct: rec('product'),
+      saveInvoice: rec('invoice'), saveEmployee: rec('employee'), savePayrollRecord: rec('payroll'),
+      saveCustomer: rec('customer'), saveCustomerTransaction: rec('customerTx'),
+      saveVaultRecord: rec('vaultRecord'), restoreVault: rec('vault'),
+    } as RestoreActions;
+    const live = { invoices: [{ date: 2_000 }], vaultTransactions: [], customerTransactions: [] };
+    await expect(restoreStoreBackup({ timestamp: 1_000, products: [product()] }, actions, live))
+      .rejects.toMatchObject({ code: 'backup-older', newer: 2_000 });
+    expect(calls).toEqual([]);
+  });
+
+  it('dates live activity from invoices, vault movements and ledger entries', () => {
+    expect(newerLiveActivity(5_000, { invoices: [{ date: 4_000 }], vaultTransactions: [{ timestamp: 4_500 }], customerTransactions: [] })).toBeNull();
+    expect(newerLiveActivity(5_000, { invoices: [], vaultTransactions: [{ timestamp: 6_000 }], customerTransactions: [] })).toBe(6_000);
+    expect(newerLiveActivity(Date.parse('2026-10-01'), { invoices: [], vaultTransactions: [], customerTransactions: [{ date: '2026-10-05T10:00:00Z' }] })).toBe(Date.parse('2026-10-05T10:00:00Z'));
+    expect(newerLiveActivity(undefined, { invoices: [{ date: 1 }], vaultTransactions: [], customerTransactions: [] })).toBe(1);
   });
 
   it('stops at the first failure so a refused vault is reported', async () => {
@@ -63,7 +87,7 @@ describe('store backup', () => {
       saveCustomer: async () => {}, saveCustomerTransaction: async () => {}, saveVaultRecord: async () => {},
       restoreVault: async () => { throw Object.assign(new Error('vault is newer'), { code: 'vault-newer' }); },
     } as RestoreActions;
-    await expect(restoreStoreBackup({ vault: { currentBalance: 0, lastUpdated: 1 } as any }, actions)).rejects.toMatchObject({ code: 'vault-newer' });
+    await expect(restoreStoreBackup({ vault: { currentBalance: 0, lastUpdated: 1 } as any }, actions, noLive)).rejects.toMatchObject({ code: 'vault-newer' });
   });
 
   it('writes a stock sheet with each price in its own currency', () => {

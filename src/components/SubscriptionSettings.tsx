@@ -6,6 +6,10 @@ import { useSubscriptionSync } from '../hooks/useSubscriptionSync';
 import { useAuth } from './AuthContext';
 import PremiumUpgradeModal from './PremiumUpgradeModal';
 import { sounds } from '../lib/sounds';
+import { arCount } from '../lib/arabicPlural';
+
+const WITHIN_DAYS = { one: 'يوم واحد', two: 'يومين', few: '{n} أيام', many: '{n} يوماً', other: '{n} يوم' };
+const DAYS_LEFT = { one: 'يوم واحد متبقٍ', two: 'يومان متبقيان', few: '{n} أيام متبقية', many: '{n} يوماً متبقياً', other: '{n} يوم متبقٍ' };
 
 interface Props {
   language: 'ar' | 'en';
@@ -56,12 +60,10 @@ export default function SubscriptionSettings({ language }: Props) {
   const expiryLabel = subscription?.expiry_date
     ? new Date(subscription.expiry_date).toLocaleDateString(isRtl ? 'ar-EG' : 'en-US', { year: 'numeric', month: 'long', day: 'numeric' })
     : '';
-  const renewalDue = isPremiumActive && daysRemaining <= 30;
-
   const status = isGuest
     ? { label: isRtl ? 'وضع الضيف' : 'Guest mode', tone: 'slate' }
     : isPremiumActive
-      ? { label: isRtl ? 'النسخة الكاملة (Premium)' : 'Premium', tone: 'emerald' }
+      ? { label: isRtl ? 'النسخة الكاملة' : 'Premium', tone: 'emerald' }
       : isTrialActive
         ? { label: isRtl ? 'فترة تجريبية' : 'Free trial', tone: 'cyan' }
         : { label: isRtl ? 'غير مفعّل' : 'Inactive', tone: 'rose' };
@@ -97,7 +99,7 @@ export default function SubscriptionSettings({ language }: Props) {
           <p className="flex-1 text-sm font-semibold text-amber-900 dark:text-amber-200 leading-relaxed">
             {isPremiumActive
               ? (isRtl
-                  ? `ينتهي اشتراكك خلال ${daysRemaining} أيام. جدّده الآن حتى لا يتوقف العمل.`
+                  ? `ينتهي اشتراكك خلال ${arCount(daysRemaining, WITHIN_DAYS)}. جدّده الآن حتى لا يتوقف العمل.`
                   : `Your subscription ends in ${daysRemaining} days. Renew now so work is not interrupted.`)
               : (isRtl
                   ? `تنتهي الفترة التجريبية خلال ${daysRemaining} أيام. رقِّ الحساب من هنا قبل أن تُقفل الشاشات.`
@@ -118,13 +120,13 @@ export default function SubscriptionSettings({ language }: Props) {
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3">
             <span className={`px-3 py-1.5 rounded-xl text-xs font-black ${toneClasses[status.tone]}`}>{status.label}</span>
-            {loading && <span className="text-xs text-gray-400">{isRtl ? 'جاري التحقق...' : 'Checking...'}</span>}
+            {loading && <span className="text-xs text-gray-400">{isRtl ? 'جارٍ التحقق...' : 'Checking...'}</span>}
           </div>
           {!isGuest && (isPremiumActive || isTrialActive) && (
             <div className="text-sm font-bold text-gray-700 dark:text-gray-300 flex items-center gap-2">
               <CalendarClock size={16} className="text-indigo-500" />
               <span>
-                {isRtl ? `${daysRemaining} يوماً متبقية` : `${daysRemaining} days left`}
+                {isRtl ? arCount(daysRemaining, DAYS_LEFT) : `${daysRemaining} days left`}
                 {expiryLabel ? ` · ${expiryLabel}` : ''}
               </span>
             </div>
@@ -147,23 +149,22 @@ export default function SubscriptionSettings({ language }: Props) {
                   ? 'اشتراكك السنوي فعّال. يتجدد تلقائياً عبر Google Play ما لم تلغِه.'
                   : 'Your annual subscription is active. It renews automatically through Google Play unless you cancel it.')
               : (isRtl
-                  ? 'الاشتراك السنوي بقيمة 100$ يفتح كامل المزايا: المزامنة السحابية، تطبيق الهاتف، تعدد العملات والتقارير.'
-                  : 'The $100/year plan unlocks everything: cloud sync, the mobile app, multi-currency and reports.')}
+                  ? 'الاشتراك السنوي يفتح كامل المزايا: المزامنة السحابية، وتطبيق الهاتف، وتعدد العملات، والتقارير.'
+                  : 'The annual plan unlocks everything: cloud sync, the mobile app, multi-currency and reports.')}
           </p>
         )}
 
         {!isGuest && (
           <div className="flex flex-wrap gap-3">
-            {(!isPremiumActive || renewalDue) && (
+            {/* An active Google Play subscription renews itself; a second purchase here would only fail or double-charge. */}
+            {!isPremiumActive && (
               <button
                 type="button"
                 onClick={() => { sounds?.playClick(); setModalOpen(true); }}
                 className="px-5 py-3 rounded-2xl bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-black text-sm flex items-center gap-2 cursor-pointer shadow-lg"
               >
                 <Sparkles size={16} />
-                {isPremiumActive
-                  ? (isRtl ? 'تجديد الاشتراك' : 'Renew subscription')
-                  : (isRtl ? 'ترقية للنسخة الكاملة' : 'Upgrade to Premium')}
+                {isRtl ? 'ترقية للنسخة الكاملة' : 'Upgrade to Premium'}
               </button>
             )}
             {isPremiumActive && (
