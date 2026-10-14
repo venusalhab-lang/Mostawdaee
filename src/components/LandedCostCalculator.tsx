@@ -1,11 +1,11 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { Package, Truck, ShieldCheck, DollarSign, ArrowRightLeft, TrendingUp, Info, CheckCircle2, Check, Loader2 } from 'lucide-react';
 import { Language, ProductDetails, LogisticsCosts, CalculationResults, Product, StockStatus, AppSettings } from '../types';
 import { translations } from '../translations';
 import { motion, AnimatePresence } from 'motion/react';
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from 'recharts';
 import { computeStockStatus } from '../lib/stock';
-import { apiUrl } from '../lib/apiBase';
+import { apiUrl, readApiJson } from '../lib/apiBase';
 import { buildUsdUnitRates, convertAmount, readCachedLiveRates, roundMoney } from '../lib/exchangeRates';
 import { toast } from 'sonner';
 
@@ -68,7 +68,9 @@ export default function LandedCostCalculator({ language, settings, onAddProduct,
     inspectionFees: undefined,
   }));
 
+  const rateRequest = useRef(0);
   const fetchExchangeRate = async (baseCurrency: string) => {
+    const request = ++rateRequest.current;
     if (baseCurrency === localCurrency) {
       setLogistics(prev => ({ ...prev, exchangeRate: 1 }));
       setRateSource('same');
@@ -83,19 +85,24 @@ export default function LandedCostCalculator({ language, settings, onAddProduct,
     setIsFetchingRate(true);
     try {
       const response = await fetch(apiUrl(`/api/exchange-rate/${baseCurrency}`));
-      if (!response.ok) throw new Error('Fetch failed');
-      const data = await response.json();
+      const data = await readApiJson(response);
+      if (!response.ok || !data) throw new Error('Fetch failed');
+      if (data.provider === 'local_database_fallback' || String(data.base_code || '').toUpperCase() !== baseCurrency.toUpperCase()) {
+        throw new Error('Not a live rate');
+      }
       const live = Number(data?.rates?.[localCurrency]);
       if (!(live > 0)) throw new Error('Rate missing');
+      if (request !== rateRequest.current) return;
       setLogistics(prev => ({ ...prev, exchangeRate: live }));
       setRateSource('live');
     } catch (error) {
+      if (request !== rateRequest.current) return;
       console.error("Error fetching rate:", error);
       toast.warning(fallback
         ? (isRtl ? 'تعذّر جلب السعر المباشر؛ يُستخدم سعر تقريبي. راجعه قبل الحفظ.' : 'Live rate unavailable; using an approximate rate. Check it before saving.')
         : (isRtl ? 'تعذّر جلب سعر الصرف. أدخله يدوياً.' : 'Could not load the exchange rate. Enter it manually.'));
     } finally {
-      setIsFetchingRate(false);
+      if (request === rateRequest.current) setIsFetchingRate(false);
     }
   };
 

@@ -63,6 +63,7 @@ export default function SubscriptionExpired({ language, onLanguageToggle, reason
     setBusy('buy');
     initializeBilling(
       async (tx) => {
+        setBusy('buy');
         try {
           await activatePaidSubscription(tx);
           toast.success(isRtl ? 'تم تفعيل اشتراكك.' : 'Your subscription is active.');
@@ -84,6 +85,8 @@ export default function SubscriptionExpired({ language, onLanguageToggle, reason
       await makePurchase(PRODUCT_ID);
     } catch (err: any) {
       toast.error(err?.message || (isRtl ? 'تعذّر بدء الشراء' : 'Could not start the purchase'));
+    } finally {
+      // Google Play reports the approved purchase later; the screen must not stay locked if it never comes (cancelled or pending payment).
       setBusy(null);
     }
   };
@@ -196,7 +199,6 @@ export default function SubscriptionExpired({ language, onLanguageToggle, reason
           <button
             type="button"
             onClick={() => { sounds.playClick(); onLogout(); }}
-            disabled={busy !== null}
             className={secondary}
           >
             <LogOut size={13} />

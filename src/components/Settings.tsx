@@ -1,14 +1,15 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { 
   User, Building2, Percent, Globe, Save, CheckCircle2, 
   Sparkles, Palette, Zap, Moon, Sun, Monitor, 
   ShieldCheck, Bell, Database, Download, RefreshCw, Upload,
   Type, Volume2, Info, Copy, Check, FileText, DatabaseZap, CheckSquare, AlertTriangle,
-  Phone, MapPin, Mail, Crown, Users, LifeBuoy, UserCog, FileCheck2
+  Phone, MapPin, Mail, Crown, Users, LifeBuoy, UserCog, FileCheck2, Printer
 } from 'lucide-react';
 import SubscriptionSettings from './SubscriptionSettings';
 import EInvoiceSettings from './EInvoiceSettings';
 import AccountSettings from './AccountSettings';
+import ReceiptPrinterSettings from './ReceiptPrinterSettings';
 import { TeamManager } from './TeamSettings';
 import SupportCenter from './SupportCenter';
 import { Language, AppSettings, Currency } from '../types';
@@ -31,10 +32,10 @@ interface Props {
   onSaveSettings: (settings: AppSettings) => Promise<void> | void;
 }
 
-type SettingsSection = 'profile' | 'visuals' | 'inventory' | 'notifications' | 'subscription' | 'team' | 'einvoice' | 'support' | 'account' | 'system';
+type SettingsSection = 'profile' | 'visuals' | 'inventory' | 'notifications' | 'printing' | 'subscription' | 'team' | 'einvoice' | 'support' | 'account' | 'system';
 
 // These sections save their own changes; inside the settings form their forms would also submit it.
-const SELF_CONTAINED_SECTIONS = new Set<SettingsSection>(['subscription', 'team', 'einvoice', 'support', 'account']);
+const SELF_CONTAINED_SECTIONS = new Set<SettingsSection>(['printing', 'subscription', 'team', 'einvoice', 'support', 'account']);
 
 export default function Settings({ language, onLanguageToggle, settings, onSaveSettings }: Props) {
   const t = translations[language];
@@ -48,6 +49,10 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
     payrollRecords = [],
     customers = [],
     customerTransactions = [],
+    suppliers = [],
+    supplierTransactions = [],
+    shifts = [],
+    orders = [],
     vaultTransactions = [],
     warehouses = [],
     vault = null,
@@ -76,6 +81,8 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
     exchangeRateJOD_ILS: settings.exchangeRateJOD_ILS ?? 5.22,
     exchangeRateJOD_USD: settings.exchangeRateJOD_USD ?? 1.41,
   });
+  // Only what was edited here is saved: the currency or language may have changed elsewhere since this form opened.
+  const openedForm = useRef(formData);
 
   const handleLogoChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -134,7 +141,13 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      await onSaveSettings(formData);
+      const edited = Object.fromEntries(
+        (Object.keys(formData) as (keyof AppSettings)[])
+          .filter((key) => formData[key] !== openedForm.current[key])
+          .map((key) => [key, formData[key]]),
+      ) as Partial<AppSettings>;
+      await onSaveSettings({ ...settings, ...edited });
+      openedForm.current = formData;
       setShowToast(true);
       setTimeout(() => setShowToast(false), 3000);
     } catch (error) {
@@ -150,6 +163,7 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
     { id: 'visuals', label: t.visuals, icon: Palette },
     { id: 'inventory', label: t.safetyLogic, icon: ShieldCheck },
     { id: 'notifications', label: t.notifications, icon: Bell },
+    { id: 'printing', label: language === 'ar' ? 'الطباعة' : 'Printing', icon: Printer },
     { id: 'subscription', label: language === 'ar' ? 'الاشتراك' : 'Subscription', icon: Crown },
     { id: 'team', label: language === 'ar' ? 'الفريق' : 'Team', icon: Users },
     ...(user ? [{ id: 'einvoice' as const, label: language === 'ar' ? 'الفوترة الوطنية' : 'E-invoicing', icon: FileCheck2 }] : []),
@@ -162,7 +176,7 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
     const payload = buildStoreBackup({
       creator: user?.email,
       settings: formData,
-      products, invoices, employees, payrollRecords, customers, customerTransactions,
+      products, invoices, employees, payrollRecords, customers, customerTransactions, suppliers, supplierTransactions, shifts, orders,
       vaultTransactions, warehouses, vault,
     });
 
@@ -209,9 +223,13 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
 
       await restoreStoreBackup(selectedBackupForLocalRestore, {
         saveSettings, saveWarehouse, saveProduct, saveInvoice, saveEmployee, savePayrollRecord, saveCustomer, saveCustomerTransaction,
+        saveSupplierRecord: (sp) => setDoc(doc(db, 'users', user.uid, 'suppliers', sp.id), sp),
+        saveSupplierTransaction: (tx) => setDoc(doc(db, 'users', user.uid, 'supplier_transactions', tx.id), tx),
+        saveShift: (shift) => setDoc(doc(db, 'users', user.uid, 'shifts', shift.id), shift),
+        saveOrder: (order) => setDoc(doc(db, 'users', user.uid, 'orders', order.id), order),
         saveVaultRecord: (tx) => setDoc(doc(db, 'users', user.uid, 'vault_records', tx.id), tx),
         restoreVault: (v) => restoreVaultBalance(db, user.uid, v),
-      }, { invoices, vaultTransactions, customerTransactions });
+      }, { invoices, vaultTransactions, customerTransactions, supplierTransactions });
       if (selectedBackupForLocalRestore.settings) setFormData(selectedBackupForLocalRestore.settings);
 
       toast.success(
@@ -312,6 +330,7 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
               transition={{ type: 'spring', stiffness: 300, damping: 30 }}
               className="bg-white/40 dark:bg-gray-900/40 backdrop-blur-xl p-8 rounded-[2.5rem] border border-white/20 dark:border-gray-800/50 shadow-2xl space-y-8"
             >
+              {activeSection === 'printing' && <ReceiptPrinterSettings language={language} />}
               {activeSection === 'subscription' && <SubscriptionSettings language={language} />}
               {activeSection === 'team' && <TeamManager language={language} />}
               {activeSection === 'einvoice' && user && <EInvoiceSettings language={language} />}

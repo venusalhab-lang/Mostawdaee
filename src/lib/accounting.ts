@@ -1,7 +1,8 @@
-import type { CustomerTransaction, Invoice, PayrollRecord, Product, StockMovement, VaultTransaction } from '../types';
+import type { CustomerTransaction, Invoice, PayrollRecord, Product, StockMovement, SupplierTransaction, VaultTransaction } from '../types';
 import { currencyDecimals, roundMoney } from './exchangeRates';
 import { expenseCategoryOf, type ExpenseCategoryId } from './expenseCategories';
 import { lineUnits } from './packs';
+import { csvCell } from './csv';
 
 /**
  * Double-entry books derived from the records the app already keeps (invoices, vault, customer ledger, payroll, stock movements).
@@ -192,7 +193,7 @@ export function fromMinor(minor: number, code: string): number {
 
 // ---------------------------------------------------------------- journal
 
-export type EntrySource = 'sale' | 'cogs' | 'purchase' | 'vault' | 'customer' | 'payroll' | 'stock' | 'manual';
+export type EntrySource = 'sale' | 'sale_return' | 'cogs' | 'purchase' | 'purchase_return' | 'vault' | 'customer' | 'supplier' | 'payroll' | 'stock' | 'manual';
 
 export interface JournalLine {
   account: AccountCode;
@@ -317,9 +318,12 @@ function vaultCounterAccount(tx: VaultTransaction, config: AccountingConfig): { 
   };
   switch (source) {
     case 'sale_invoice':
+    case 'sale_return':
     case 'customer_payment':
       return { account: '1150', needsReview: false };
     case 'purchase_invoice':
+    case 'purchase_return':
+    case 'supplier_payment':
       return { account: '2100', needsReview: false };
     case 'payroll':
       return { account: tx.refId ? '2300' : '5200', needsReview: false };
@@ -380,6 +384,8 @@ export interface JournalInput {
   products: Product[];
   vaultTransactions: VaultTransaction[];
   customerTransactions: CustomerTransaction[];
+  /** Optional so older callers keep working; missing means no supplier accounts. */
+  supplierTransactions?: SupplierTransaction[];
   payrollRecords: PayrollRecord[];
   stockMovements: StockMovement[];
   config: AccountingConfig;
@@ -419,9 +425,11 @@ export function buildJournal(input: JournalInput): Journal {
     const tax = toMinor(num(inv.taxAmount), currency);
     const date = num(inv.date);
     const memo = inv.invoiceNumber ? `#${inv.invoiceNumber}` : inv.id;
-    if (inv.type === 'sale') {
-      push({ id: `sale-${inv.id}`, date, currency, source: 'sale', refId: inv.id, memo,
-        parts: [['1150', total], ['4100', -(total - tax)], ['2200', -tax]] });
+    if (inv.type === 'sale' || inv.type === 'return') {
+      // A return mirrors the sale: revenue, VAT and cost of goods come back out.
+      const sign = inv.type === 'return' ? -1 : 1;
+      push({ id: `${inv.type === 'return' ? 'return' : 'sale'}-${inv.id}`, date, currency, source: inv.type === 'return' ? 'sale_return' : 'sale',
+        refId: inv.id, memo, parts: [['1150', sign * total], ['4100', -sign * (total - tax)], ['2200', -sign * tax]] });
 
       const costByCurrency = new Map<string, { minorValue: number; estimate: boolean }>();
       for (const item of inv.items || []) {
@@ -454,11 +462,15 @@ export function buildJournal(input: JournalInput): Journal {
         const cost = Math.round(minorValue);
         if (estimate) issues.estimatedEntries += 1;
         push({ id: `cogs-${inv.id}-${costCurrency}`, date, currency: costCurrency, source: 'cogs', refId: inv.id, memo, estimate,
-          parts: [['5100', cost], ['1300', -cost]] });
+          parts: [['5100', sign * cost], ['1300', -sign * cost]] });
       }
     } else if (inv.type === 'purchase') {
       push({ id: `purchase-${inv.id}`, date, currency, source: 'purchase', refId: inv.id, memo,
         parts: [['1300', total - tax], ['1400', tax], ['2100', -total]] });
+    } else if (inv.type === 'purchase_return') {
+      // Goods leave stock at what they cost; the supplier settles 2100 in cash (vault) or off what is owed (2150).
+      push({ id: `purchase-return-${inv.id}`, date, currency, source: 'purchase_return', refId: inv.id, memo,
+        parts: [['2100', total], ['1300', -(total - tax)], ['1400', -tax]] });
     }
   }
 
@@ -486,6 +498,18 @@ export function buildJournal(input: JournalInput): Journal {
       const counter: AccountCode = linked.has(t.id) ? '1150' : DEBT_CLASS_ACCOUNT[config.debtClasses[t.id] || 'opening'];
       push({ id: `customer-${t.id}`, date, currency, source: 'customer', refId: t.id, memo, parts: [['1200', amount], [counter, -amount]] });
     }
+  }
+
+  // Purchases and supplier payments clear through 2100; what stays unpaid sits in 2150. A return lowers what is owed.
+  for (const t of input.supplierTransactions || []) {
+    const currency = t.currency || defaultCurrency;
+    const amount = toMinor(num(t.amount), currency);
+    if (!amount) continue;
+    const lowersOwed = t.type === 'payment' || t.type === 'return';
+    const debit: AccountCode = lowersOwed ? '2150' : t.type === 'opening' ? '3900' : '2100';
+    const credit: AccountCode = lowersOwed ? '2100' : '2150';
+    push({ id: `supplier-${t.id}`, date: num(t.date), currency, source: 'supplier', refId: t.id, memo: t.notes || '',
+      parts: [[debit, amount], [credit, -amount]] });
   }
 
   for (const r of input.payrollRecords) {
@@ -748,14 +772,16 @@ export function reconcile(
 
 // ---------------------------------------------------------------- export
 
-const csvCell = (value: string | number) => `"${String(value).replace(/"/g, '""')}"`;
 
 const SOURCE_LABELS: Record<EntrySource, { ar: string; en: string }> = {
   sale: { ar: 'فاتورة بيع', en: 'Sale invoice' },
+  sale_return: { ar: 'مرتجع مبيعات', en: 'Sales return' },
   cogs: { ar: 'تكلفة مبيعات', en: 'Cost of sale' },
   purchase: { ar: 'فاتورة شراء', en: 'Purchase invoice' },
+  purchase_return: { ar: 'مرتجع مشتريات', en: 'Purchase return' },
   vault: { ar: 'حركة خزنة', en: 'Vault movement' },
   customer: { ar: 'حساب عميل', en: 'Customer account' },
+  supplier: { ar: 'حساب مورد', en: 'Supplier account' },
   payroll: { ar: 'رواتب', en: 'Payroll' },
   stock: { ar: 'حركة مخزون', en: 'Stock movement' },
   manual: { ar: 'قيد افتتاحي/تسوية', en: 'Opening / adjustment' },

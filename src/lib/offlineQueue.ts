@@ -23,6 +23,13 @@ export interface QueuedInvoice {
   queuedAt: number;
   attempts: number;
   lastError?: string;
+  /** Owner of the store the sale was taken in; absent on sales queued before this was recorded. */
+  storeId?: string;
+}
+
+/** A sale is only ever sent to the store it was taken in (a cashier may be removed while offline). */
+export function belongsToStore(entry: Pick<QueuedInvoice, 'storeId'>, ownerId: string): boolean {
+  return !entry.storeId || entry.storeId === ownerId;
 }
 
 const QUEUE_KEY = 'offline_invoices';
@@ -31,7 +38,10 @@ function normalize(entry: unknown): QueuedInvoice | null {
   const e = entry as Partial<QueuedInvoice> & Partial<Invoice>;
   if (!e || typeof e !== 'object') return null;
   if (e.invoice && typeof e.invoice === 'object' && (e.invoice as Invoice).id) {
-    return { invoice: e.invoice as Invoice, queuedAt: Number(e.queuedAt) || 0, attempts: Number(e.attempts) || 0, lastError: e.lastError };
+    return {
+      invoice: e.invoice as Invoice, queuedAt: Number(e.queuedAt) || 0, attempts: Number(e.attempts) || 0, lastError: e.lastError,
+      ...(typeof e.storeId === 'string' && e.storeId ? { storeId: e.storeId } : {}),
+    };
   }
   if (e.id && Array.isArray(e.items)) {
     return { invoice: e as Invoice, queuedAt: Number(e.date) || 0, attempts: 0 };
@@ -61,10 +71,10 @@ export function writeQueue(uid: string, queue: QueuedInvoice[]): boolean {
   }
 }
 
-export function enqueueInvoice(uid: string, invoice: Invoice, now = Date.now()): boolean {
+export function enqueueInvoice(uid: string, invoice: Invoice, storeId?: string, now = Date.now()): boolean {
   const queue = readQueue(uid);
   if (queue.some((q) => q.invoice.id === invoice.id)) return true;
-  return writeQueue(uid, [...queue, { invoice, queuedAt: now, attempts: 0 }]);
+  return writeQueue(uid, [...queue, { invoice, queuedAt: now, attempts: 0, ...(storeId ? { storeId } : {}) }]);
 }
 
 export interface StockShortage {

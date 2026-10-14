@@ -13,6 +13,7 @@ import {
   type JoFotaraSeller,
 } from '../jofotara';
 import type { Invoice } from '../../types';
+import { planSalesReturn } from '../salesReturn';
 
 const UUID = '3f2c9a1e-8b7d-4c6e-9f10-2a3b4c5d6e7f';
 const income: JoFotaraSeller = { tin: '12345678', name: 'متجر التجربة', incomeSource: '4419618', family: 'income' };
@@ -284,6 +285,45 @@ describe('joFotaraFromInvoice', () => {
     const named = joFotaraFromInvoice(sale({ paymentMethod: 'credit', customerName: 'أبو أحمد' }), { ...opts, buyer: { phone: '0791234567' } });
     expect(named.ok && named.doc.payment).toBe('receivable');
     expect(named.ok && named.doc.buyer).toMatchObject({ name: 'أبو أحمد', phone: '0791234567' });
+  });
+
+  it('turns a sales return into a credit note on the original line numbers', () => {
+    const original = sale();
+    const planned = planSalesReturn(original, [{ index: 1, quantity: 10 }]);
+    expect(planned.ok).toBe(true);
+    if (!planned.ok) return;
+    const ret: Invoice = {
+      ...original,
+      id: 'r1',
+      invoiceNumber: 'RET-20261010-AB12-0001',
+      type: 'return',
+      date: Date.UTC(2026, 9, 10, 9),
+      items: planned.plan.items,
+      ...planned.plan.figures,
+      returnOf: original.id,
+      returnOfNumber: original.invoiceNumber,
+      returnReason: 'تالف',
+    };
+    const ref = { number: original.invoiceNumber, uuid: UUID, total: 109 };
+    const result = joFotaraFromInvoice(ret, { seller: income, uuid: '9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d', icv: 2, original: ref });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.doc.kind).toBe('credit');
+    expect(result.doc.lines.map((l) => l.id)).toEqual([2]);
+    expect(result.doc.original).toEqual(ref);
+    expect(result.doc.returnReason).toBe('تالف');
+    const built = buildJoFotaraXml(result.doc);
+    expect(built.ok && built.totals.payable).toBe('46.983000000');
+    expect(built.ok && built.xml).toContain('>381</cbc:InvoiceTypeCode>');
+  });
+
+  it('refuses a credit note without the accepted original or a reason', () => {
+    const ret = sale({ type: 'return', items: [{ productId: 'p1', description: 'سكر', quantity: 33, unitPrice: 2, total: 66, sourceLine: 0 }],
+      subtotal: 66, discount: 0, totalAmount: 66 });
+    const opts = { seller: income, uuid: UUID, icv: 1 };
+    expect(joFotaraFromInvoice(ret, opts)).toEqual({ ok: false, issues: [{ code: 'original' }] });
+    const noReason = joFotaraFromInvoice(ret, { ...opts, original: { number: 'INV-1', uuid: UUID, total: 109 } });
+    expect(noReason).toEqual({ ok: false, issues: [{ code: 'return_reason' }] });
   });
 });
 

@@ -69,7 +69,7 @@ const BADGE_TONE: Record<NonNullable<Hit['badge']>['tone'], string> = {
 function summarizeSuppliers(invoices: readonly Invoice[]): SupplierSummary[] {
   const byName = new Map<string, SupplierSummary>();
   for (const invoice of invoices) {
-    const name = invoice.type === 'purchase' ? invoice.supplierName?.trim() : '';
+    const name = invoice.type === 'purchase' || invoice.type === 'purchase_return' ? invoice.supplierName?.trim() : '';
     if (!name) continue;
     const key = normalizeSearchText(name);
     const existing = byName.get(key);
@@ -208,7 +208,7 @@ export default function GlobalSearch({ language, inputRef, onNavigate, showShort
             subtitle: [party, date].filter(Boolean).join(' · '),
             trailing: formatMoney(i.totalAmount, i.currency, locale),
             badge: {
-              text: i.type === 'sale' ? (isRtl ? 'بيع' : 'Sale') : (isRtl ? 'شراء' : 'Purchase'),
+              text: i.type === 'sale' ? (isRtl ? 'بيع' : 'Sale') : i.type === 'return' ? (isRtl ? 'مرتجع' : 'Return') : i.type === 'purchase_return' ? (isRtl ? 'مرتجع مشتريات' : 'Purchase return') : (isRtl ? 'شراء' : 'Purchase'),
               tone: i.type === 'sale' ? 'ok' : 'muted',
             },
             request: { screen: 'invoices', query: i.invoiceNumber, recordId: i.id },

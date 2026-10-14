@@ -632,7 +632,7 @@ export default function HomeDesk({ language, settings }: Props) {
       : range === 'week'
         ? (isRtl ? 'دخل الخزنة هذا الأسبوع' : 'Vault in this week')
         : (isRtl ? 'دخل الخزنة هذا الشهر' : 'Vault in this month'),
-    credit: isRtl ? 'آجل لم يُحصَّل' : 'Credit not collected',
+    credit: isRtl ? 'مبيعات آجلة في هذه الفترة (لم تدخل الخزنة عند البيع)' : 'Credit sales in this period (not cash at the time of sale)',
     balances: isRtl ? 'الأرصدة الآن' : 'Balances now',
     stock: isRtl ? 'استثناءات المخزون' : 'Stock exceptions',
     nowLabel: isRtl ? 'الآن' : 'Now',
@@ -661,6 +661,7 @@ export default function HomeDesk({ language, settings }: Props) {
   const activityLabel = (item: DeskActivity) => {
     if (item.kind === 'sale') return isRtl ? 'بيع' : 'Sale';
     if (item.kind === 'purchase') return isRtl ? 'شراء' : 'Purchase';
+    if (item.kind === 'return') return isRtl ? 'مرتجع' : 'Return';
     if (item.kind === 'stocktake') return isRtl ? 'جرد' : 'Count';
     if (item.detail === 'collection') return isRtl ? 'تحصيل' : 'Collection';
     if (item.detail === 'payroll') return isRtl ? 'راتب' : 'Payroll';

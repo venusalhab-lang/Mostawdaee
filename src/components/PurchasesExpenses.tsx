@@ -25,7 +25,11 @@ import {
   Briefcase,
   HelpCircle,
   Download,
-  Printer
+  Printer,
+  Truck,
+  Undo2,
+  ClipboardList,
+  FileText as OrderIcon
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useFirebase } from './FirebaseProvider';
@@ -53,6 +57,15 @@ import {
 import { buildInvoicePrintHtml } from '../lib/invoiceDocument';
 import { printHtmlDocument } from '../lib/printHtml';
 import { appName } from '../lib/brand';
+import { checkPurchasePayment, findSupplierByName, purchasePayment } from '../lib/suppliers';
+import SuppliersPanel from './SuppliersPanel';
+import ReturnModal from './ReturnModal';
+import { canReturnPurchase } from '../lib/purchaseReturn';
+import { csvCell } from '../lib/csv';
+import ReorderPanel from './ReorderPanel';
+import OrdersPanel from './OrdersPanel';
+import { orderToPurchaseLines } from '../lib/orders';
+import type { TradeOrder } from '../types';
 
 interface Props {
   language: Language;
@@ -73,11 +86,18 @@ export default function PurchasesExpenses({ language }: Props) {
     recordVaultTransaction, 
     deleteInvoice,
     user,
-    workspace
+    workspace,
+    suppliers,
+    saveSupplier,
+    markOrderConverted,
+    orders,
+    can
   } = useFirebase();
 
   // Active Tab
-  const [activeTab, setActiveTab] = useState<'purchases' | 'expenses'>('purchases');
+  const [activeTab, setActiveTab] = useState<'purchases' | 'expenses' | 'suppliers' | 'reorder' | 'orders'>('purchases');
+  /** The purchase order the open purchase form was filled from; it is marked received once the purchase is saved. */
+  const [sourceOrder, setSourceOrder] = useState<TradeOrder | null>(null);
 
   // Search/Filters states
   const [searchQuery, setSearchQuery] = useState('');
@@ -90,6 +110,7 @@ export default function PurchasesExpenses({ language }: Props) {
   const [isPurchaseModalOpen, setIsPurchaseModalOpen] = useState(false);
   const [isExpenseModalOpen, setIsExpenseModalOpen] = useState(false);
   const [invoiceDetail, setInvoiceDetail] = useState<Invoice | null>(null);
+  const [returnTarget, setReturnTarget] = useState<Invoice | null>(null);
 
   // New Purchase Form state
   const [supplierName, setSupplierName] = useState('');
@@ -102,23 +123,41 @@ export default function PurchasesExpenses({ language }: Props) {
   const [itemUnitCost, setItemUnitCost] = useState<string>('');
   const [itemByPack, setItemByPack] = useState(false);
   const [purchaseCurrency, setPurchaseCurrency] = useState<Currency>(settings?.currency || 'JOD');
+  const [paymentMode, setPaymentMode] = useState<'cash' | 'credit' | 'partial'>('cash');
+  const [paidNow, setPaidNow] = useState('');
+  const [addingSupplier, setAddingSupplier] = useState(false);
   // One id per draft: a second click, or a retry after a lost reply, is recognised as the same purchase.
   const purchaseIdRef = useRef<string | null>(null);
   const expenseIdRef = useRef<string | null>(null);
   const savingRef = useRef(false);
   const [isSaving, setIsSaving] = useState(false);
-  useEffect(() => { purchaseIdRef.current = null; }, [purchaseItems, supplierName, purchaseCurrency, purchaseTaxRate, purchaseDate]);
+  useEffect(() => { purchaseIdRef.current = null; }, [purchaseItems, supplierName, purchaseCurrency, purchaseTaxRate, purchaseDate, paymentMode, paidNow]);
 
-  // Extract list of all unique previously used suppliers to provide a streamlined autocomplete suggestions list
+  // Registered suppliers first, then names typed on older purchases.
   const existingSuppliers = useMemo(() => {
-    const list = new Set<string>();
+    const list = new Set<string>(suppliers.map(s => s.name));
     invoices.forEach(inv => {
-      if (inv.type === 'purchase' && inv.supplierName) {
+      if (inv.type === 'purchase' && inv.supplierName && !findSupplierByName(suppliers, inv.supplierName)) {
         list.add(inv.supplierName.trim());
       }
     });
     return Array.from(list);
-  }, [invoices]);
+  }, [invoices, suppliers]);
+  const matchedSupplier = useMemo(() => findSupplierByName(suppliers, supplierName), [suppliers, supplierName]);
+
+  const addTypedSupplier = async () => {
+    const name = supplierName.trim();
+    if (!name || addingSupplier) return;
+    setAddingSupplier(true);
+    try {
+      await saveSupplier({ id: crypto.randomUUID(), name });
+      toast.success(isRtl ? `أُضيف «${name}» إلى الموردين` : `“${name}” added to suppliers`);
+    } catch (err: any) {
+      if (!err?.notified) toast.error(err?.message || (isRtl ? 'تعذّر إضافة المورد.' : 'Could not add the supplier.'));
+    } finally {
+      setAddingSupplier(false);
+    }
+  };
 
   // New Expense Form state
   const [expenseCategory, setExpenseCategory] = useState('utilities');
@@ -210,6 +249,10 @@ export default function PurchasesExpenses({ language }: Props) {
     }),
     [purchaseLines, purchaseTaxRate, purchaseCurrency]
   );
+  const paidNowValue = paymentMode === 'cash' ? purchaseDraftTotal
+    : paymentMode === 'credit' ? 0
+      : roundForCurrency(Number(paidNow) || 0, purchaseCurrency);
+  const owedLater = roundForCurrency(Math.max(purchaseDraftTotal - paidNowValue, 0), purchaseCurrency);
 
   // Handle saving the full Purchase Invoice (increments stock automatically via transactions inside FirebaseProvider)
   const handleSavePurchaseInvoice = async (e: React.FormEvent) => {
@@ -223,6 +266,16 @@ export default function PurchasesExpenses({ language }: Props) {
     }
     if (purchaseItems.length === 0) {
       toast.error(isRtl ? "الفاتورة فارغة! يرجى إضافة منتج واحد على الأقل" : "Your invoice draft is empty! Please add items.");
+      return;
+    }
+    const paymentProblem = checkPurchasePayment(
+      paymentMode === 'cash' || (paymentMode === 'partial' && owedLater <= 0 && paidNowValue <= purchaseDraftTotal) ? 'cash' : 'credit', purchaseDraftTotal, paidNowValue, purchaseCurrency, matchedSupplier?.id);
+    if (paymentProblem) {
+      toast.error(paymentProblem === 'supplier_required'
+        ? (isRtl ? 'الشراء الآجل يحتاج مورداً مسجلاً. أضف المورد أولاً.' : 'A credit purchase needs a registered supplier. Add the supplier first.')
+        : paymentProblem === 'paid_exceeds_total'
+          ? (isRtl ? 'المدفوع الآن أكبر من إجمالي الفاتورة.' : 'The amount paid now is more than the invoice total.')
+          : (isRtl ? 'المبلغ المدفوع الآن غير صالح.' : 'The amount paid now is not valid.'));
       return;
     }
 
@@ -240,7 +293,8 @@ export default function PurchasesExpenses({ language }: Props) {
     const newInvoice: Invoice = {
       id: purchaseIdRef.current,
       invoiceNumber: finalInvoiceNo,
-      supplierName: supplierName.trim(),
+      supplierName: matchedSupplier?.name || supplierName.trim(),
+      ...(matchedSupplier ? { supplierId: matchedSupplier.id } : {}),
       date: timestampForLocalDay(purchaseDate),
       items: parsedItems,
       subtotal: purchaseDraftSubtotal,
@@ -249,7 +303,7 @@ export default function PurchasesExpenses({ language }: Props) {
       totalAmount: purchaseDraftTotal,
       type: 'purchase',
       currency: purchaseCurrency,
-      paymentMethod: 'cash'
+      ...(paymentMode === 'cash' || owedLater <= 0 ? { paymentMethod: 'cash' as const } : { paymentMethod: 'credit' as const, paidAmount: paidNowValue }),
     };
 
     savingRef.current = true;
@@ -260,6 +314,13 @@ export default function PurchasesExpenses({ language }: Props) {
       if (usesSequence) consumeInvoiceNumber('PINV', sessionUid, storeId);
 
       toast.success(isRtl ? "تم حفظ فاتورة الشراء وإضافة الكميات إلى المخزون" : "Purchase invoice saved and stock updated");
+      if (sourceOrder) {
+        const order = sourceOrder;
+        setSourceOrder(null);
+        markOrderConverted(order.id, newInvoice).catch((err: any) => {
+          toast.error(err?.message || (isRtl ? `حُفظت الفاتورة، لكن تعذّر تعليم أمر الشراء ${order.number} كمستلم. علّمه من قائمة الأوامر.` : `The purchase was saved, but order ${order.number} could not be marked received.`));
+        });
+      }
 
       setIsPurchaseModalOpen(false);
       // Reset State
@@ -267,6 +328,8 @@ export default function PurchasesExpenses({ language }: Props) {
       setPurchaseInvoiceNo('');
       setPurchaseDate(localIsoDate());
       setPurchaseItems([]);
+      setPaymentMode('cash');
+      setPaidNow('');
     } catch (err: any) {
       console.error("Critical Purchase Save Error:", err);
       if (!err?.notified) toast.error(vaultErrorMessage(err, isOfflineError(err)
@@ -276,6 +339,28 @@ export default function PurchasesExpenses({ language }: Props) {
       savingRef.current = false;
       setIsSaving(false);
     }
+  };
+
+  const receiveOrder = (order: TradeOrder) => {
+    const { items, missing } = orderToPurchaseLines(order, products);
+    if (!items.length) {
+      toast.error(isRtl ? 'لا يوجد في أمر الشراء صنف ما زال موجوداً في المخزون.' : 'None of the items on this order exist in the inventory any more.');
+      return;
+    }
+    if (missing.length) {
+      toast.warning(isRtl ? `لم تُنقل أصناف حُذفت من المخزون: ${missing.join('، ')}` : `Items deleted from the inventory were left out: ${missing.join(', ')}`);
+    }
+    sounds.playClick();
+    setSupplierName(order.supplierName || '');
+    setPurchaseCurrency(order.currency);
+    setPurchaseTaxRate(order.vatRate);
+    setPurchaseItems(items);
+    setPurchaseDate(localIsoDate());
+    setPurchaseInvoiceNo('');
+    setPaymentMode('cash');
+    setPaidNow('');
+    setSourceOrder(order);
+    setIsPurchaseModalOpen(true);
   };
 
   const vaultErrorMessage = (err: any, fallback: string) => {
@@ -344,7 +429,7 @@ export default function PurchasesExpenses({ language }: Props) {
   // Filter Purchase invoices
   const filteredPurchases = useMemo(() => {
     return invoices
-      .filter(inv => inv.type === 'purchase')
+      .filter(inv => inv.type === 'purchase' || inv.type === 'purchase_return')
       .filter(inv => inv.currency === activeCurrency)
       .filter(inv => {
         const term = searchQuery.toLowerCase();
@@ -368,8 +453,8 @@ export default function PurchasesExpenses({ language }: Props) {
   // Filter expenses (derived from vault records marked as of type 'expense', excluding direct auto purchases if desired, or displaying all operational costs)
   const filteredExpenses = useMemo(() => {
     return vaultTransactions
-      // Operating expenses only: purchases (own screen) and reversal entries (deleted sales) are not OpEx.
-      .filter(tx => tx.type === 'expense' && tx.source !== 'purchase_invoice' && tx.source !== 'reversal' && tx.category !== 'purchase')
+      // Operating expenses only: purchases (own screen), reversals of deleted sales and cash refunds of sales returns are not OpEx.
+      .filter(tx => tx.type === 'expense' && tx.source !== 'purchase_invoice' && tx.source !== 'reversal' && tx.source !== 'sale_return' && tx.category !== 'purchase')
       .filter(tx => tx.currency === activeCurrency)
       .filter(tx => {
         const term = searchQuery.toLowerCase();
@@ -417,14 +502,18 @@ export default function PurchasesExpenses({ language }: Props) {
       inv.supplierName || (isRtl ? "مورّد مجهول" : "Unknown Supplier"),
       new Date(inv.date).toLocaleDateString(isRtl ? 'ar-JO' : 'en-US'),
       inv.items?.length || 0,
-      inv.totalAmount,
+      inv.type === 'purchase_return' ? -(Number(inv.totalAmount) || 0) : inv.totalAmount,
       inv.currency,
-      isRtl ? "مدفوعة ومستلمة" : "Fully Settled"
+      inv.type === 'purchase_return'
+        ? `${isRtl ? 'مرتجع عن' : 'Return of'} ${inv.returnOfNumber || ''}`.trim()
+        : purchasePayment(inv).owed > 0
+        ? `${isRtl ? 'آجل عند الشراء' : 'On credit'} ${purchasePayment(inv).owed}`
+        : (isRtl ? "مدفوعة نقداً" : "Paid in cash")
     ]);
 
     // Build the CSV string with BOM for correct Arabic rendering in Excel
     const BOM = "\uFEFF";
-    const csvContent = BOM + [headers.join(","), ...rws.map(r => r.map(val => `"${String(val).replace(/"/g, '""')}"`).join(","))].join("\n");
+    const csvContent = BOM + [headers.join(","), ...rws.map(r => r.map(csvCell).join(","))].join("\n");
 
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
@@ -480,6 +569,11 @@ export default function PurchasesExpenses({ language }: Props) {
           <button
             onClick={() => {
               sounds.playClick();
+              if (sourceOrder) {
+                setSourceOrder(null);
+                setPurchaseItems([]);
+                setSupplierName('');
+              }
               setIsPurchaseModalOpen(true);
             }}
             className="px-5 py-3.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-sm rounded-xl flex items-center gap-2 shadow-lg shadow-indigo-100 dark:shadow-none transition-all cursor-pointer active:scale-95"
@@ -538,9 +632,73 @@ export default function PurchasesExpenses({ language }: Props) {
             {filteredExpenses.length}
           </span>
         </button>
+
+        <button
+          onClick={() => {
+            sounds.playClick();
+            setActiveTab('suppliers');
+          }}
+          className={`px-6 py-3 font-extrabold text-sm border-b-2 transition-all cursor-pointer flex items-center gap-2 whitespace-nowrap ${
+            activeTab === 'suppliers'
+              ? 'border-amber-600 text-amber-700 dark:text-amber-400 dark:border-amber-400'
+              : 'border-transparent text-slate-400 hover:text-slate-600'
+          }`}
+        >
+          <Truck size={16} />
+          {isRtl ? "الموردون" : "Suppliers"}
+          <span className="px-2 py-0.5 text-xs bg-slate-100 dark:bg-slate-800 text-slate-500 font-bold rounded-full">
+            {suppliers.length}
+          </span>
+        </button>
+
+        <button
+          onClick={() => {
+            sounds.playClick();
+            setActiveTab('reorder');
+          }}
+          className={`px-6 py-3 font-extrabold text-sm border-b-2 transition-all cursor-pointer flex items-center gap-2 whitespace-nowrap ${
+            activeTab === 'reorder'
+              ? 'border-rose-600 text-rose-700 dark:text-rose-400 dark:border-rose-400'
+              : 'border-transparent text-slate-400 hover:text-slate-600'
+          }`}
+        >
+          <ClipboardList size={16} />
+          {isRtl ? "إعادة الطلب" : "Reorder"}
+        </button>
+
+        <button
+          onClick={() => {
+            sounds.playClick();
+            setActiveTab('orders');
+          }}
+          className={`px-6 py-3 font-extrabold text-sm border-b-2 transition-all cursor-pointer flex items-center gap-2 whitespace-nowrap ${
+            activeTab === 'orders'
+              ? 'border-violet-600 text-violet-700 dark:text-violet-400 dark:border-violet-400'
+              : 'border-transparent text-slate-400 hover:text-slate-600'
+          }`}
+        >
+          <OrderIcon size={16} />
+          {isRtl ? "أوامر الشراء" : "Purchase orders"}
+          <span className="px-2 py-0.5 text-xs bg-slate-100 dark:bg-slate-800 text-slate-500 font-bold rounded-full">
+            {orders.filter(o => o.kind === 'purchase_order' && (o.status === 'draft' || o.status === 'sent')).length}
+          </span>
+        </button>
       </div>
 
+      {activeTab === 'reorder' && (
+        <ReorderPanel isRtl={isRtl} defaultCurrency={activeCurrency as Currency} onOrdersCreated={() => setActiveTab('orders')} />
+      )}
+
+      {activeTab === 'orders' && (
+        <OrdersPanel kind="purchase_order" isRtl={isRtl} defaultCurrency={activeCurrency as Currency} onConvert={receiveOrder} />
+      )}
+
+      {activeTab === 'suppliers' && (
+        <SuppliersPanel isRtl={isRtl} defaultCurrency={activeCurrency as Currency} />
+      )}
+
       {/* Main Filter Toolbar */}
+        {(activeTab === 'purchases' || activeTab === 'expenses') && (
         <div className="p-4 bg-white dark:bg-slate-800 rounded-2xl border border-slate-200/50 dark:border-slate-800 shadow-xl flex flex-col md:flex-row items-stretch md:items-center justify-between gap-4 mb-6">
           
           {/* Quick Search Input */}
@@ -612,8 +770,7 @@ export default function PurchasesExpenses({ language }: Props) {
             )}
           </div>
         </div>
-      
-
+        )}
 
       {/* RENDER ACTIVE TAB CODES */}
 
@@ -626,8 +783,8 @@ export default function PurchasesExpenses({ language }: Props) {
             <Info className="text-indigo-600 mt-0.5 flex-shrink-0" size={18} />
             <div className="text-xs text-indigo-900/80 dark:text-indigo-400 leading-relaxed font-arabic">
               {isRtl
-                ? "💡 عند حفظ فاتورة الشراء من هنا تُضاف كمياتها إلى المخزون ويُخصم مبلغها نقداً من الخزنة."
-                : "💡 When you save a purchase invoice here, its quantities are added to stock and its amount is paid in cash from the vault."}
+                ? "💡 عند حفظ فاتورة الشراء تُضاف كمياتها إلى المخزون، ويُخصم من الخزنة ما دُفع الآن فقط؛ والباقي يُسجَّل ديناً للمورد في تبويب الموردين."
+                : "💡 Saving a purchase adds its quantities to stock and takes only what is paid now from the vault; the rest is owed to the supplier (Suppliers tab)."}
             </div>
           </div>
 
@@ -641,7 +798,7 @@ export default function PurchasesExpenses({ language }: Props) {
               <span className="text-slate-300 dark:text-slate-700">|</span>
               <span>{isRtl ? "إجمالي القيمة بعد التصفية:" : "Total Filtered Value:"}</span>
               <span className="font-extrabold text-emerald-600 dark:text-emerald-400 text-sm whitespace-nowrap">
-                {formatCurrencyValue(filteredPurchases.reduce((sum, item) => sum + (Number(item.totalAmount) || 0), 0), activeCurrency)}
+                {formatCurrencyValue(filteredPurchases.reduce((sum, item) => sum + (item.type === 'purchase_return' ? -1 : 1) * (Number(item.totalAmount) || 0), 0), activeCurrency)}
               </span>
             </div>
 
@@ -680,16 +837,44 @@ export default function PurchasesExpenses({ language }: Props) {
                   ) : (
                     purchasePage.visible.map((inv) => (
                       <tr key={inv.id} className="hover:bg-slate-50/80 dark:hover:bg-slate-800/40 transition-colors duration-200">
-                        <td className="px-6 py-4 font-mono font-bold text-slate-900 dark:text-white whitespace-nowrap">{inv.invoiceNumber}</td>
+                        <td className="px-6 py-4 font-mono font-bold text-slate-900 dark:text-white whitespace-nowrap">
+                          {inv.invoiceNumber}
+                          {inv.type === 'purchase_return' && (
+                            <span className="ms-2 font-arabic text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-700 dark:text-amber-400">{isRtl ? 'مرتجع' : 'Return'}</span>
+                          )}
+                        </td>
                         <td className="px-6 py-4 font-semibold text-slate-700 dark:text-slate-300 whitespace-nowrap">{inv.supplierName || (isRtl ? "مورّد مجهول" : "Unknown Supplier")}</td>
                         <td className="px-6 py-4 text-xs text-slate-500 whitespace-nowrap">{new Date(inv.date).toLocaleString(isRtl ? 'ar-JO' : 'en-US')}</td>
                         <td className="px-6 py-4 text-center font-bold whitespace-nowrap">{inv.items?.length || 0}</td>
-                        <td className="px-6 py-4 font-extrabold text-slate-900 dark:text-cyan-400 whitespace-nowrap">{formatCurrencyValue(inv.totalAmount, inv.currency)}</td>
+                        <td className={`px-6 py-4 font-extrabold whitespace-nowrap ${inv.type === 'purchase_return' ? 'text-amber-600 dark:text-amber-400' : 'text-slate-900 dark:text-cyan-400'}`} dir="ltr">{inv.type === 'purchase_return' ? '−' : ''}{formatCurrencyValue(inv.totalAmount, inv.currency)}</td>
                         <td className="px-6 py-4 whitespace-nowrap">
-                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-semibold bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 rounded-full">
-                            <CheckCircle2 size={12} />
-                            {isRtl ? "مدفوعة ومستلمة" : "Fully Settled"}
-                          </span>
+                          {(() => {
+                            if (inv.type === 'purchase_return') {
+                              return (
+                                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-semibold bg-amber-500/10 text-amber-700 dark:text-amber-400 rounded-full">
+                                  <Undo2 size={12} />
+                                  {isRtl ? 'مرتجع عن ' : 'Return of '}
+                                  <span className="font-mono" dir="ltr">#{inv.returnOfNumber || inv.returnOf}</span>
+                                </span>
+                              );
+                            }
+                            const { owed } = purchasePayment(inv);
+                            if (owed <= 0) {
+                              return (
+                                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-semibold bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 rounded-full">
+                                  <CheckCircle2 size={12} />
+                                  {isRtl ? "مدفوعة نقداً" : "Paid in cash"}
+                                </span>
+                              );
+                            }
+                            return (
+                              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-semibold bg-amber-500/10 text-amber-700 dark:text-amber-400 rounded-full">
+                                <Truck size={12} />
+                                {isRtl ? "آجل عند الشراء " : "On credit "}
+                                <span className="font-mono" dir="ltr">{formatCurrencyValue(owed, inv.currency)}</span>
+                              </span>
+                            );
+                          })()}
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap">
                           <div className="flex items-center justify-center gap-2">
@@ -710,10 +895,36 @@ export default function PurchasesExpenses({ language }: Props) {
                             >
                               <Printer size={14} />
                             </button>
+                            {can('back_office') && canReturnPurchase(inv) && (
+                              <button
+                                onClick={() => { sounds.playClick(); setReturnTarget(inv); }}
+                                className="p-2 bg-amber-50 hover:bg-amber-100 dark:bg-amber-950/10 dark:hover:bg-amber-900/35 text-amber-600 dark:text-amber-400 rounded-xl transition cursor-pointer"
+                                title={isRtl ? 'مرتجع للمورد' : 'Return to supplier'} aria-label={isRtl ? 'مرتجع للمورد' : 'Return to supplier'}
+                              >
+                                <Undo2 size={14} />
+                              </button>
+                            )}
                             <button
                               onClick={async () => {
                                 sounds.playClick();
-                                if (confirm(isRtl ? "هل تريد بالتأكيد حذف فاتورة الشراء؟ ستُرجَع قيمتها إلى الخزنة وتُخصم كمياتها من المخزون." : "Delete this purchase? Its amount returns to the vault and its quantities are removed from stock.")) {
+                                if (inv.type === 'purchase_return') {
+                                  const back = isRtl
+                                    ? `حذف مرتجع المشتريات #${inv.invoiceNumber}؟ تعود كمياته إلى المخزون، ويُسحب من الخزنة ما ردّه المورد نقداً، ويعود ما خُصم إلى رصيد المورد.`
+                                    : `Delete purchase return #${inv.invoiceNumber}? Its quantities come back into stock, the supplier's cash refund leaves the vault and any balance reduction is added back.`;
+                                  if (!confirm(back)) return;
+                                  try {
+                                    await deleteInvoice(inv.id);
+                                    toast.success(isRtl ? 'حُذف المرتجع وعُكست آثاره' : 'Return deleted and reversed');
+                                  } catch (err: any) {
+                                    toast.error(err?.message || (isRtl ? 'تعذّر حذف المرتجع' : 'Could not delete the return'));
+                                  }
+                                  return;
+                                }
+                                const { paid, owed } = purchasePayment(inv);
+                                const parts = isRtl
+                                  ? [paid > 0 ? `يعود ${formatCurrencyValue(paid, inv.currency)} إلى الخزنة` : '', owed > 0 ? `يُخصم ${formatCurrencyValue(owed, inv.currency)} من المستحق للمورد` : '', 'وتُخصم كمياتها من المخزون'].filter(Boolean).join('، ')
+                                  : [paid > 0 ? `${formatCurrencyValue(paid, inv.currency)} returns to the vault` : '', owed > 0 ? `${formatCurrencyValue(owed, inv.currency)} comes off the supplier balance` : '', 'its quantities are removed from stock'].filter(Boolean).join(', ');
+                                if (confirm(isRtl ? `حذف فاتورة الشراء؟ ${parts}.` : `Delete this purchase? ${parts}.`)) {
                                   try {
                                     await deleteInvoice(inv.id);
                                     toast.success(isRtl ? "تم حذف الفاتورة وعكس آثارها" : "Invoice deleted and reversed");
@@ -860,7 +1071,13 @@ export default function PurchasesExpenses({ language }: Props) {
                   </div>
                   <div>
                     <h3 className="font-black text-xl">{isRtl ? "تسجيل فاتورة توريد / مشتريات" : "Create New Supplier Purchase Invoice"}</h3>
-                    <span className="text-[10px] text-slate-400 uppercase tracking-wider font-bold">Automatic Database Inventory Increment System</span>
+                    {sourceOrder ? (
+                      <span className="text-xs text-violet-600 dark:text-violet-400 font-bold">
+                        {isRtl ? `استلام أمر الشراء ${sourceOrder.number} — عدّل الكميات حسب ما وصل فعلاً` : `Receiving purchase order ${sourceOrder.number} — adjust quantities to what actually arrived`}
+                      </span>
+                    ) : (
+                      <span className="text-[10px] text-slate-400 uppercase tracking-wider font-bold">Automatic Database Inventory Increment System</span>
+                    )}
                   </div>
                 </div>
 
@@ -893,6 +1110,18 @@ export default function PurchasesExpenses({ language }: Props) {
                         <option key={sIdx} value={sup} />
                       ))}
                     </datalist>
+                    {supplierName.trim() && (
+                      matchedSupplier ? (
+                        <p className="text-[11px] font-bold text-emerald-600">{isRtl ? '✓ مورد مسجّل' : '✓ Registered supplier'}</p>
+                      ) : (
+                        <p className="text-[11px] text-slate-500">
+                          {isRtl ? 'غير مسجّل كمورد. ' : 'Not a registered supplier. '}
+                          <button type="button" onClick={addTypedSupplier} disabled={addingSupplier} className="font-bold text-indigo-600 hover:underline disabled:opacity-50">
+                            {isRtl ? 'إضافته كمورد' : 'Add as supplier'}
+                          </button>
+                        </p>
+                      )
+                    )}
                   </div>
 
                   <div className="space-y-1.5">
@@ -920,7 +1149,7 @@ export default function PurchasesExpenses({ language }: Props) {
                       value={purchaseCurrency}
                       onChange={setPurchaseCurrency}
                       isRtl={isRtl}
-                      label={isRtl ? 'عملة الدفع من الخزنة' : 'Payment currency (from vault)'}
+                      label={isRtl ? 'عملة الفاتورة' : 'Invoice currency'}
                     />
                     <p className="text-xs font-mono text-slate-500">
                       {isRtl ? 'المتاح: ' : 'Available: '}
@@ -1127,6 +1356,61 @@ export default function PurchasesExpenses({ language }: Props) {
                   </div>
                 </div>
 
+                {/* Payment: what leaves the vault now and what stays owed to the supplier */}
+                <div className="p-4 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-3">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <span className="text-xs font-black text-slate-500">{isRtl ? 'طريقة الدفع:' : 'Payment:'}</span>
+                    <div className="inline-flex rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden text-xs font-bold" role="group" aria-label={isRtl ? 'طريقة الدفع' : 'Payment'}>
+                      {([['cash', isRtl ? 'نقداً' : 'Cash'], ['credit', isRtl ? 'آجل' : 'Credit'], ['partial', isRtl ? 'جزئي' : 'Partial']] as const).map(([mode, label]) => (
+                        <button
+                          key={mode}
+                          type="button"
+                          aria-pressed={paymentMode === mode}
+                          onClick={() => setPaymentMode(mode)}
+                          className={`px-4 py-2 ${paymentMode === mode ? 'bg-indigo-600 text-white' : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'}`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                    {paymentMode === 'partial' && (
+                      <label className="flex items-center gap-2 text-xs font-bold text-slate-500">
+                        {isRtl ? 'المدفوع الآن' : 'Paid now'}
+                        <input
+                          type="number"
+                          inputMode="decimal"
+                          min="0"
+                          step={currencyDecimals(purchaseCurrency) > 0 ? String(10 ** -currencyDecimals(purchaseCurrency)) : '1'}
+                          className="w-32 p-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-sm font-mono dark:text-white focus:outline-none"
+                          value={paidNow}
+                          onChange={(e) => setPaidNow(e.target.value)}
+                        />
+                      </label>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap gap-x-6 gap-y-1 text-xs">
+                    <span className="text-slate-500">
+                      {isRtl ? 'يُخصم من الخزنة الآن: ' : 'From the vault now: '}
+                      <b className="font-mono text-slate-800 dark:text-slate-100" dir="ltr">{formatCurrencyValue(paidNowValue, purchaseCurrency)}</b>
+                      <span className="text-slate-400"> ({isRtl ? 'المتاح ' : 'available '}<span className="font-mono" dir="ltr">{formatCurrencyValue(readVaultBalances(vault)[purchaseCurrency] || 0, purchaseCurrency)}</span>)</span>
+                    </span>
+                    {paymentMode !== 'cash' && (
+                      <span className="text-slate-500">
+                        {isRtl ? 'يبقى للمورد: ' : 'Owed to the supplier: '}
+                        <b className="font-mono text-amber-700 dark:text-amber-300" dir="ltr">{formatCurrencyValue(owedLater, purchaseCurrency)}</b>
+                      </span>
+                    )}
+                  </div>
+                  {paymentMode !== 'cash' && !matchedSupplier && (
+                    <p className="text-[11px] font-bold text-amber-700 dark:text-amber-400">
+                      {isRtl ? 'الشراء الآجل يحتاج مورداً مسجّلاً: اختر اسماً من القائمة أو أضفه كمورد.' : 'A credit purchase needs a registered supplier: pick one from the list or add it.'}
+                    </p>
+                  )}
+                  {paymentMode === 'partial' && paidNowValue > purchaseDraftTotal && (
+                    <p className="text-[11px] font-bold text-rose-600">{isRtl ? 'المدفوع الآن أكبر من إجمالي الفاتورة.' : 'Paid now is more than the invoice total.'}</p>
+                  )}
+                </div>
+
                 {/* Submits row */}
                 <div className="flex items-center justify-end gap-3 pt-4 border-t border-slate-100 dark:border-slate-800">
                   <button
@@ -1267,6 +1551,17 @@ export default function PurchasesExpenses({ language }: Props) {
 
       {/* MODAL 3: PURCHASE INVOICE DETAIL MODAL */}
       <AnimatePresence>
+        {returnTarget && (
+          <ReturnModal
+            original={returnTarget}
+            isRtl={isRtl}
+            onClose={() => setReturnTarget(null)}
+            onSaved={(saved) => {
+              setReturnTarget(null);
+              toast.success(isRtl ? `سُجّل مرتجع المشتريات #${saved.invoiceNumber}` : `Purchase return #${saved.invoiceNumber} recorded`);
+            }}
+          />
+        )}
         {invoiceDetail && (
           <div className="fixed inset-0 bg-slate-950/40 backdrop-blur-sm z-[200] flex items-center justify-center p-4">
             <motion.div
@@ -1282,7 +1577,9 @@ export default function PurchasesExpenses({ language }: Props) {
                   <FileText className="text-indigo-600" size={20} />
                   <div>
                     <h3 className="font-bold text-slate-800 dark:text-white">
-                      {isRtl ? "تفاصيل فاتورة مراجعة التوريد" : "Purchase Invoice Auditor Review"}
+                      {invoiceDetail.type === 'purchase_return'
+                        ? (isRtl ? "تفاصيل مرتجع المشتريات" : "Purchase return details")
+                        : (isRtl ? "تفاصيل فاتورة مراجعة التوريد" : "Purchase Invoice Auditor Review")}
                     </h3>
                     <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest font-mono">
                       Invoice Ref: #{invoiceDetail.invoiceNumber}
@@ -1354,6 +1651,16 @@ export default function PurchasesExpenses({ language }: Props) {
                   <span className="text-sm font-bold">{isRtl ? "الإجمالي (شامل الضريبة):" : "Total (incl. VAT):"}</span>
                   <span className="text-xl font-black text-indigo-600 dark:text-cyan-400">{formatCurrencyValue(invoiceDetail.totalAmount, invoiceDetail.currency)}</span>
                 </div>
+                {(() => {
+                  const { paid, owed } = purchasePayment(invoiceDetail);
+                  if (owed <= 0) return null;
+                  return (
+                    <div className="flex flex-wrap justify-between gap-2 text-xs pb-2">
+                      <span className="text-slate-500">{isRtl ? 'دُفع من الخزنة: ' : 'Paid from the vault: '}<b className="font-mono" dir="ltr">{formatCurrencyValue(paid, invoiceDetail.currency)}</b></span>
+                      <span className="text-slate-500">{isRtl ? 'آجل للمورد: ' : 'Owed to the supplier: '}<b className="font-mono text-amber-700 dark:text-amber-300" dir="ltr">{formatCurrencyValue(owed, invoiceDetail.currency)}</b></span>
+                    </div>
+                  );
+                })()}
               </div>
 
               {/* Close row */}

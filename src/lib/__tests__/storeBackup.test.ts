@@ -39,6 +39,7 @@ describe('store backup', () => {
       saveSettings: rec('settings'), saveWarehouse: rec('warehouse'), saveProduct: rec('product'),
       saveInvoice: rec('invoice'), saveEmployee: rec('employee'), savePayrollRecord: rec('payroll'),
       saveCustomer: rec('customer'), saveCustomerTransaction: rec('customerTx'),
+      saveSupplierRecord: rec('supplier'), saveSupplierTransaction: rec('supplierTx'), saveShift: rec('shift'), saveOrder: rec('order'),
       saveVaultRecord: rec('vaultRecord'), restoreVault: rec('vault'),
     };
     await restoreStoreBackup({
@@ -50,11 +51,16 @@ describe('store backup', () => {
       payrollRecords: [{ id: 'pr1' }] as any,
       customers: [{ id: 'c1' }] as any,
       customerTransactions: [{ id: 'ct1' }] as any,
+      suppliers: [{ id: 's1' }] as any,
+      supplierTransactions: [{ id: 'st1' }] as any,
+      shifts: [{ id: 'sh1' }] as any,
+      orders: [{ id: 'po1' }] as any,
       vaultTransactions: [{ id: 'v1' }, { amount: 3 }] as any,
       vault: { currentBalance: 10, lastUpdated: 5 },
     }, actions, noLive);
     expect(calls).toEqual([
-      'settings', 'warehouse', 'product', 'invoice', 'employee', 'payroll', 'customer', 'customerTx', 'vaultRecord', 'vault',
+      'settings', 'warehouse', 'product', 'invoice', 'employee', 'payroll', 'customer', 'customerTx', 'supplier', 'supplierTx',
+      'shift', 'order', 'vaultRecord', 'vault',
     ]);
   });
 
@@ -64,7 +70,7 @@ describe('store backup', () => {
     const actions = {
       saveSettings: rec('settings'), saveWarehouse: rec('warehouse'), saveProduct: rec('product'),
       saveInvoice: rec('invoice'), saveEmployee: rec('employee'), savePayrollRecord: rec('payroll'),
-      saveCustomer: rec('customer'), saveCustomerTransaction: rec('customerTx'),
+      saveCustomer: rec('customer'), saveCustomerTransaction: rec('customerTx'), saveShift: rec('shift'), saveOrder: rec('order'),
       saveVaultRecord: rec('vaultRecord'), restoreVault: rec('vault'),
     } as RestoreActions;
     const live = { invoices: [{ date: 2_000 }], vaultTransactions: [], customerTransactions: [] };
@@ -78,6 +84,59 @@ describe('store backup', () => {
     expect(newerLiveActivity(5_000, { invoices: [], vaultTransactions: [{ timestamp: 6_000 }], customerTransactions: [] })).toBe(6_000);
     expect(newerLiveActivity(Date.parse('2026-10-01'), { invoices: [], vaultTransactions: [], customerTransactions: [{ date: '2026-10-05T10:00:00Z' }] })).toBe(Date.parse('2026-10-05T10:00:00Z'));
     expect(newerLiveActivity(undefined, { invoices: [{ date: 1 }], vaultTransactions: [], customerTransactions: [] })).toBe(1);
+    expect(newerLiveActivity(5_000, { invoices: [], vaultTransactions: [], customerTransactions: [], supplierTransactions: [{ date: 7_000 }] })).toBe(7_000);
+  });
+
+  it('keeps going past a salary that is already paid in the live books', async () => {
+    const calls: string[] = [];
+    const rec = (name: string) => async (..._args: unknown[]) => { calls.push(name); };
+    const actions = {
+      saveSettings: rec('settings'), saveWarehouse: rec('warehouse'), saveProduct: rec('product'),
+      saveInvoice: rec('invoice'), saveEmployee: rec('employee'),
+      savePayrollRecord: async () => { throw Object.assign(new Error('Payroll already paid'), { code: 'payroll-already-paid' }); },
+      saveCustomer: rec('customer'), saveCustomerTransaction: rec('customerTx'),
+      saveSupplierRecord: rec('supplier'), saveSupplierTransaction: rec('supplierTx'), saveShift: rec('shift'), saveOrder: rec('order'),
+      saveVaultRecord: rec('vaultRecord'), restoreVault: rec('vault'),
+    } as RestoreActions;
+    const live = { invoices: [], vaultTransactions: [], customerTransactions: [] };
+    await restoreStoreBackup({ timestamp: 1_000, payrollRecords: [{ id: 'p1' } as any], customers: [{ id: 'c1' } as any] }, actions, live);
+    expect(calls).toContain('customer');
+  });
+
+  it('keeps a closed shift that is already in the live books and goes on', async () => {
+    const calls: string[] = [];
+    const rec = (name: string) => async (..._args: unknown[]) => { calls.push(name); };
+    const actions = {
+      saveSettings: rec('settings'), saveWarehouse: rec('warehouse'), saveProduct: rec('product'),
+      saveInvoice: rec('invoice'), saveEmployee: rec('employee'), savePayrollRecord: rec('payroll'),
+      saveCustomer: rec('customer'), saveCustomerTransaction: rec('customerTx'),
+      saveSupplierRecord: rec('supplier'), saveSupplierTransaction: rec('supplierTx'),
+      saveOrder: rec('order'),
+      saveShift: async (shift: { id: string }) => {
+        if (shift.id === 'closed') throw Object.assign(new Error('This shift is closed'), { code: 'shift-closed' });
+        calls.push(`shift:${shift.id}`);
+      },
+      saveVaultRecord: rec('vaultRecord'), restoreVault: rec('vault'),
+    } as RestoreActions;
+    await restoreStoreBackup({ shifts: [{ id: 'closed' }, { id: 'open' }] as any, vaultTransactions: [{ id: 'v1' }] as any }, actions, noLive);
+    expect(calls).toEqual(['shift:open', 'vaultRecord']);
+  });
+
+  it('stops on any other shift failure', async () => {
+    const ok = async () => {};
+    const actions = {
+      saveSettings: ok, saveWarehouse: ok, saveProduct: ok, saveInvoice: ok, saveEmployee: ok, savePayrollRecord: ok,
+      saveCustomer: ok, saveCustomerTransaction: ok, saveSupplierRecord: ok, saveSupplierTransaction: ok,
+      saveShift: async () => { throw Object.assign(new Error('role not allowed'), { code: 'permission-denied' }); }, saveOrder: ok,
+      saveVaultRecord: ok, restoreVault: ok,
+    } as RestoreActions;
+    await expect(restoreStoreBackup({ shifts: [{ id: 's' }] as any }, actions, noLive)).rejects.toMatchObject({ code: 'permission-denied' });
+  });
+
+  it('carries shifts in the backup', () => {
+    const b = buildStoreBackup({ creator: 'x', settings: null, products: [], shifts: [{ id: 'sh1' }] } as any, 1);
+    expect(b.shifts).toHaveLength(1);
+    expect(buildStoreBackup({ creator: 'x', settings: null, products: [] } as any, 1).shifts).toEqual([]);
   });
 
   it('stops at the first failure so a refused vault is reported', async () => {
@@ -85,6 +144,7 @@ describe('store backup', () => {
       saveSettings: async () => {}, saveWarehouse: async () => {}, saveProduct: async () => {},
       saveInvoice: async () => {}, saveEmployee: async () => {}, savePayrollRecord: async () => {},
       saveCustomer: async () => {}, saveCustomerTransaction: async () => {}, saveVaultRecord: async () => {},
+      saveSupplierRecord: async () => {}, saveSupplierTransaction: async () => {}, saveShift: async () => {}, saveOrder: async () => {},
       restoreVault: async () => { throw Object.assign(new Error('vault is newer'), { code: 'vault-newer' }); },
     } as RestoreActions;
     await expect(restoreStoreBackup({ vault: { currentBalance: 0, lastUpdated: 1 } as any }, actions, noLive)).rejects.toMatchObject({ code: 'vault-newer' });

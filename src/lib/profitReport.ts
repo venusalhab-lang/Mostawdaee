@@ -4,6 +4,7 @@ import { currencyDecimals, roundMoney } from './exchangeRates';
 import { escapeHtml } from './invoiceDocument';
 import { localIsoDate } from './localDate';
 import { appName } from './brand';
+import { csvCell } from './csv';
 
 export interface ProfitRow {
   id: string;
@@ -11,9 +12,9 @@ export interface ProfitRow {
   date: number;
   /** Customer or supplier on the invoice; empty for a walk-in sale. */
   party: string;
-  type: 'sale' | 'purchase';
+  type: 'sale' | 'purchase' | 'return';
   currency: string;
-  /** Sales: after discount, before VAT, so amount - cost = profit. Purchases: the invoice total. */
+  /** Sales: after discount, before VAT, so amount - cost = profit. Returns: the same, negative. Purchases: the invoice total. */
   amount: number;
   tax: number;
   /** Null on purchases: buying stock is not a cost of goods sold. */
@@ -33,7 +34,7 @@ const cleanParty = (value: string | undefined) => {
   return text === 'null' || text === 'undefined' ? '' : text;
 };
 
-/** One row per sale or purchase, every amount in the invoice's own currency. */
+/** One row per sale, return or purchase, every amount in the invoice's own currency. */
 export function profitRows(
   invoices: Invoice[],
   productsById: Map<string, Product>,
@@ -42,24 +43,33 @@ export function profitRows(
 ): ProfitRow[] {
   const rows: ProfitRow[] = [];
   for (const inv of invoices) {
-    if (inv.type !== 'sale' && inv.type !== 'purchase') continue;
+    if (inv.type !== 'sale' && inv.type !== 'purchase' && inv.type !== 'return' && inv.type !== 'purchase_return') continue;
     const base = {
       id: inv.id,
       invoiceNumber: inv.invoiceNumber || '',
       date: num(inv.date),
-      party: cleanParty(inv.type === 'sale' ? inv.customerName : inv.supplierName || inv.customerName),
+      party: cleanParty(inv.type === 'purchase' || inv.type === 'purchase_return' ? inv.supplierName || inv.customerName : inv.customerName),
       currency: inv.currency || defaultCurrency,
       tax: num(inv.taxAmount),
     };
-    if (inv.type === 'purchase') {
-      rows.push({ ...base, type: 'purchase', amount: num(inv.totalAmount), cost: null, profit: null, unknownCostLines: 0 });
+    if (inv.type === 'purchase' || inv.type === 'purchase_return') {
+      // Goods sent back to a supplier lower the period's purchases.
+      const sign = inv.type === 'purchase_return' ? -1 : 1;
+      rows.push({ ...base, type: 'purchase', tax: sign * base.tax, amount: sign * num(inv.totalAmount), cost: null, profit: null, unknownCostLines: 0 });
       continue;
     }
     const p = saleInvoiceProfit(inv, productsById, rates, defaultCurrency);
+    if (inv.type === 'return') {
+      rows.push({ ...base, type: 'return', tax: -base.tax, amount: -p.revenue, cost: -p.cost, profit: -p.profit, unknownCostLines: p.unknownCostLines });
+      continue;
+    }
     rows.push({ ...base, type: 'sale', amount: p.revenue, cost: p.cost, profit: p.profit, unknownCostLines: p.unknownCostLines });
   }
   return rows;
 }
+
+const typeLabel = (type: ProfitRow['type'], isAr: boolean) =>
+  type === 'sale' ? (isAr ? 'بيع' : 'Sale') : type === 'return' ? (isAr ? 'مرتجع' : 'Return') : (isAr ? 'شراء' : 'Purchase');
 
 export interface CurrencyProfit {
   currency: string;
@@ -76,11 +86,11 @@ export interface CurrencyProfit {
 export function profitsByCurrency(rows: ProfitRow[]): CurrencyProfit[] {
   const map = new Map<string, CurrencyProfit>();
   for (const row of rows) {
-    if (row.type !== 'sale') continue;
+    if (row.type === 'purchase') continue;
     const entry = map.get(row.currency) || { currency: row.currency, revenue: 0, cost: 0, profit: 0, margin: 0, saleCount: 0, unknownCostLines: 0 };
     entry.revenue += row.amount;
     entry.cost += row.cost ?? 0;
-    entry.saleCount += 1;
+    if (row.type === 'sale') entry.saleCount += 1;
     entry.unknownCostLines += row.unknownCostLines;
     map.set(row.currency, entry);
   }
@@ -142,7 +152,7 @@ export function profitSeries(
     buckets.set(t, 0);
   }
   for (const row of rows) {
-    if (row.type !== 'sale' || row.profit === null || row.date < start || row.date > end) continue;
+    if (row.type === 'purchase' || row.profit === null || row.date < start || row.date > end) continue;
     const key = bucketOf(row.date, step);
     if (buckets.has(key)) buckets.set(key, (buckets.get(key) || 0) + toDisplay(row.profit, row.currency));
   }
@@ -154,9 +164,7 @@ export function plainAmount(value: number, currency: string): string {
   return roundMoney(value, currency).toFixed(currencyDecimals(currency));
 }
 
-export function csvCell(value: string | number): string {
-  return `"${String(value).replace(/"/g, '""')}"`;
-}
+export { csvCell };
 
 const pad = (n: number) => String(n).padStart(2, '0');
 const localStamp = (time: number) => {
@@ -177,7 +185,7 @@ export function buildProfitCsv(rows: ProfitRow[], { isAr, summary }: ProfitCsvOp
   const lines = summary.map(([label, value]) => [csvCell(label), csvCell(value)].join(','));
   lines.push('', headers.map(csvCell).join(','));
   for (const row of rows) {
-    const sale = row.type === 'sale';
+    const sale = row.type !== 'purchase';
     const note = row.unknownCostLines > 0
       ? (isAr ? `${row.unknownCostLines} سطر بلا تكلفة: الربح أعلى من الحقيقي` : `${row.unknownCostLines} line(s) without cost: profit overstated`)
       : '';
@@ -185,7 +193,7 @@ export function buildProfitCsv(rows: ProfitRow[], { isAr, summary }: ProfitCsvOp
       csvCell(localStamp(row.date)),
       csvCell(row.invoiceNumber),
       csvCell(row.party || (sale ? (isAr ? 'زبون نقدي' : 'Walk-in customer') : '')),
-      csvCell(sale ? (isAr ? 'بيع' : 'Sale') : (isAr ? 'شراء' : 'Purchase')),
+      csvCell(typeLabel(row.type, isAr)),
       csvCell(row.currency),
       csvCell(plainAmount(row.amount, row.currency)),
       csvCell(plainAmount(row.tax, row.currency)),
@@ -237,11 +245,11 @@ export function buildProfitReportHtml(o: ProfitReportOptions): string {
     <td>${m(p.revenue, o.displayCurrency)}</td><td>${signed(p.profit, o.displayCurrency)}${p.unknownCost ? ' *' : ''}</td></tr>`).join('');
 
   const ledgerRows = o.rows.map((r) => {
-    const sale = r.type === 'sale';
+    const sale = r.type !== 'purchase';
     return `
     <tr><td>${escapeHtml(o.formatDate(r.date))}</td><td>${escapeHtml(r.invoiceNumber)}</td>
     <td class="start">${escapeHtml(r.party || (sale ? L('زبون نقدي', 'Walk-in customer') : '—'))}</td>
-    <td>${sale ? L('بيع', 'Sale') : L('شراء', 'Purchase')}</td>
+    <td>${escapeHtml(typeLabel(r.type, ar))}</td>
     <td>${m(r.amount, r.currency)}</td>
     <td>${r.cost === null ? '—' : m(r.cost, r.currency)}${r.unknownCostLines > 0 ? ' *' : ''}</td>
     <td>${signed(r.profit, r.currency)}</td></tr>`;

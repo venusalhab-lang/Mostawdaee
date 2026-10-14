@@ -37,6 +37,10 @@ export default function GoogleDriveBackup({ language }: Props) {
     payrollRecords, 
     customers, 
     customerTransactions,
+    suppliers,
+    supplierTransactions,
+    shifts,
+    orders,
     warehouses, 
     vault,
     vaultTransactions,
@@ -132,7 +136,7 @@ export default function GoogleDriveBackup({ language }: Props) {
     try {
       const payload = buildStoreBackup({
         creator: user?.email,
-        settings, products, invoices, employees, payrollRecords, customers, customerTransactions,
+        settings, products, invoices, employees, payrollRecords, customers, customerTransactions, suppliers, supplierTransactions, shifts, orders,
         vaultTransactions, warehouses, vault,
       });
 
@@ -175,9 +179,13 @@ export default function GoogleDriveBackup({ language }: Props) {
 
       await restoreStoreBackup(backupData, {
         saveSettings, saveWarehouse, saveProduct, saveInvoice, saveEmployee, savePayrollRecord, saveCustomer, saveCustomerTransaction,
+        saveSupplierRecord: (sp) => setDoc(doc(db, 'users', uid, 'suppliers', sp.id), sp),
+        saveSupplierTransaction: (tx) => setDoc(doc(db, 'users', uid, 'supplier_transactions', tx.id), tx),
+        saveShift: (shift) => setDoc(doc(db, 'users', uid, 'shifts', shift.id), shift),
+        saveOrder: (order) => setDoc(doc(db, 'users', uid, 'orders', order.id), order),
         saveVaultRecord: (tx) => setDoc(doc(db, 'users', uid, 'vault_records', tx.id), tx),
         restoreVault: (v) => restoreVaultBalance(db, uid, v),
-      }, { invoices, vaultTransactions, customerTransactions });
+      }, { invoices, vaultTransactions, customerTransactions, supplierTransactions });
 
       toast.success(
         isRtl 

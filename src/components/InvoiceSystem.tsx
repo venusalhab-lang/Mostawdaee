@@ -20,8 +20,12 @@ import {
   User,
   CheckCircle2,
   Share2,
-  TrendingUp
+  TrendingUp,
+  Undo2
 } from 'lucide-react';
+import ReturnModal from './ReturnModal';
+import { canReturn } from '../lib/salesReturn';
+import { canReturnPurchase } from '../lib/purchaseReturn';
 import { appName } from '../lib/brand';
 import { matchesQuery } from '../lib/search';
 import { useScreenSearch } from '../lib/screenSearch';
@@ -48,21 +52,35 @@ import {
   formatCurrencyTotals,
   invoiceDocumentTitle,
   invoiceItemSku,
+  invoiceTypeLabel,
   invoiceVatRate,
   paymentMethodLabel,
   sumInvoicesByCurrency,
 } from '../lib/invoiceDocument';
 import { printHtmlDocument } from '../lib/printHtml';
+import { csvCell } from '../lib/csv';
+import OrdersPanel from './OrdersPanel';
+import { orderToSaleLines } from '../lib/orders';
+import type { TradeOrder } from '../types';
 
 interface InvoiceSystemProps {
   language: Language;
   initialView?: 'list' | 'create';
 }
 
+const TYPE_TONES = {
+  sale: { border: 'border-indigo-100 dark:border-indigo-900/50', bar: 'bg-indigo-500', iconBg: 'bg-indigo-50', text: 'text-indigo-600' },
+  purchase: { border: 'border-emerald-100 dark:border-emerald-900/50', bar: 'bg-emerald-500', iconBg: 'bg-emerald-50', text: 'text-emerald-600' },
+  return: { border: 'border-rose-100 dark:border-rose-900/50', bar: 'bg-rose-500', iconBg: 'bg-rose-50', text: 'text-rose-600' },
+  purchase_return: { border: 'border-amber-100 dark:border-amber-900/50', bar: 'bg-amber-500', iconBg: 'bg-amber-50', text: 'text-amber-600' },
+} as const;
+const isReturnType = (type: Invoice['type']) => type === 'return' || type === 'purchase_return';
+const typeTone = (type: Invoice['type']) => TYPE_TONES[type] || TYPE_TONES.sale;
+
 export default function InvoiceSystem({ language, initialView = 'list' }: InvoiceSystemProps) {
   const t = translations[language];
   const isRtl = language === 'ar';
-  const { products, invoices, saveInvoice, settings, user, customers, can, workspace } = useFirebase();
+  const { products, invoices, saveInvoice, deleteInvoice, settings, user, customers, can, workspace, markOrderConverted } = useFirebase();
   const { preferredCurrency } = usePreferredCurrency();
   const activeCurrency = preferredCurrency === 'DEFAULT' ? (settings?.currency || 'JOD') : preferredCurrency;
 
@@ -78,8 +96,58 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
   const [searchTerm, setSearchTerm] = useState('');
   const [invSearchTerm, setInvSearchTerm] = useState('');
   const [sortConfig, setSortConfig] = useState<{ key: keyof Invoice; direction: 'desc' | 'asc' }>({ key: 'date', direction: 'desc' });
+  const [returnOpen, setReturnOpen] = useState(false);
+  const [listMode, setListMode] = useState<'invoices' | 'quotes'>('invoices');
+  /** The quotation the open sale form was filled from; it is marked invoiced once the sale is saved. */
+  const [sourceQuote, setSourceQuote] = useState<TradeOrder | null>(null);
+  const [deletingReturn, setDeletingReturn] = useState(false);
+
+  // Keep the open invoice in step with the store (a return updates the quantities left on its sale).
+  React.useEffect(() => {
+    if (!selectedInvoice) return;
+    const fresh = invoices.find((inv) => inv.id === selectedInvoice.id);
+    if (fresh && fresh !== selectedInvoice) setSelectedInvoice(fresh);
+  }, [invoices, selectedInvoice]);
+
+  const relatedReturns = React.useMemo(() => {
+    const returnType = selectedInvoice?.type === 'sale' ? 'return' : selectedInvoice?.type === 'purchase' ? 'purchase_return' : null;
+    return returnType ? invoices.filter((inv) => inv.type === returnType && inv.returnOf === selectedInvoice!.id) : [];
+  }, [invoices, selectedInvoice]);
+
+  const openInvoice = (id: string) => {
+    const target = invoices.find((inv) => inv.id === id);
+    if (target) setSelectedInvoice(target);
+    else toast.error(isRtl ? 'الفاتورة غير موجودة.' : 'Invoice not found.');
+  };
+
+  const handleDeleteReturn = async (ret: Invoice) => {
+    const msg = ret.type === 'purchase_return'
+      ? (isRtl
+        ? `حذف مرتجع المشتريات #${ret.invoiceNumber}؟ تعود كمياته إلى المخزون، ويُسحب من الخزنة ما ردّه المورد نقداً، ويعود ما خُصم إلى رصيد المورد.`
+        : `Delete purchase return #${ret.invoiceNumber}? Its quantities come back into stock, the supplier's cash refund leaves the vault and any balance reduction is added back.`)
+      : (isRtl
+        ? `حذف المرتجع #${ret.invoiceNumber}؟ ستُسحب كمياته من المخزون من جديد، ويُعاد ما رُدّ نقداً إلى الخزنة، ويعود ما خُصم إلى دين العميل.`
+        : `Delete return #${ret.invoiceNumber}? Its quantities leave stock again, the cash refund goes back to the vault and any debt reduction is added back.`);
+    if (!confirm(msg)) return;
+    setDeletingReturn(true);
+    try {
+      await deleteInvoice(ret.id);
+      toast.success(isRtl ? 'حُذف المرتجع وعُكست آثاره' : 'Return deleted and reversed');
+      const original = ret.returnOf ? invoices.find((inv) => inv.id === ret.returnOf) : undefined;
+      if (original) setSelectedInvoice(original);
+      else {
+        setSelectedInvoice(null);
+        setView('list');
+      }
+    } catch (err: any) {
+      toast.error(err?.message || (isRtl ? 'تعذّر حذف المرتجع' : 'Could not delete the return'));
+    } finally {
+      setDeletingReturn(false);
+    }
+  };
 
   useScreenSearch('invoices', ({ query, recordId }) => {
+    setListMode('invoices');
     setListCurrency('ALL');
     setInvSearchTerm(query);
     const record = recordId ? invoices.find((inv) => inv.id === recordId) : undefined;
@@ -130,6 +198,31 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
     setInvoiceItems([]);
     setSelectedCustomerId('');
     setPaymentMethod('cash');
+    setSourceQuote(null);
+  };
+
+  const convertQuote = (quote: TradeOrder) => {
+    const { items, missing } = orderToSaleLines(quote, products);
+    if (!items.length) {
+      toast.error(isRtl ? 'لا يوجد في العرض صنف ما زال موجوداً في المخزون.' : 'None of the quoted items exist in the inventory any more.');
+      return;
+    }
+    if (missing.length) {
+      toast.warning(isRtl ? `لم تُنقل أصناف حُذفت من المخزون: ${missing.join('، ')}` : `Items deleted from the inventory were left out: ${missing.join(', ')}`);
+    }
+    if (resolveVatRate(quote.vatRate) !== resolveVatRate(settings?.defaultVatRate)) {
+      toast.warning(isRtl
+        ? `الفاتورة تُحسب بضريبة ${resolveVatRate(settings?.defaultVatRate)}% من الإعدادات، والعرض كان بضريبة ${quote.vatRate}%. راجع الإجمالي قبل الحفظ.`
+        : `The invoice uses the ${resolveVatRate(settings?.defaultVatRate)}% VAT from Settings; the quotation used ${quote.vatRate}%. Check the total before saving.`, { duration: 8000 });
+    }
+    setInvoiceType('sale');
+    setInvoiceCurrency(quote.currency);
+    setCustomerName(quote.customerName || '');
+    setSelectedCustomerId(quote.customerId && customers.some((c) => c.id === quote.customerId) ? quote.customerId : '');
+    setPaymentMethod('cash');
+    setInvoiceItems(items);
+    setSourceQuote(quote);
+    setView('create');
   };
 
   const printDocument = (html: string) => {
@@ -144,9 +237,7 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
         : ['Invoice Number', 'Type', 'Client / Supplier', 'Payment', 'Date', 'Total', 'Currency'];
 
       const rows = sortedInvoices.map(inv => {
-        const typeStr = inv.type === 'sale'
-          ? (isRtl ? 'مبيعات' : 'Sale')
-          : (isRtl ? 'مشتريات' : 'Purchase');
+        const typeStr = invoiceTypeLabel(inv.type, isRtl);
         const entityName = inv.customerName || inv.supplierName || (isRtl ? 'زبون نقدي' : 'Walk-in');
         const formattedDate = new Date(inv.date).toLocaleDateString(isRtl ? 'ar' : 'en');
         const code = inv.currency || activeCurrency;
@@ -157,15 +248,12 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
           entityName,
           paymentMethodLabel(inv.paymentMethod, isRtl),
           formattedDate,
-          (Number(inv.totalAmount) || 0).toFixed(currencyDecimals(code)),
+          ((isReturnType(inv.type) ? -1 : 1) * (Number(inv.totalAmount) || 0)).toFixed(currencyDecimals(code)),
           code
         ];
       });
 
-      const escapeCsvField = (field: string) => {
-        const stringified = (field || '').replace(/"/g, '""');
-        return `"${stringified}"`;
-      };
+      const escapeCsvField = csvCell;
 
       const csvContent = "\uFEFF" + [
         headers.map(escapeCsvField).join(','),
@@ -192,14 +280,19 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
     try {
       let rowsHtml = '';
       const salesByCurrency = sumInvoicesByCurrency(sortedInvoices, 'sale');
+      const returnsByCurrency = sumInvoicesByCurrency(sortedInvoices, 'return');
+      for (const [code, amount] of Object.entries(returnsByCurrency)) {
+        salesByCurrency[code] = roundMoney((salesByCurrency[code] || 0) - amount, code);
+      }
       const purchasesByCurrency = sumInvoicesByCurrency(sortedInvoices, 'purchase');
+      for (const [code, amount] of Object.entries(sumInvoicesByCurrency(sortedInvoices, 'purchase_return'))) {
+        purchasesByCurrency[code] = roundMoney((purchasesByCurrency[code] || 0) - amount, code);
+      }
       const emptyTotal = isRtl ? 'لا يوجد' : 'None';
 
       sortedInvoices.forEach((inv, idx) => {
-        const typeStr = inv.type === 'sale'
-          ? (isRtl ? 'مبيعات' : 'Sale')
-          : (isRtl ? 'مشتريات' : 'Purchase');
-        const typeColor = inv.type === 'sale' ? 'color: #4f46e5; font-weight: bold;' : 'color: #10b981; font-weight: bold;';
+        const typeStr = invoiceTypeLabel(inv.type, isRtl);
+        const typeColor = inv.type === 'sale' ? 'color: #4f46e5; font-weight: bold;' : inv.type === 'return' ? 'color: #e11d48; font-weight: bold;' : inv.type === 'purchase_return' ? 'color: #d97706; font-weight: bold;' : 'color: #10b981; font-weight: bold;';
         const entityName = inv.customerName || inv.supplierName || (isRtl ? 'زبون نقدي' : 'Walk-in');
         const formattedDate = new Date(inv.date).toLocaleDateString(isRtl ? 'ar' : 'en');
 
@@ -210,7 +303,7 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
             <td style="padding: 10px 8px; border-bottom: 1px solid #e2e8f0; text-align: ${isRtl ? 'right' : 'left'}; font-weight: bold;">${escapeHtml(entityName)}</td>
             <td style="padding: 10px 8px; border-bottom: 1px solid #e2e8f0; text-align: center;">${paymentMethodLabel(inv.paymentMethod, isRtl)}</td>
             <td style="padding: 10px 8px; border-bottom: 1px solid #e2e8f0; text-align: center; font-family: monospace;">${formattedDate}</td>
-            <td style="padding: 10px 8px; border-bottom: 1px solid #e2e8f0; text-align: center; font-family: monospace; font-weight: bold;">${formatCurrency(inv.totalAmount, inv.currency)}</td>
+            <td style="padding: 10px 8px; border-bottom: 1px solid #e2e8f0; text-align: center; font-family: monospace; font-weight: bold;" dir="ltr">${isReturnType(inv.type) ? '−' : ''}${formatCurrency(inv.totalAmount, inv.currency)}</td>
           </tr>
         `;
       });
@@ -259,7 +352,7 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
 
           <div class="summary-cards">
             <div class="card">
-              <div class="card-label">${isRtl ? 'المبيعات' : 'Sales'}</div>
+              <div class="card-label">${isRtl ? 'صافي المبيعات (بعد المرتجعات)' : 'Net sales (after returns)'}</div>
               <div class="card-value" style="color: #4f46e5; font-size: 14px;">${formatCurrencyTotals(salesByCurrency, emptyTotal)}</div>
             </div>
             <div class="card">
@@ -307,7 +400,7 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
   const exportSingleInvoiceToPDF = async (inv: Invoice) => {
     try {
       let einvoice: { qrDataUrl: string; number?: string } | undefined;
-      if (user && inv.type === 'sale') {
+      if (user && (inv.type === 'sale' || inv.type === 'return')) {
         const sent = (await fetchEInvoiceSubmissions([inv.id]).catch(() => ({} as Record<string, EInvoiceSubmission>)))[inv.id];
         if (sent?.status === 'accepted' && sent.qr) {
           einvoice = { qrDataUrl: await eInvoiceQrDataUrl(sent.qr), number: sent.einv_num || undefined };
@@ -525,6 +618,12 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
       newInvoice.invoiceNumber = await saveInvoice(newInvoice);
       consumeInvoiceNumber(numberPrefix, sessionUid, workspace?.ownerId);
       draftIdRef.current = null;
+      if (sourceQuote && invoiceType === 'sale') {
+        const quote = sourceQuote;
+        markOrderConverted(quote.id, newInvoice).catch((err: any) => {
+          toast.error(err?.message || (isRtl ? `حُفظت الفاتورة، لكن تعذّر ربط عرض السعر ${quote.number} بها.` : `The sale was saved, but quotation ${quote.number} could not be linked to it.`));
+        });
+      }
 
       if (shouldPrint) {
         setSelectedInvoice(newInvoice);
@@ -589,7 +688,10 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
         </div>
         {view === 'list' ? (
           <button
-            onClick={() => setView('create')}
+            onClick={() => {
+              if (sourceQuote) resetDraft();
+              setView('create');
+            }}
             className="flex items-center justify-center gap-2 px-6 py-3 bg-indigo-600 text-white rounded-2xl font-bold shadow-lg shadow-indigo-100 dark:shadow-indigo-900/20 hover:bg-indigo-700 transition-all premium-button"
           >
             <Plus size={20} />
@@ -597,7 +699,10 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
           </button>
         ) : (
           <button
-            onClick={() => setView('list')}
+            onClick={() => {
+              if (sourceQuote) resetDraft();
+              setView('list');
+            }}
             className="px-6 py-3 bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 rounded-2xl font-bold hover:bg-gray-200 dark:hover:bg-gray-700 transition-all"
           >
             {t.cancel}
@@ -614,6 +719,20 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
             exit={{ opacity: 0, y: -10 }}
             className="space-y-6"
           >
+            {can('back_office') && (
+              <div className="inline-flex bg-gray-100 dark:bg-gray-800 p-1 rounded-2xl" role="tablist">
+                {([['invoices', isRtl ? 'الفواتير' : 'Invoices'], ['quotes', isRtl ? 'عروض الأسعار' : 'Quotations']] as const).map(([mode, label]) => (
+                  <button key={mode} type="button" role="tab" aria-selected={listMode === mode} onClick={() => setListMode(mode)}
+                    className={`px-5 py-2 rounded-xl text-sm font-bold transition ${listMode === mode ? 'bg-white dark:bg-gray-700 text-indigo-600 dark:text-indigo-300 shadow-sm' : 'text-gray-500'}`}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {listMode === 'quotes' && can('back_office') ? (
+              <OrdersPanel kind="quote" isRtl={isRtl} defaultCurrency={activeCurrency as Currency} onConvert={convertQuote} />
+            ) : (<>
             {/* Search and Sort Controls */}
             <div className="bg-white dark:bg-gray-800 p-4 rounded-3xl border border-gray-100 dark:border-gray-700 shadow-sm flex flex-col md:flex-row gap-4 items-center premium-card">
               <div className="relative flex-1 w-full">
@@ -682,15 +801,15 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
                   setSelectedInvoice(inv);
                   setView('view');
                 }}
-                className={`bg-white dark:bg-gray-800 p-6 rounded-3xl border ${inv.type === 'sale' ? 'border-indigo-100 dark:border-indigo-900/50' : 'border-emerald-100 dark:border-emerald-900/50'} shadow-sm cursor-pointer premium-card group relative overflow-hidden`}
+                className={`bg-white dark:bg-gray-800 p-6 rounded-3xl border ${typeTone(inv.type).border} shadow-sm cursor-pointer premium-card group relative overflow-hidden`}
               >
-                <div className={`absolute top-0 right-0 w-1.5 h-full ${inv.type === 'sale' ? 'bg-indigo-500' : 'bg-emerald-500'}`} />
+                <div className={`absolute top-0 right-0 w-1.5 h-full ${typeTone(inv.type).bar}`} />
                 <div className="flex items-center justify-between mb-4">
-                  <div className={`w-12 h-12 ${inv.type === 'sale' ? 'bg-indigo-50' : 'bg-emerald-50'} dark:bg-gray-700 rounded-2xl flex items-center justify-center ${inv.type === 'sale' ? 'text-indigo-600' : 'text-emerald-600'} transition-colors`}>
-                    <FileText size={24} />
+                  <div className={`w-12 h-12 ${typeTone(inv.type).iconBg} dark:bg-gray-700 rounded-2xl flex items-center justify-center ${typeTone(inv.type).text} transition-colors`}>
+                    {isReturnType(inv.type) ? <Undo2 size={24} /> : <FileText size={24} />}
                   </div>
                   <div className="text-right">
-                    <div className="text-[10px] font-black text-gray-400 uppercase tracking-widest">{inv.type === 'sale' ? t.sale : t.purchase}</div>
+                    <div className="text-[10px] font-black text-gray-400 uppercase tracking-widest">{inv.type === 'sale' ? t.sale : inv.type === 'return' ? (isRtl ? 'مرتجع' : 'Return') : inv.type === 'purchase_return' ? (isRtl ? 'مرتجع مشتريات' : 'Purchase return') : t.purchase}</div>
                     <div className="text-xs font-bold text-gray-500">{inv.invoiceNumber}</div>
                     <div className="text-sm font-mono text-gray-600 dark:text-gray-400">
                       {new Date(inv.date).toLocaleDateString(language === 'ar' ? 'ar-EG' : 'en-US')}
@@ -699,7 +818,7 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
                 </div>
                 <div className="space-y-4">
                   <div>
-                    <h3 className="text-lg font-bold text-gray-900 dark:text-gray-100 truncate">{inv.customerName || inv.supplierName || (isRtl ? 'زبون نقدي' : 'Walk-in')}</h3>
+                    <h3 className="text-lg font-bold text-gray-900 dark:text-gray-100 truncate">{(inv.type === 'purchase_return' ? inv.supplierName : inv.customerName || inv.supplierName) || (isRtl ? 'زبون نقدي' : 'Walk-in')}</h3>
                     <p className="text-[11px] text-gray-400 font-bold mt-1">{paymentMethodLabel(inv.paymentMethod, isRtl)} · {inv.currency}</p>
                   </div>
                   <div className="flex items-center justify-between pt-4 border-t border-gray-50 dark:border-gray-700">
@@ -715,13 +834,14 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
                       <Printer size={11} />
                       <span>{isRtl ? 'طباعة' : 'Print'}</span>
                     </button>
-                    <span className={`text-xl font-black ${inv.type === 'sale' ? 'text-indigo-600' : 'text-emerald-600'} font-mono`}>{formatCurrency(inv.totalAmount, inv.currency)}</span>
+                    <span className={`text-xl font-black ${typeTone(inv.type).text} font-mono`} dir="ltr">{isReturnType(inv.type) ? '−' : ''}{formatCurrency(inv.totalAmount, inv.currency)}</span>
                   </div>
                 </div>
               </motion.div>
             ))}
           </div>
           <ShowMoreBar isRtl={isRtl} shown={invoicePage.shown} total={invoicePage.total} pageSize={invoicePage.pageSize} onMore={invoicePage.showMore} onAll={invoicePage.showAll} className="mt-4" />
+            </>)}
         </motion.div>
       )}
 
@@ -732,6 +852,11 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
             animate={{ opacity: 1, scale: 1 }}
             className="bg-white dark:bg-gray-800 rounded-[2.5rem] border border-gray-100 dark:border-gray-700 shadow-xl overflow-hidden premium-card"
           >
+            {sourceQuote && !newInvoiceSuccess && (
+              <div className="px-8 py-3 bg-violet-50 dark:bg-violet-950/30 border-b border-violet-100 dark:border-violet-900/40 text-sm font-bold text-violet-700 dark:text-violet-300">
+                {isRtl ? `فاتورة بيع من عرض السعر ${sourceQuote.number} — المخزون يُفحص عند الحفظ` : `Sale from quotation ${sourceQuote.number} — stock is checked on save`}
+              </div>
+            )}
             {newInvoiceSuccess ? (
               <div className="p-20 text-center flex flex-col items-center gap-4">
                 <div className="w-20 h-20 bg-emerald-100 dark:bg-emerald-900/30 rounded-full flex items-center justify-center text-emerald-600 dark:text-emerald-400">
@@ -1098,7 +1223,89 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
                 <Printer size={20} />
                 {isRtl ? 'طباعة' : 'Print'}
               </button>
+              {can('reverse_invoice') && selectedInvoice.type === 'sale' && canReturn(selectedInvoice) && (
+                <button
+                  type="button"
+                  onClick={() => setReturnOpen(true)}
+                  className="flex items-center gap-2 px-6 py-3 bg-rose-600 text-white rounded-2xl font-bold shadow-lg shadow-rose-100 dark:shadow-rose-900/30 hover:bg-rose-700 transition-all active:scale-95 cursor-pointer no-print"
+                >
+                  <Undo2 size={20} />
+                  {isRtl ? 'مرتجع' : 'Return'}
+                </button>
+              )}
+              {can('back_office') && selectedInvoice.type === 'purchase' && canReturnPurchase(selectedInvoice) && (
+                <button
+                  type="button"
+                  onClick={() => setReturnOpen(true)}
+                  className="flex items-center gap-2 px-6 py-3 bg-amber-600 text-white rounded-2xl font-bold shadow-lg shadow-amber-100 dark:shadow-amber-900/30 hover:bg-amber-700 transition-all active:scale-95 cursor-pointer no-print"
+                >
+                  <Undo2 size={20} />
+                  {isRtl ? 'مرتجع للمورد' : 'Return to supplier'}
+                </button>
+              )}
+              {((can('reverse_invoice') && selectedInvoice.type === 'return') || (can('back_office') && selectedInvoice.type === 'purchase_return')) && (
+                <button
+                  type="button"
+                  disabled={deletingReturn}
+                  onClick={() => handleDeleteReturn(selectedInvoice)}
+                  className="flex items-center gap-2 px-6 py-3 bg-white dark:bg-gray-800 text-rose-600 border border-rose-200 dark:border-rose-900/50 rounded-2xl font-bold hover:bg-rose-50 dark:hover:bg-rose-950/30 transition-all active:scale-95 cursor-pointer disabled:opacity-50 no-print"
+                >
+                  <Trash2 size={20} />
+                  {deletingReturn ? (isRtl ? 'جارٍ الحذف...' : 'Deleting...') : (isRtl ? 'حذف المرتجع' : 'Delete return')}
+                </button>
+              )}
             </div>
+
+            {returnOpen && (selectedInvoice.type === 'sale' || selectedInvoice.type === 'purchase') && (
+              <ReturnModal
+                original={selectedInvoice}
+                isRtl={isRtl}
+                onClose={() => setReturnOpen(false)}
+                onSaved={(saved) => {
+                  setReturnOpen(false);
+                  toast.success(saved.type === 'purchase_return'
+                    ? (isRtl ? `سُجّل مرتجع المشتريات #${saved.invoiceNumber}` : `Purchase return #${saved.invoiceNumber} recorded`)
+                    : (isRtl ? `سُجّل المرتجع #${saved.invoiceNumber}` : `Return #${saved.invoiceNumber} recorded`));
+                  setSelectedInvoice(saved);
+                }}
+              />
+            )}
+
+            {isReturnType(selectedInvoice.type) && (
+              <div className="w-full max-w-3xl rounded-2xl border border-rose-200 dark:border-rose-900/50 bg-rose-50/60 dark:bg-rose-950/20 p-4 text-sm space-y-1 no-print">
+                {selectedInvoice.returnOf && (
+                  <p>
+                    {isRtl ? 'مرتجع عن الفاتورة' : 'Return for invoice'}{' '}
+                    <button type="button" onClick={() => openInvoice(selectedInvoice.returnOf!)} className="font-mono font-bold text-indigo-600 hover:underline" dir="ltr">
+                      #{selectedInvoice.returnOfNumber || selectedInvoice.returnOf}
+                    </button>
+                  </p>
+                )}
+                {selectedInvoice.refund && (
+                  <p className="text-slate-600 dark:text-slate-300">
+                    {[
+                      selectedInvoice.refund.debt > 0 && `${selectedInvoice.type === 'purchase_return' ? (isRtl ? 'خُصم من رصيد المورد' : 'Taken off the supplier balance') : (isRtl ? 'خُصم من دين العميل' : 'Taken off the debt')} ${formatMoney(selectedInvoice.refund.debt, selectedInvoice.refund.debtCurrency || selectedInvoice.currency)}`,
+                      selectedInvoice.refund.vault > 0 && `${selectedInvoice.type === 'purchase_return' ? (isRtl ? 'ردّه المورد نقداً إلى الخزنة' : 'Paid back by the supplier into the vault') : (isRtl ? 'رُدّ نقداً من الخزنة' : 'Cash refund from the vault')} ${formatMoney(selectedInvoice.refund.vault, selectedInvoice.refund.vaultCurrency)}`,
+                      selectedInvoice.refund.external > 0 && `${selectedInvoice.type === 'purchase_return' ? (isRtl ? 'يُسوّى مع المورد خارج التطبيق' : 'Settled with the supplier outside the app') : (isRtl ? 'يُردّ بالبطاقة/المحفظة خارج التطبيق' : 'Refunded by card/wallet outside the app')} ${formatMoney(selectedInvoice.refund.external, selectedInvoice.currency)}`,
+                    ].filter(Boolean).join(' · ')}
+                  </p>
+                )}
+              </div>
+            )}
+
+            {relatedReturns.length > 0 && (
+              <div className="w-full max-w-3xl rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 text-sm no-print">
+                <p className="font-bold text-slate-700 dark:text-slate-200 mb-2">{isRtl ? 'مرتجعات هذه الفاتورة' : 'Returns of this invoice'}</p>
+                <div className="flex flex-wrap gap-2">
+                  {relatedReturns.map((ret) => (
+                    <button key={ret.id} type="button" onClick={() => setSelectedInvoice(ret)}
+                      className="px-3 py-1.5 rounded-xl bg-rose-50 dark:bg-rose-950/30 text-rose-700 dark:text-rose-300 font-bold text-xs hover:bg-rose-100">
+                      <span className="font-mono" dir="ltr">#{ret.invoiceNumber}</span> · <span dir="ltr">{formatMoney(ret.totalAmount, ret.currency)}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
 
             <EInvoicePanel invoice={selectedInvoice} isRtl={isRtl} />
 
@@ -1149,8 +1356,8 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
                   </p>
                 </div>
                 <div>
-                  <p className="text-[11px] text-slate-400 font-bold">{selectedInvoice.type === 'sale' ? (isRtl ? 'إلى' : 'Bill to') : (isRtl ? 'من' : 'From')}</p>
-                  <p className="font-semibold">{selectedInvoice.customerName || selectedInvoice.supplierName || (isRtl ? 'زبون نقدي' : 'Walk-in')}</p>
+                  <p className="text-[11px] text-slate-400 font-bold">{selectedInvoice.type === 'purchase' ? (isRtl ? 'من' : 'From') : (isRtl ? 'إلى' : 'Bill to')}</p>
+                  <p className="font-semibold">{(selectedInvoice.type === 'purchase_return' ? selectedInvoice.supplierName : selectedInvoice.customerName || selectedInvoice.supplierName) || (isRtl ? 'زبون نقدي' : 'Walk-in')}</p>
                 </div>
                 <div>
                   <p className="text-[11px] text-slate-400 font-bold">{isRtl ? 'طريقة الدفع' : 'Payment'}</p>
@@ -1160,6 +1367,18 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
                   <p className="text-[11px] text-slate-400 font-bold">{isRtl ? 'العملة' : 'Currency'}</p>
                   <p className="font-semibold font-mono">{selectedInvoice.currency}</p>
                 </div>
+                {isReturnType(selectedInvoice.type) && selectedInvoice.returnOfNumber && (
+                  <div>
+                    <p className="text-[11px] text-slate-400 font-bold">{isRtl ? 'عن الفاتورة' : 'For invoice'}</p>
+                    <p className="font-semibold font-mono" dir="ltr">#{selectedInvoice.returnOfNumber}</p>
+                  </div>
+                )}
+                {isReturnType(selectedInvoice.type) && selectedInvoice.returnReason && (
+                  <div className="col-span-2">
+                    <p className="text-[11px] text-slate-400 font-bold">{isRtl ? 'سبب الإرجاع' : 'Reason'}</p>
+                    <p className="font-semibold">{selectedInvoice.returnReason}</p>
+                  </div>
+                )}
               </div>
 
               <div className="overflow-hidden rounded-2xl border border-slate-200 dark:border-slate-800 mb-8">

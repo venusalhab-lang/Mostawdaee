@@ -10,6 +10,10 @@ export const USER_CACHE_KEYS = [
   'payroll',
   'customers',
   'customer_transactions',
+  'suppliers',
+  'supplier_transactions',
+  'shifts',
+  'orders',
   'vault_records',
   'warehouses',
   'vault',
@@ -33,7 +37,7 @@ const FLUSH_DELAY_MS = 800;
 /** Copies of server data; the app downloads them again, so they may be dropped. Held bills may not. */
 const SERVER_COPY_KEYS = new Set<string>([
   'settings', 'products', 'invoices', 'employees', 'payroll', 'customers',
-  'customer_transactions', 'vault_records', 'warehouses', 'vault', 'audit_logs',
+  'customer_transactions', 'suppliers', 'supplier_transactions', 'shifts', 'orders', 'vault_records', 'warehouses', 'vault', 'audit_logs',
 ]);
 
 function persist(storageKey: string, value: unknown): void {

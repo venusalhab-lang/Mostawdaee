@@ -56,6 +56,11 @@ describe('einvoice_claim / einvoice_record', () => {
     await expect(saveInvoice('a', { type: 'sale', totalAmount: 109, actorId: OWNER })).resolves.toBeDefined();
     await expect(deleteInvoice('b')).resolves.toBeDefined();
   });
+
+  it('still lets a return record the quantities it took back on an accepted sale', async () => {
+    await expect(saveInvoice('a', { type: 'sale', totalAmount: 109, actorId: OWNER, returnedQty: [1] })).resolves.toBeDefined();
+    await expect(saveInvoice('a', { type: 'sale', totalAmount: 50, actorId: OWNER, returnedQty: [1] })).rejects.toThrow(/einvoice locked/);
+  });
 });
 
 describe('access', () => {

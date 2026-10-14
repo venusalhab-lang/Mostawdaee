@@ -344,6 +344,7 @@ export default function ChequesManagement({ language, settings }: Props) {
               'payment',
               isRtl ? `تحصيل شيك رقم ${cheque.chequeNumber} - ${cheque.bankName}` : `Cheque ${cheque.chequeNumber} cashed - ${cheque.bankName}`,
               paymentToVault,
+              `chq-${cheque.id}`,
             );
             toast.success(isRtl
               ? `تحصّل الشيك ${cheque.chequeNumber} ونقص دين ${payment.customer.name} إلى ${formatMoney(payment.plan.debtAfter, cheque.currency, locale)}`

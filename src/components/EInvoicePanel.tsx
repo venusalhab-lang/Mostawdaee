@@ -30,8 +30,11 @@ export default function EInvoicePanel({ invoice, isRtl }: { invoice: Invoice; is
   const [confirming, setConfirming] = useState(false);
   const [sending, setSending] = useState(false);
   const [ready, setReady] = useState(false);
+  const [originalAccepted, setOriginalAccepted] = useState(true);
 
-  const isSale = invoice.type === 'sale';
+  const isSale = invoice.type === 'sale' || invoice.type === 'return';
+  const isCredit = invoice.type === 'return';
+  const originalId = isCredit ? invoice.returnOf || '' : '';
 
   useEffect(() => {
     if (!user || !isSale) return;
@@ -39,16 +42,19 @@ export default function EInvoicePanel({ invoice, isRtl }: { invoice: Invoice; is
     setReady(false);
     setSubmission(null);
     setQrImage('');
-    Promise.allSettled([fetchEInvoiceConfig(), fetchEInvoiceSubmissions([invoice.id])]).then(([cfg, subs]) => {
+    const ids = originalId ? [invoice.id, originalId] : [invoice.id];
+    Promise.allSettled([fetchEInvoiceConfig(), fetchEInvoiceSubmissions(ids)]).then(([cfg, subs]) => {
       if (!alive) return;
+      const sent = subs.status === 'fulfilled' ? subs.value : {};
       setConfig(cfg.status === 'fulfilled' ? cfg.value : null);
-      setSubmission(subs.status === 'fulfilled' ? subs.value[invoice.id] || null : null);
+      setSubmission(sent[invoice.id] || null);
+      setOriginalAccepted(!isCredit || sent[originalId]?.status === 'accepted');
       setReady(true);
     });
     return () => {
       alive = false;
     };
-  }, [user, isSale, invoice.id]);
+  }, [user, isSale, isCredit, invoice.id, originalId]);
 
   useEffect(() => {
     if (submission?.status === 'accepted' && submission.qr) {
@@ -65,7 +71,7 @@ export default function EInvoicePanel({ invoice, isRtl }: { invoice: Invoice; is
   const canSend = linked && (config!.role === 'owner' || config!.role === 'manager');
   const status = submission?.status;
   const jod = invoice.currency === 'JOD';
-  const sendable = canSend && jod && status !== 'accepted' && status !== 'sending';
+  const sendable = canSend && jod && originalAccepted && status !== 'accepted' && status !== 'sending';
 
   const send = async () => {
     setSending(true);
@@ -74,7 +80,9 @@ export default function EInvoicePanel({ invoice, isRtl }: { invoice: Invoice; is
       const subs = await fetchEInvoiceSubmissions([invoice.id]).catch(() => ({} as Record<string, EInvoiceSubmission>));
       setSubmission(subs[invoice.id] || null);
       if (result.outcome === 'accepted') {
-        toast.success(isRtl ? 'قُبلت الفاتورة في نظام الفوترة الوطني.' : 'The invoice was accepted by JoFotara.');
+        toast.success(isCredit
+          ? (isRtl ? 'قُبل إشعار الدائن في نظام الفوترة الوطني.' : 'The credit note was accepted by JoFotara.')
+          : (isRtl ? 'قُبلت الفاتورة في نظام الفوترة الوطني.' : 'The invoice was accepted by JoFotara.'));
       } else if (result.outcome === 'rejected') {
         toast.error(isRtl ? 'رفض النظام الفاتورة. راجع السبب أدناه.' : 'JoFotara rejected the invoice. See the reason below.');
       } else {
@@ -122,6 +130,13 @@ export default function EInvoicePanel({ invoice, isRtl }: { invoice: Invoice; is
           {linked && !jod && !status && (
             <p className="text-xs opacity-80">{isRtl ? 'الفوترة الوطنية تقبل الفواتير بالدينار الأردني فقط.' : 'JoFotara only accepts invoices in Jordanian dinars.'}</p>
           )}
+          {linked && jod && !originalAccepted && status !== 'accepted' && (
+            <p className="text-xs opacity-80">
+              {isRtl
+                ? 'يُرسل إشعار الدائن بعد قبول الفاتورة الأصلية في الفوترة الوطنية. افتح الفاتورة الأصلية وأرسلها أولاً.'
+                : 'The credit note can be sent once the original invoice is accepted by JoFotara. Open the original and send it first.'}
+            </p>
+          )}
         </div>
         {qrImage && <img src={qrImage} alt="QR" className="w-24 h-24 rounded-lg bg-white p-1" />}
         {sendable && !confirming && (
@@ -138,9 +153,13 @@ export default function EInvoicePanel({ invoice, isRtl }: { invoice: Invoice; is
       {confirming && (
         <div role="alertdialog" className="rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-slate-900 p-3 space-y-2 text-sm text-slate-700 dark:text-slate-200">
           <p>
-            {isRtl
-              ? 'ستُسجَّل هذه الفاتورة رسمياً لدى دائرة ضريبة الدخل والمبيعات. بعد القبول لا يمكن تعديلها أو حذفها، وتُصحَّح بفاتورة إرجاع.'
-              : 'This invoice will be recorded officially by ISTD. Once accepted it cannot be edited or deleted; it is corrected with a return invoice.'}
+            {isCredit
+              ? (isRtl
+                ? 'سيُسجَّل إشعار الدائن رسمياً لدى دائرة ضريبة الدخل والمبيعات مرتبطاً بالفاتورة الأصلية. بعد القبول لا يمكن حذف المرتجع.'
+                : 'This credit note will be recorded officially by ISTD against the original invoice. Once accepted the return cannot be deleted.')
+              : (isRtl
+                ? 'ستُسجَّل هذه الفاتورة رسمياً لدى دائرة ضريبة الدخل والمبيعات. بعد القبول لا يمكن تعديلها أو حذفها، وتُصحَّح بفاتورة إرجاع.'
+                : 'This invoice will be recorded officially by ISTD. Once accepted it cannot be edited or deleted; it is corrected with a return invoice.')}
           </p>
           <div className="flex gap-2">
             <button type="button" disabled={sending} onClick={() => void send()} className="rounded-lg bg-indigo-600 text-white px-3 py-1.5 text-xs font-bold inline-flex items-center gap-1.5 disabled:opacity-50">

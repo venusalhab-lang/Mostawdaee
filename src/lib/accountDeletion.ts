@@ -1,4 +1,4 @@
-import { apiUrl } from './apiBase';
+import { apiUrl, readApiJson } from './apiBase';
 import { supabase } from '../supabaseClient';
 
 export type AccountDeletionCode =
@@ -30,8 +30,9 @@ export async function deleteMyAccount(confirmEmail: string): Promise<void> {
   } catch {
     throw new AccountDeletionError('network');
   }
-  if (response.ok) return;
-  const body = await response.json().catch(() => ({}));
+  const body = await readApiJson(response);
+  if (!body) throw new AccountDeletionError('network');
+  if (response.ok && body.ok === true) return;
   const code = typeof body?.code === 'string' ? body.code : 'delete_failed';
   throw new AccountDeletionError(code as AccountDeletionCode, body?.message);
 }

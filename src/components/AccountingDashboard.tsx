@@ -96,7 +96,7 @@ const SELECT = 'px-3 py-2 bg-white dark:bg-gray-900 border border-slate-200 dark
 
 export default function AccountingDashboard({ language = 'ar', currency: preferred, onClose }: AccountingDashboardProps) {
   const {
-    user, settings, invoices = [], products = [], vaultTransactions = [], customerTransactions = [],
+    user, settings, invoices = [], products = [], vaultTransactions = [], customerTransactions = [], supplierTransactions = [],
     payrollRecords = [], stockMovements = [], customers = [], vault,
   } = useFirebase();
   const isAr = language === 'ar';
@@ -117,8 +117,8 @@ export default function AccountingDashboard({ language = 'ar', currency: preferr
   const [saving, setSaving] = useState(false);
 
   const journal = useMemo(() => buildJournal({
-    invoices, products, vaultTransactions, customerTransactions, payrollRecords, stockMovements, config, defaultCurrency,
-  }), [invoices, products, vaultTransactions, customerTransactions, payrollRecords, stockMovements, config, defaultCurrency]);
+    invoices, products, vaultTransactions, customerTransactions, supplierTransactions, payrollRecords, stockMovements, config, defaultCurrency,
+  }), [invoices, products, vaultTransactions, customerTransactions, supplierTransactions, payrollRecords, stockMovements, config, defaultCurrency]);
 
   const currencies = useMemo(() => {
     const list = journalCurrencies(journal.entries);

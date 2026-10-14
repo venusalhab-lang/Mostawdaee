@@ -29,6 +29,7 @@ import QuickActionModal from './components/QuickActionModal';
 import CommandPalette from './components/CommandPalette';
 import { isVerifiedAdmin } from './lib/adminAccess';
 import { NATIVE_OAUTH_REDIRECT } from './lib/nativeAuth';
+import { usePasswordRecovery } from './lib/passwordRecovery';
 import { claimOAuthCallback, oauthProviderError, readOAuthCallbackParams, urlLooksLikeOAuthCallback } from './lib/completeOAuthSession';
 import { Browser } from '@capacitor/browser';
 import { useSubscriptionSync } from './hooks/useSubscriptionSync';
@@ -78,6 +79,7 @@ export default function App() {
     isStoreOwner,
     canOpenScreen,
   } = useFirebase();
+  const recoveringPassword = usePasswordRecovery();
 
   const [language, setLanguage] = useState<'ar' | 'en'>('ar');
   const isRtl = language === 'ar';
@@ -575,6 +577,20 @@ const signUpWithEmail = async (emailVal: string, passwordVal: string) => {
     refreshToken: async () => {},
   };
 
+  const loginScreen = (
+    <AuthContext.Provider value={authContextValue}>
+      <Login
+        language={language}
+        onLanguageToggle={toggleLanguage}
+        onLoginSuccess={() => setIsGuestModeActive(false)}
+        onContinueAsGuest={() => setIsGuestModeActive(true)}
+      />
+    </AuthContext.Provider>
+  );
+
+  // A reset link signs in; the new password is asked for before anything else opens.
+  if (recoveringPassword) return loginScreen;
+
   // 1. Loading State Splash (members must not glimpse owner screens before their role is known)
   if (dbLoading || (hasRealSession && !workspace)) {
     return (
@@ -592,16 +608,7 @@ const signUpWithEmail = async (emailVal: string, passwordVal: string) => {
 
   // 2. Authentication routing rules
   if (!user && !isGuestModeActive) {
-    return (
-      <AuthContext.Provider value={authContextValue}>
-        <Login
-          language={language}
-          onLanguageToggle={toggleLanguage}
-          onLoginSuccess={() => setIsGuestModeActive(false)}
-          onContinueAsGuest={() => setIsGuestModeActive(true)}
-        />
-      </AuthContext.Provider>
-    );
+    return loginScreen;
   }
 
   if (hasRealSession && !isAdmin && !subscriptionLoading && isExpired) {
@@ -839,7 +846,7 @@ const signUpWithEmail = async (emailVal: string, passwordVal: string) => {
 
           {/* Screen Stage Container - Main Content Area */}
           <main 
-            className="main-content flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8 pb-28 lg:pb-8"
+            className="main-content flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8 pb-[calc(7rem+env(safe-area-inset-bottom))] lg:pb-8"
             style={sidebarOffsetStyle}
           >
 
@@ -896,10 +903,11 @@ const signUpWithEmail = async (emailVal: string, passwordVal: string) => {
         </div>
 
         {/* Modern iOS/Android/Capacitor-style Bottom Navigation Bar with CircularNotchedRectangle Notch Dock (lg:hidden) */}
-        <div className="lg:hidden fixed bottom-0 inset-x-0 h-20 z-50 pointer-events-none select-none font-arabic">
-          
+        <div className="lg:hidden fixed bottom-0 inset-x-0 h-[calc(5rem+env(safe-area-inset-bottom))] z-40 pointer-events-none select-none font-arabic">
+          <div className="absolute inset-x-0 bottom-0 h-[env(safe-area-inset-bottom)] bg-white/95 dark:bg-slate-900/95 pointer-events-auto" />
+
           {/* Physical Notched Backdrop with continuous smooth line */}
-          <div className="absolute inset-0 flex pointer-events-auto">
+          <div className="absolute inset-x-0 top-0 h-20 flex pointer-events-auto">
             {/* Left Wing */}
             <div className="flex-1 bg-white/95 dark:bg-slate-900/95 backdrop-blur-xl border-t border-slate-200/50 dark:border-white/10 rounded-tl-[22px] shadow-[0_-8px_30px_rgba(0,0,0,0.03)]" />
             
@@ -920,7 +928,7 @@ const signUpWithEmail = async (emailVal: string, passwordVal: string) => {
           </div>
 
           {/* Interactive Nav Content */}
-          <div className="absolute inset-0 flex items-center justify-between px-2 pb-[env(safe-area-inset-bottom)] pointer-events-auto">
+          <div className="absolute inset-x-0 top-0 h-20 flex items-center justify-between px-2 pointer-events-auto">
             
             {/* Left Navigation Actions (Home, Inventory) */}
             <div className="flex-1 flex justify-around items-center">

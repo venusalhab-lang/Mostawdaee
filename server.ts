@@ -1014,7 +1014,10 @@ async function startServer() {
     } catch (error) {
       console.warn(`[Exchange Proxy] Failed to fetch external rates for ${baseUpper}, serving local fallbacks.`, error);
       
-      const rates = fallbackRates[baseUpper] || fallbackRates["USD"];
+      const rates = fallbackRates[baseUpper];
+      if (!rates) {
+        return res.status(503).json({ message: "Live exchange rates are unavailable right now" });
+      }
       res.json({
         result: "success",
         base_code: baseUpper,
@@ -1395,8 +1398,26 @@ async function startServer() {
       family: config.family,
       zeroRateCategory: config.zero_rate_category,
     };
+    // A credit note references the original sale exactly as JoFotara accepted it.
+    let original: { number: string; uuid: string; total: number } | undefined;
+    if (invoice.type === "return") {
+      const originalId = typeof invoice.returnOf === "string" ? invoice.returnOf : "";
+      const { data: sent, error: sentError } = originalId
+        ? await service
+            .from("einvoice_submissions")
+            .select("invoice_number, uuid, status, payable")
+            .eq("owner_id", access.ownerId)
+            .eq("invoice_id", originalId)
+            .maybeSingle()
+        : { data: null, error: null };
+      if (sentError) return res.status(503).json({ code: "einvoice_unavailable", message: "Could not read the original invoice status" });
+      if (!sent || sent.status !== "accepted" || !sent.uuid || !(Number(sent.payable) > 0)) {
+        return res.status(409).json({ code: "original_not_accepted", message: "Send the original invoice to JoFotara first" });
+      }
+      original = { number: String(sent.invoice_number || ""), uuid: String(sent.uuid), total: Number(sent.payable) };
+    }
     // Check the invoice before a counter number is reserved for it.
-    const precheck = joFotaraFromInvoice(invoice, { seller, uuid: "00000000-0000-4000-8000-000000000000", icv: 1, buyer: { phone } });
+    const precheck = joFotaraFromInvoice(invoice, { seller, uuid: "00000000-0000-4000-8000-000000000000", icv: 1, buyer: { phone }, original });
     if (precheck.ok === false) {
       return res.status(422).json({ code: "invoice_invalid", message: "The invoice cannot be sent as it is", issues: precheck.issues });
     }
@@ -1405,7 +1426,7 @@ async function startServer() {
       p_owner: access.ownerId,
       p_invoice: invoiceId,
       p_number: invoice.invoiceNumber,
-      p_kind: "invoice",
+      p_kind: invoice.type === "return" ? "credit" : "invoice",
       p_actor: authUser.id,
     });
     if (claim.error) {
@@ -1419,7 +1440,7 @@ async function startServer() {
     const uuid = String(reserved?.claim_uuid || "");
     const icv = Number(reserved?.claim_icv);
 
-    const prepared = joFotaraFromInvoice(invoice, { seller, uuid, icv, buyer: { phone } });
+    const prepared = joFotaraFromInvoice(invoice, { seller, uuid, icv, buyer: { phone }, original });
     const built = prepared.ok ? buildJoFotaraXml(prepared.doc) : null;
     if (!built || built.ok === false) {
       await service.rpc("einvoice_record", {

@@ -1,5 +1,5 @@
 import { supabase } from '../supabaseClient';
-import { apiUrl } from './apiBase';
+import { API_UNREACHABLE_AR, apiUrl, readApiJson } from './apiBase';
 import { restorePurchases, type ProcessedTransaction } from '../services/billing';
 
 async function sessionToken(): Promise<string> {
@@ -28,10 +28,9 @@ export async function activatePaidSubscription(tx: Pick<ProcessedTransaction, 'p
     }),
   });
 
-  if (!response.ok) {
-    const details = await response.json().catch(() => ({}));
-    throw new Error(details.message || 'تعذر تفعيل الاشتراك من الخادم');
-  }
+  const body = await readApiJson(response);
+  if (!body) throw new Error(API_UNREACHABLE_AR);
+  if (!response.ok || body.ok !== true) throw new Error(body.message || 'تعذر تفعيل الاشتراك من الخادم');
 }
 
 /** Asks the server to re-read this account's Google Play purchases (renewals, refunds). */
@@ -41,10 +40,9 @@ export async function syncPaidSubscription(): Promise<void> {
     method: 'POST',
     headers: { Authorization: `Bearer ${accessToken}` },
   });
-  if (!response.ok) {
-    const details = await response.json().catch(() => ({}));
-    throw new Error(details.message || 'تعذر مزامنة الاشتراك مع Google Play');
-  }
+  const body = await readApiJson(response);
+  if (!body) throw new Error(API_UNREACHABLE_AR);
+  if (!response.ok || body.ok !== true) throw new Error(body.message || 'تعذر مزامنة الاشتراك مع Google Play');
 }
 
 /** Links every premium purchase Google Play reports on this device to the signed-in account. */

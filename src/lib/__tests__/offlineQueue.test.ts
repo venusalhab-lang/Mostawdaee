@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { canQueueOffline, enqueueInvoice, isOfflineError, localSaleShortages, readQueue, writeQueue } from '../offlineQueue';
+import { belongsToStore, canQueueOffline, enqueueInvoice, isOfflineError, localSaleShortages, readQueue, writeQueue } from '../offlineQueue';
 import type { Invoice, Product } from '../../types';
 
 class MemoryStorage {
@@ -43,6 +43,15 @@ describe('offline queue', () => {
     expect(enqueueInvoice('u1', invoice())).toBe(true);
     expect(enqueueInvoice('u1', invoice())).toBe(true);
     expect(readQueue('u1')).toHaveLength(1);
+  });
+
+  it('remembers the store a sale was taken in and sends it only there', () => {
+    expect(enqueueInvoice('u1', invoice({ id: 'a' }), 'owner-1')).toBe(true);
+    const [entry] = readQueue('u1');
+    expect(entry.storeId).toBe('owner-1');
+    expect(belongsToStore(entry, 'owner-1')).toBe(true);
+    expect(belongsToStore(entry, 'u1')).toBe(false);
+    expect(belongsToStore({}, 'u1')).toBe(true);
   });
 
   it('reads invoices queued by the previous app version', () => {

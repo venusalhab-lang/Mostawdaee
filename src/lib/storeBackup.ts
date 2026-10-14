@@ -1,5 +1,6 @@
 import type {
-  AppSettings, Customer, CustomerTransaction, Employee, Invoice, PayrollRecord, Product, Vault, VaultTransaction, Warehouse,
+  AppSettings, Customer, CustomerTransaction, Employee, Invoice, PayrollRecord, Product, Shift, Supplier, TradeOrder, SupplierTransaction, Vault,
+  VaultTransaction, Warehouse,
 } from '../types';
 
 export const BACKUP_APP = 'Mostawdaee System';
@@ -16,12 +17,18 @@ export interface StoreBackup {
   payrollRecords: PayrollRecord[];
   customers: Customer[];
   customerTransactions: CustomerTransaction[];
+  suppliers: Supplier[];
+  supplierTransactions: SupplierTransaction[];
+  shifts: Shift[];
+  orders: TradeOrder[];
   vaultTransactions: VaultTransaction[];
   warehouses: Warehouse[];
   vault: Vault | null;
 }
 
-export type StoreBackupInput = Omit<StoreBackup, 'app' | 'timestamp' | 'creator'> & { creator?: string | null };
+export type StoreBackupInput = Omit<StoreBackup, 'app' | 'timestamp' | 'creator' | 'suppliers' | 'supplierTransactions' | 'shifts' | 'orders'>
+  & Partial<Pick<StoreBackup, 'suppliers' | 'supplierTransactions' | 'shifts' | 'orders'>>
+  & { creator?: string | null };
 
 export function buildStoreBackup(input: StoreBackupInput, now = Date.now()): StoreBackup {
   return {
@@ -35,6 +42,10 @@ export function buildStoreBackup(input: StoreBackupInput, now = Date.now()): Sto
     payrollRecords: input.payrollRecords ?? [],
     customers: input.customers ?? [],
     customerTransactions: input.customerTransactions ?? [],
+    suppliers: input.suppliers ?? [],
+    supplierTransactions: input.supplierTransactions ?? [],
+    shifts: input.shifts ?? [],
+    orders: input.orders ?? [],
     vaultTransactions: input.vaultTransactions ?? [],
     warehouses: input.warehouses ?? [],
     vault: input.vault ?? null,
@@ -59,6 +70,7 @@ export function backupCounts(data: Partial<StoreBackup>) {
     invoices: n(data.invoices),
     employees: n(data.employees),
     customers: n(data.customers),
+    suppliers: n(data.suppliers),
     vaultTransactions: n(data.vaultTransactions),
   };
 }
@@ -72,6 +84,12 @@ export interface RestoreActions {
   savePayrollRecord: (payroll: PayrollRecord) => Promise<void>;
   saveCustomer: (customer: Customer, options: { restore: true }) => Promise<void>;
   saveCustomerTransaction: (tx: CustomerTransaction) => Promise<void>;
+  /** Raw writes: balances and ledger come back exactly as saved, like customers. */
+  saveSupplierRecord: (supplier: Supplier) => Promise<void>;
+  saveSupplierTransaction: (tx: SupplierTransaction) => Promise<void>;
+  /** Raw write; the server refuses to change a shift that is already closed. */
+  saveShift: (shift: Shift) => Promise<void>;
+  saveOrder: (order: TradeOrder) => Promise<void>;
   saveVaultRecord: (tx: VaultTransaction) => Promise<void>;
   restoreVault: (vault: Vault) => Promise<void>;
 }
@@ -83,6 +101,7 @@ export interface LiveBooks {
   invoices: Pick<Invoice, 'date'>[];
   vaultTransactions: Pick<VaultTransaction, 'timestamp'>[];
   customerTransactions: Pick<CustomerTransaction, 'date'>[];
+  supplierTransactions?: Pick<SupplierTransaction, 'date'>[];
 }
 
 const time = (v: unknown): number => {
@@ -97,6 +116,7 @@ export function newerLiveActivity(backupTimestamp: unknown, live: LiveBooks): nu
   for (const inv of live.invoices) latest = Math.max(latest, time(inv.date));
   for (const tx of live.vaultTransactions) latest = Math.max(latest, time(tx.timestamp));
   for (const tx of live.customerTransactions) latest = Math.max(latest, time(tx.date));
+  for (const tx of live.supplierTransactions || []) latest = Math.max(latest, time(tx.date));
   return latest > taken ? latest : null;
 }
 
@@ -115,9 +135,34 @@ export async function restoreStoreBackup(data: Partial<StoreBackup>, actions: Re
   for (const p of list<Product>(data.products)) await actions.saveProduct(p, { skipMovement: true });
   for (const inv of list<Invoice>(data.invoices)) await actions.saveInvoice(inv, { restoreOnly: true });
   for (const e of list<Employee>(data.employees)) await actions.saveEmployee(e);
-  for (const pr of list<PayrollRecord>(data.payrollRecords)) await actions.savePayrollRecord(pr);
+  for (const pr of list<PayrollRecord>(data.payrollRecords)) {
+    try {
+      await actions.savePayrollRecord(pr);
+    } catch (error: any) {
+      // A salary already paid in the live books is final (its vault expense exists); keep it and go on.
+      if (error?.code !== 'payroll-already-paid' && error?.message !== 'Payroll already paid') throw error;
+    }
+  }
   for (const c of list<Customer>(data.customers)) await actions.saveCustomer(c, { restore: true });
   for (const tx of list<CustomerTransaction>(data.customerTransactions)) await actions.saveCustomerTransaction(tx);
+  for (const s of list<Supplier>(data.suppliers)) {
+    if (s?.id) await actions.saveSupplierRecord(s);
+  }
+  for (const tx of list<SupplierTransaction>(data.supplierTransactions)) {
+    if (tx?.id) await actions.saveSupplierTransaction(tx);
+  }
+  for (const shift of list<Shift>(data.shifts)) {
+    if (!shift?.id) continue;
+    try {
+      await actions.saveShift(shift);
+    } catch (error: any) {
+      // A closed shift already in the live books is final; keep it and go on.
+      if (error?.code !== 'shift-closed') throw error;
+    }
+  }
+  for (const order of list<TradeOrder>(data.orders)) {
+    if (order?.id) await actions.saveOrder(order);
+  }
   for (const tx of list<VaultTransaction>(data.vaultTransactions)) {
     if (tx?.id) await actions.saveVaultRecord(tx);
   }

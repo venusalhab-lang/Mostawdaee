@@ -8,7 +8,7 @@ export const db = { kind: 'supabase-docs' as const };
 const COLLECTIONS = new Set([
   'settings', 'inventory', 'invoices', 'employees', 'payroll', 'customers',
   'customer_transactions', 'stock_movements', 'vault_records', 'warehouses', 'audit_logs',
-  'invoice_numbers',
+  'invoice_numbers', 'suppliers', 'supplier_transactions', 'shifts', 'orders',
 ]);
 
 export interface DocRef {
@@ -100,6 +100,9 @@ function schemaError(error: { message?: string; code?: string; details?: string 
   }
   if (/einvoice locked/i.test(text)) {
     return Object.assign(new Error('This invoice was accepted by the national e-invoicing system'), { code: 'einvoice-locked' });
+  }
+  if (/shift is closed/i.test(text)) {
+    return Object.assign(new Error('This shift is closed'), { code: 'shift-closed' });
   }
   if (/append-only/i.test(text)) {
     return Object.assign(new Error('The activity log cannot be changed'), { code: 'permission-denied' });
@@ -254,7 +257,13 @@ async function applyCommitted(ops: Array<{ op: 'set' | 'delete'; collection: str
 /** PostgREST caps a response (1000 rows by default), so a collection is read page by page. */
 export const COLLECTION_PAGE_SIZE = 1000;
 
+/** A download that started for the previous account must not land in the next one's memory. */
+function assertSameAccount(gen: number) {
+  if (gen !== generation) throw Object.assign(new Error('The account changed during the download'), { code: 'account-changed' });
+}
+
 async function fetchCollection(name: string) {
+  const gen = generation;
   const uid = await requireUid();
   const rows: CollectionRow[] = [];
   for (let from = 0; ; from += COLLECTION_PAGE_SIZE) {
@@ -269,6 +278,7 @@ async function fetchCollection(name: string) {
     const page = (data || []) as CollectionRow[];
     rows.push(...page);
     if (page.length < COLLECTION_PAGE_SIZE) {
+      assertSameAccount(gen);
       collectionCache.set(name, new Map(rows.map((row) => [row.doc_id, row])));
       return rows;
     }
@@ -305,8 +315,10 @@ const ID_CHUNK = 150;
  * plus a row count. Only when the count shows that rows were deleted (or missed) is the list of ids read, never the documents.
  */
 async function syncCollection(name: string): Promise<CollectionRow[]> {
+  const gen = generation;
   const uid = await requireUid();
   if (!collectionCache.has(name)) await restoreSaved(name);
+  assertSameAccount(gen);
   const rows = collectionCache.get(name);
   let newest = -Infinity;
   if (rows) for (const row of rows.values()) newest = Math.max(newest, stampOf(row));
@@ -329,6 +341,7 @@ async function syncCollection(name: string): Promise<CollectionRow[]> {
     base().select('doc_id', { count: 'exact', head: true }).eq('user_id', uid).eq('collection', name),
   ]);
   if (counted.error) throw schemaError(counted.error);
+  assertSameAccount(gen);
 
   // Realtime may have applied a newer copy while this was downloading; never go back to an older one.
   const keep = (row: CollectionRow) => {
@@ -344,6 +357,7 @@ async function syncCollection(name: string): Promise<CollectionRow[]> {
       .eq('collection', name)
       .order('doc_id', { ascending: true })
       .range(from, to));
+    assertSameAccount(gen);
     const live = new Set(ids.map((r) => r.doc_id));
     // Rows that arrived by realtime during this refresh are newer than `newest` and stay.
     for (const [id, row] of rows) if (!live.has(id) && stampOf(row) <= newest) rows.delete(id);
@@ -355,6 +369,7 @@ async function syncCollection(name: string): Promise<CollectionRow[]> {
         .eq('collection', name)
         .in('doc_id', missing.slice(i, i + ID_CHUNK));
       if (error) throw schemaError(error);
+      assertSameAccount(gen);
       ((data || []) as CollectionRow[]).forEach(keep);
     }
   }
@@ -368,7 +383,10 @@ const inflight = new Map<string, Promise<CollectionRow[]>>();
 function sharedFetchCollection(name: string) {
   let pending = inflight.get(name);
   if (!pending) {
-    pending = syncCollection(name).finally(() => inflight.delete(name));
+    const started: Promise<CollectionRow[]> = syncCollection(name).finally(() => {
+      if (inflight.get(name) === started) inflight.delete(name);
+    });
+    pending = started;
     inflight.set(name, pending);
   }
   return pending;

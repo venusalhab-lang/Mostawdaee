@@ -30,7 +30,7 @@ export default function BackupManager({ language }: BackupManagerProps) {
   const isRtl = language === 'ar';
   const {
     user, settings, products, invoices, employees, payrollRecords, customers, customerTransactions,
-    vaultTransactions, warehouses, vault,
+    suppliers, supplierTransactions, shifts, orders, vaultTransactions, warehouses, vault,
     saveSettings, saveWarehouse, saveProduct, saveInvoice, saveEmployee, savePayrollRecord, saveCustomer, saveCustomerTransaction,
   } = useFirebase();
 
@@ -49,8 +49,8 @@ export default function BackupManager({ language }: BackupManagerProps) {
       : 'Save your store books to a file on this device and restore them when needed.',
     exportTitle: isRtl ? 'تصدير البيانات وحفظها' : 'Export your books',
     exportDesc: isRtl 
-      ? 'ملف واحد يحوي الأصناف والمستودعات والفواتير والعملاء وديونهم وحركات الخزنة ورصيدها والموظفين والرواتب والإعدادات.' 
-      : 'One file with products, warehouses, invoices, customers and their debts, vault movements and balance, employees, payroll and settings.',
+      ? 'ملف واحد يحوي الأصناف والمستودعات والفواتير والعملاء وديونهم والموردين وأرصدتهم وحركات الخزنة ورصيدها والورديات وأوامر الشراء وعروض الأسعار والموظفين والرواتب والإعدادات.' 
+      : 'One file with products, warehouses, invoices, customers and their debts, suppliers and their balances, vault movements and balance, shifts, purchase orders and quotations, employees, payroll and settings.',
     btnExport: isRtl ? 'تحميل نسخة احتياطية الآن' : 'Download a backup now',
     preparingBackup: isRtl ? 'جارٍ تجهيز النسخة...' : 'Preparing the backup...',
     importTitle: isRtl ? 'استيراد واستعادة كامل البيانات' : 'Restore from a backup file',
@@ -83,7 +83,7 @@ export default function BackupManager({ language }: BackupManagerProps) {
     const backup = buildStoreBackup({
       creator: user?.email,
       settings, products, invoices, employees, payrollRecords, customers, customerTransactions,
-      vaultTransactions, warehouses, vault,
+      suppliers, supplierTransactions, shifts, orders, vaultTransactions, warehouses, vault,
     });
     downloadFile(JSON.stringify(backup, null, 2), 'application/json', `mostawdaee_backup_${new Date().toISOString().slice(0, 10)}.json`);
     sounds.playSuccess();
@@ -147,9 +147,13 @@ export default function BackupManager({ language }: BackupManagerProps) {
     try {
       await restoreStoreBackup(data, {
         saveSettings, saveWarehouse, saveProduct, saveInvoice, saveEmployee, savePayrollRecord, saveCustomer, saveCustomerTransaction,
+        saveSupplierRecord: (sp) => setDoc(doc(db, 'users', user.uid, 'suppliers', sp.id), sp),
+        saveSupplierTransaction: (tx) => setDoc(doc(db, 'users', user.uid, 'supplier_transactions', tx.id), tx),
+        saveShift: (shift) => setDoc(doc(db, 'users', user.uid, 'shifts', shift.id), shift),
+        saveOrder: (order) => setDoc(doc(db, 'users', user.uid, 'orders', order.id), order),
         saveVaultRecord: (tx) => setDoc(doc(db, 'users', user.uid, 'vault_records', tx.id), tx),
         restoreVault: (v) => restoreVaultBalance(db, user.uid, v),
-      }, { invoices, vaultTransactions, customerTransactions });
+      }, { invoices, vaultTransactions, customerTransactions, supplierTransactions });
       sounds.playSuccess();
       setStatus({ type: 'success', message: isRtl ? 'تمت استعادة السجلات من الملف.' : 'Records were restored from the file.' });
       setBackupStats(backupCounts(data));

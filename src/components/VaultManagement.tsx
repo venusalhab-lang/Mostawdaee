@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useEffect, useRef, useState, useMemo } from 'react';
 import { 
   Shield, 
   ArrowUpCircle, 
@@ -30,15 +30,16 @@ import { useProgressiveList } from '../hooks/useProgressiveList';
 import { formatMoney } from '../lib/exchangeRates';
 import { VAULT_CURRENCIES, readVaultBalances, roundForCurrency } from '../lib/vaultMath';
 import { localDayEnd, localDayStart } from '../lib/localDate';
+import { downloadCsv, toCsv } from '../lib/csv';
 
 interface Props {
   language: Language;
   settings: AppSettings;
 }
 
-type VaultKind = 'sale' | 'customer_payment' | 'purchase' | 'payroll' | 'expense' | 'manual' | 'reversal';
+type VaultKind = 'sale' | 'sale_return' | 'customer_payment' | 'purchase' | 'purchase_return' | 'supplier_payment' | 'payroll' | 'expense' | 'manual' | 'reversal';
 
-const VAULT_KINDS: VaultKind[] = ['sale', 'customer_payment', 'purchase', 'payroll', 'expense', 'manual', 'reversal'];
+const VAULT_KINDS: VaultKind[] = ['sale', 'sale_return', 'customer_payment', 'purchase', 'purchase_return', 'supplier_payment', 'payroll', 'expense', 'manual', 'reversal'];
 
 const CURRENCY_NAMES: Record<Currency, { ar: string; en: string }> = {
   JOD: { ar: 'دينار أردني', en: 'Jordanian Dinar' },
@@ -55,7 +56,10 @@ const CURRENCY_NAMES: Record<Currency, { ar: string; en: string }> = {
 function vaultKindOf(tx: VaultTransaction): VaultKind {
   const source: VaultSource | undefined = tx.source;
   if (source === 'sale_invoice') return 'sale';
+  if (source === 'sale_return') return 'sale_return';
   if (source === 'purchase_invoice') return 'purchase';
+  if (source === 'purchase_return') return 'purchase_return';
+  if (source === 'supplier_payment') return 'supplier_payment';
   if (source === 'customer_payment') return 'customer_payment';
   if (source === 'payroll') return 'payroll';
   if (source === 'expense') return 'expense';
@@ -80,6 +84,14 @@ export default function VaultManagement({ language, settings }: Props) {
   const [category, setCategory] = useState('general');
   const [amount, setAmount] = useState('');
   const [description, setDescription] = useState('');
+  const entryDraftRef = useRef<string | null>(null);
+  const openModal = (type: 'income' | 'expense' | 'recalibrate') => {
+    setModalType(type);
+    setCategory('general');
+    setAmount('');
+    setDescription('');
+    setIsModalOpen(true);
+  };
   
   // State variables for Filters
   const [searchQuery, setSearchQuery] = useState('');
@@ -92,6 +104,7 @@ export default function VaultManagement({ language, settings }: Props) {
   
   // Dynamic display currency toggle
   const [activeCurrency, setActiveCurrency] = useState<Currency>(VAULT_CURRENCIES.includes(settings.currency as Currency) ? (settings.currency as Currency) : 'JOD');
+  useEffect(() => { entryDraftRef.current = null; }, [isModalOpen, modalType, category, amount, description, activeCurrency]);
 
   const expenseCategories = [
     { id: 'general', label: isRtl ? 'مصروف عام' : 'General Expense' },
@@ -111,8 +124,11 @@ export default function VaultManagement({ language, settings }: Props) {
 
   const kindLabels: Record<VaultKind, string> = {
     sale: isRtl ? 'عائد مبيعات' : 'Sales',
+    sale_return: isRtl ? 'مرتجع مبيعات' : 'Sales Return',
+    purchase_return: isRtl ? 'مرتجع مشتريات' : 'Purchase Return',
     customer_payment: isRtl ? 'تحصيل من عميل' : 'Customer Payment',
     purchase: isRtl ? 'مشتريات' : 'Purchase',
+    supplier_payment: isRtl ? 'دفعة لمورد' : 'Supplier Payment',
     payroll: isRtl ? 'رواتب' : 'Payroll',
     expense: isRtl ? 'مصاريف تشغيل' : 'Expenses',
     manual: isRtl ? 'حركة يدوية / تسوية' : 'Manual / Adjustment',
@@ -241,9 +257,10 @@ export default function VaultManagement({ language, settings }: Props) {
         const finalDescription = !note ? categoryLabel : (selectedCat && category !== 'general' ? `[${categoryLabel}] ${note}` : note);
 
         await recordVaultTransaction({
+          id: (entryDraftRef.current ||= crypto.randomUUID()),
           type: modalType,
           category: mappedCategory,
-          source: category === 'salary' ? 'payroll' : (modalType === 'expense' && category !== 'general' ? 'expense' : 'manual'),
+          source: modalType === 'expense' && category === 'salary' ? 'payroll' : (modalType === 'expense' && category !== 'general' ? 'expense' : 'manual'),
           amount: numAmount,
           currency: activeCurrency,
           description: finalDescription
@@ -254,6 +271,7 @@ export default function VaultManagement({ language, settings }: Props) {
       sounds.playSuccess();
       toast.success(isRtl ? 'تم تحديث الرصيد وتسجيل العملية بنجاح!' : 'Vault protocol executed successfully!');
       
+      entryDraftRef.current = null;
       setIsModalOpen(false);
       setAmount('');
       setDescription('');
@@ -288,16 +306,7 @@ export default function VaultManagement({ language, settings }: Props) {
         tx.balanceAfter
       ]);
       
-      const csvContent = "data:text/csv;charset=utf-8,\uFEFF" 
-        + [headers.join(','), ...rows.map(e => e.map(val => `"${String(val).replace(/"/g, '""')}"`).join(','))].join('\n');
-        
-      const encodedUri = encodeURI(csvContent);
-      const link = document.createElement("a");
-      link.setAttribute("href", encodedUri);
-      link.setAttribute("download", `mustawdae_vault_ledger_${new Date().toISOString().split('T')[0]}.csv`);
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
+      downloadCsv(toCsv([headers, ...rows]), `mustawdae_vault_ledger_${new Date().toISOString().split('T')[0]}.csv`);
       
       sounds.playPop();
       toast.success(isRtl ? 'صُدّرت الحركات المعروضة إلى ملف CSV.' : 'Filtered ledger exported to CSV.');
@@ -368,7 +377,7 @@ export default function VaultManagement({ language, settings }: Props) {
         <div className="flex flex-wrap items-center gap-3">
           <button 
             type="button"
-            onClick={() => { setModalType('expense'); setIsModalOpen(true); }}
+            onClick={() => openModal('expense')}
             className="flex items-center gap-2 px-5 py-3 rounded-xl bg-gradient-to-r from-red-600 to-rose-500 hover:from-red-500 hover:to-rose-400 text-white font-bold text-sm shadow-md shadow-rose-950/20 transition-all active:scale-[0.98] border border-red-400/20"
           >
             <Minus size={16} />
@@ -377,7 +386,7 @@ export default function VaultManagement({ language, settings }: Props) {
           
           <button 
             type="button"
-            onClick={() => { setModalType('income'); setIsModalOpen(true); }}
+            onClick={() => openModal('income')}
             className="flex items-center gap-2 px-5 py-3 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-500 hover:from-emerald-500 hover:to-teal-400 text-white font-bold text-sm shadow-md shadow-emerald-950/20 transition-all active:scale-[0.98] border border-emerald-400/20"
           >
             <Plus size={16} />
@@ -386,7 +395,7 @@ export default function VaultManagement({ language, settings }: Props) {
 
           <button 
             type="button"
-            onClick={() => { setModalType('recalibrate'); setIsModalOpen(true); }}
+            onClick={() => openModal('recalibrate')}
             className="flex items-center gap-2 px-5 py-3 rounded-xl bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 text-white font-bold text-sm shadow-md shadow-cyan-950/20 transition-all active:scale-[0.98] border border-cyan-400/20"
           >
             <RefreshCw size={16} />

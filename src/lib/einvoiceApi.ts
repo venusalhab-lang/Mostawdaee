@@ -124,6 +124,7 @@ export function eInvoiceErrorText(error: unknown, isRtl: boolean): string {
     invoice_not_found: ['الفاتورة لم تُحفظ على السحابة بعد؛ انتظر المزامنة ثم أعد المحاولة.', 'The invoice is not in the cloud yet; wait for sync and retry.'],
     already_accepted: ['هذه الفاتورة مقبولة مسبقاً لدى الفوترة الوطنية.', 'This invoice was already accepted.'],
     in_progress: ['الفاتورة قيد الإرسال الآن من جهاز آخر.', 'This invoice is being sent right now.'],
+    original_not_accepted: ['أرسل الفاتورة الأصلية إلى الفوترة الوطنية أولاً؛ إشعار الدائن يُرسل بعد قبولها.', 'Send the original invoice to JoFotara first; the credit note can be sent once it is accepted.'],
     rate_limited: ['طلبات كثيرة؛ انتظر دقيقة.', 'Too many requests; wait a minute.'],
     invalid_settings: ['بعض الحقول غير صحيحة.', 'Some fields are invalid.'],
     build_failed: ['تعذّر تجهيز ملف الفاتورة.', 'The e-invoice file could not be built.'],

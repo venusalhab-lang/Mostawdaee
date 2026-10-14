@@ -28,8 +28,10 @@ import {
   Camera,
   Download,
   FileText,
-  Upload
+  Upload,
+  Barcode
 } from 'lucide-react';
+import LabelPrintModal from './LabelPrintModal';
 import { Language, Product, StockStatus, ProductLog, AppSettings, Warehouse, Invoice } from '../types';
 import { translations } from '../translations';
 import { motion, AnimatePresence } from 'motion/react';
@@ -52,6 +54,7 @@ import { formatPackStock, isValidPackSize, packFields, packIssues, suggestedPack
 import { sameSku, skuOwner } from '../lib/productLookup';
 import { CURRENCY_SYMBOLS, buildUsdUnitRates, convertMoney, formatMoney, readCachedLiveRates, roundMoney, POS_CURRENCY_CODES } from '../lib/exchangeRates';
 import CurrencyPicker from './CurrencyPicker';
+import { stockValueByCurrency } from '../lib/profits';
 
 const PRODUCT_FORMS = { one: 'منتج واحد', two: 'منتجين', few: '{n} منتجات', many: '{n} منتجاً', other: '{n} منتج' };
 
@@ -373,6 +376,7 @@ export default function InventoryManagement({
   const [activeAuditTab, setActiveAuditTab] = useState<'costs' | 'movements'>('costs');
   const [showSuccessVisual, setShowSuccessVisual] = useState(false);
   const [contextMenuTarget, setContextMenuTarget] = useState<Product | null>(null);
+  const [labelProducts, setLabelProducts] = useState<Product[] | null>(null);
   const [logTarget, setLogTarget] = useState<Product | null>(null);
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
 
@@ -577,11 +581,13 @@ export default function InventoryManagement({
   // Metrics
   const metrics = useMemo(() => {
     const totalItems = products.length;
-    const totalValue = products.reduce((acc, p) => acc + toBaseCurrency((Number(p.quantity) || 0) * (Number(p.unitCost) || 0), p.currency), 0);
+    // Items below zero (sold offline) hold no goods, so they add nothing instead of lowering the value.
+    const totalValue = Object.entries(stockValueByCurrency(products, settings?.currency || 'JOD'))
+      .reduce((acc, [code, value]) => acc + toBaseCurrency(value, code), 0);
     const outOfStock = products.filter(p => (Number(p.quantity) || 0) <= 0).length;
     const lowStock = products.filter(p => computeStockStatus(p.quantity, p.lowStockThreshold, lowStockDefault) === 'Low Stock').length;
     return { totalItems, totalValue, outOfStock, lowStock };
-  }, [products, usdRates, baseCurrency, lowStockDefault]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [products, usdRates, baseCurrency, lowStockDefault, settings?.currency]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Dynamic Export Handlers for external accounting
   const statusText = (p: Product) => {
@@ -1055,17 +1061,17 @@ export default function InventoryManagement({
     (transactions || []).forEach((inv) => {
       (inv.items || []).forEach((item, idx) => {
         if (item.productId !== logTarget.id) return;
-        const isSale = inv.type === 'sale';
+        const isSale = inv.type === 'sale' || inv.type === 'purchase_return';
         logs.push({
           id: `${inv.id}-${idx}`,
           productId: item.productId,
-          action: isSale ? 'sale' : 'purchase',
+          action: inv.type,
           changeType: isSale ? 'decrement' : 'increment',
           quantityDelta: isSale ? -lineUnits(item) : lineUnits(item),
           previousValue: 0,
           newValue: 0,
           timestamp: inv.date,
-          userName: (isSale ? inv.customerName : inv.supplierName) || inv.invoiceNumber || '-'
+          userName: (inv.type === 'purchase' || inv.type === 'purchase_return' ? inv.supplierName : inv.customerName) || inv.invoiceNumber || '-'
         } as ProductLog);
       });
     });
@@ -1107,11 +1113,22 @@ export default function InventoryManagement({
         ]}
         actions={[
           { id: 'history', label: t.historyLog, icon: <History size={18}/>, onClick: () => { setLogTarget(contextMenuTarget); setActiveAuditTab('costs'); setIsLogOpen(true); setContextMenuTarget(null); } },
+          { id: 'labels', label: isRtl ? 'طباعة ملصق باركود' : 'Print barcode label', icon: <Barcode size={18}/>, onClick: () => { setLabelProducts([contextMenuTarget!]); setContextMenuTarget(null); } },
           { id: 'edit', label: t.editProduct, icon: <Edit2 size={18}/>, onClick: () => { handleEdit(contextMenuTarget!); setContextMenuTarget(null); } },
           { id: 'delete', label: t.delete, color: 'rose', icon: <Trash2 size={18}/>, onClick: () => { const id = contextMenuTarget!.id; setContextMenuTarget(null); handleDelete(id); } }
         ]}
       />
       
+      {labelProducts && (
+        <LabelPrintModal
+          products={labelProducts}
+          isRtl={isRtl}
+          defaultCurrency={baseCurrency}
+          businessName={settings?.businessName}
+          onClose={() => setLabelProducts(null)}
+        />
+      )}
+
       {/* Page Header (ترويسة الصفحة وزر الإضافة الرئيسي) */}
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border-b border-slate-200/40 dark:border-white/5 pb-5">
         <div className="space-y-1">
@@ -1277,6 +1294,15 @@ export default function InventoryManagement({
             >
               <FileText size={14} />
               <span>{isRtl ? 'تقرير PDF' : 'PDF Report'}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => { sounds.playClick(); setLabelProducts(filteredProducts); }}
+              title={isRtl ? 'طباعة ملصقات باركود للأصناف المعروضة' : 'Print barcode labels for the listed products'} aria-label={isRtl ? 'طباعة ملصقات باركود للأصناف المعروضة' : 'Print barcode labels for the listed products'}
+              className="flex-1 md:flex-initial flex items-center justify-center gap-1.5 px-3.5 py-2.5 bg-slate-600/10 dark:bg-white/5 text-slate-700 dark:text-slate-200 border border-slate-500/20 hover:border-slate-500/50 rounded-xl text-xs font-black tracking-tight transition-all cursor-pointer"
+            >
+              <Barcode size={14} />
+              <span>{isRtl ? 'ملصقات' : 'Labels'}</span>
             </button>
           </div>
         </div>
@@ -2348,12 +2374,13 @@ export default function InventoryManagement({
                             </span>
                             {showIsEstimatedWarning && (
                               <span className="text-[9px] bg-amber-500/10 text-amber-500 px-2.5 py-0.5 rounded-full font-bold">
-                                {isRtl ? 'تقديري (بناءً على نسبة الضريبة الافتراضية)' : 'Estimated (Default VAT)'}
+                                {isRtl ? 'لم تُسجَّل تفاصيل التكلفة لهذا الصنف' : 'No cost breakdown recorded'}
                               </span>
                             )}
                           </div>
 
                           <div className="space-y-2.5 divide-y divide-slate-100 dark:divide-white/5 text-xs">
+                            {!showIsEstimatedWarning && (<>
                             <div className="flex justify-between items-center py-2">
                               <span className="text-slate-400 font-bold">{isRtl ? 'السعر الأصلي المستورد/الأساسي:' : 'Factory / Original Base Price:'}</span>
                               <span className="font-mono font-extrabold text-slate-800 dark:text-slate-200">
@@ -2376,6 +2403,7 @@ export default function InventoryManagement({
                                 + {moneyHere(parsedOverhead)}
                               </span>
                             </div>
+                            </>)}
 
                             <div className="flex justify-between items-center py-3 bg-indigo-500/[0.02] dark:bg-indigo-500/[0.01] px-2 rounded-xl border border-indigo-500/10">
                               <span className="text-indigo-600 dark:text-cyan-400 font-black">{isRtl ? 'تكلفة التخزين / سعر الشراء النهائي:' : 'Registered Landed Unit Cost:'}</span>
@@ -2468,6 +2496,8 @@ export default function InventoryManagement({
                               <p className="font-black text-xs uppercase dark:text-white">
                                 {log.action === 'sale' ? t.sale
                                   : log.action === 'purchase' ? t.purchase
+                                  : log.action === 'return' ? (isRtl ? 'مرتجع مبيعات' : 'Sales return')
+                                  : log.action === 'purchase_return' ? (isRtl ? 'مرتجع مشتريات' : 'Purchase return')
                                   : log.action === 'create' ? (isRtl ? 'رصيد افتتاحي' : 'Opening stock')
                                   : (isRtl ? 'تعديل يدوي للكمية' : 'Manual adjustment')}
                               </p>

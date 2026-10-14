@@ -103,6 +103,7 @@ export default function PremiumUpgradeModal({
     try {
       initializeBilling(
         async (tx) => {
+          setProcessing(true);
           try {
             await activatePaidSubscription(tx);
             sounds?.playSuccess();
@@ -121,10 +122,11 @@ export default function PremiumUpgradeModal({
           setProcessing(false);
         }
       );
-      const started = await makePurchase('mostawdaee_premium_100');
-      if (!started) setProcessing(false);
+      await makePurchase('mostawdaee_premium_100');
     } catch (err: any) {
       toast.error(err?.message || (isRtl ? 'تعذر بدء عملية الشراء' : 'Could not start the purchase'));
+    } finally {
+      // The approved purchase arrives later through the billing callback; a cancelled or pending one never does.
       setProcessing(false);
     }
   };

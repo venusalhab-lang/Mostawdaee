@@ -65,7 +65,7 @@ export interface DeskCustomer {
 
 export interface DeskActivity {
   id: string;
-  kind: 'sale' | 'purchase' | 'stocktake' | 'vault';
+  kind: 'sale' | 'purchase' | 'return' | 'stocktake' | 'vault';
   title: string;
   detail: string;
   amount: number | null;
@@ -289,22 +289,23 @@ export function mergeCurrencyTotals(
     .sort((a, b) => Math.abs(b.current) - Math.abs(a.current) || a.currency.localeCompare(b.currency));
 }
 
+/** Net sales: a return counts against the day it was recorded. */
 export function salesRows(invoices: DeskInvoice[], fallbackCurrency: string) {
   return invoices
-    .filter((invoice) => invoice.type === 'sale')
+    .filter((invoice) => invoice.type === 'sale' || invoice.type === 'return')
     .map((invoice) => ({
       currency: invoice.currency || fallbackCurrency,
-      amount: Number(invoice.totalAmount) || 0,
+      amount: (invoice.type === 'return' ? -1 : 1) * (Number(invoice.totalAmount) || 0),
       ts: Number(invoice.date),
     }));
 }
 
 export function creditRows(invoices: DeskInvoice[], fallbackCurrency: string) {
   return invoices
-    .filter((invoice) => invoice.type === 'sale' && invoice.paymentMethod === 'credit')
+    .filter((invoice) => (invoice.type === 'sale' || invoice.type === 'return') && invoice.paymentMethod === 'credit')
     .map((invoice) => ({
       currency: invoice.currency || fallbackCurrency,
-      amount: Number(invoice.totalAmount) || 0,
+      amount: (invoice.type === 'return' ? -1 : 1) * (Number(invoice.totalAmount) || 0),
       ts: Number(invoice.date),
     }));
 }
@@ -399,12 +400,12 @@ export function recentActivity(
 ): DeskActivity[] {
   const fromInvoices: DeskActivity[] = invoices.map((invoice) => ({
     id: `invoice:${invoice.id}`,
-    kind: invoice.type === 'purchase' ? 'purchase' : 'sale',
-    title: invoice.type === 'purchase'
+    kind: invoice.type === 'purchase' || invoice.type === 'purchase_return' ? 'purchase' : invoice.type === 'return' ? 'return' : 'sale',
+    title: invoice.type === 'purchase' || invoice.type === 'purchase_return'
       ? (invoice.supplierName || invoice.invoiceNumber || invoice.id)
       : (invoice.customerName || invoice.invoiceNumber || invoice.id),
     detail: invoice.invoiceNumber || '',
-    amount: Number(invoice.totalAmount) || 0,
+    amount: (invoice.type === 'return' || invoice.type === 'purchase_return' ? -1 : 1) * (Number(invoice.totalAmount) || 0),
     currency: invoice.currency || fallbackCurrency,
     timestamp: Number(invoice.date) || 0,
     screen: 'invoices',

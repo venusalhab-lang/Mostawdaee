@@ -1,5 +1,6 @@
 import type { Currency, Invoice, VaultTransaction } from '../types';
 import { roundMoney } from './exchangeRates';
+import { purchasePayment } from './suppliers';
 
 /**
  * Single source of truth for vault (الخزنة) arithmetic.
@@ -88,6 +89,36 @@ export type VaultEntryPlan = Omit<VaultTransaction, 'id' | 'timestamp' | 'balanc
  * `includeNonCash` reproduces invoices saved before card/wallet were excluded, so deleting them reverses what they posted.
  */
 export function planInvoiceVaultEntry(invoice: Invoice, opts: { includeNonCash?: boolean } = {}): VaultEntryPlan | null {
+  if (invoice.type === 'return') {
+    // Only the cash actually paid back; debt reductions and card refunds never touch the vault.
+    const amount = Number(invoice.refund?.vault) || 0;
+    if (amount <= 0) return null;
+    const currency = (invoice.refund?.vaultCurrency || invoice.currency || 'JOD') as Currency;
+    return {
+      type: 'expense',
+      category: 'sale',
+      amount: roundForCurrency(amount, currency),
+      currency,
+      description: `Sales return #${invoice.invoiceNumber || invoice.id}${invoice.returnOfNumber ? ` (invoice #${invoice.returnOfNumber})` : ''}`,
+      source: 'sale_return',
+      refId: invoice.id,
+    };
+  }
+  if (invoice.type === 'purchase_return') {
+    // Only the cash the supplier paid back; what came off the supplier balance never touches the vault.
+    const amount = Number(invoice.refund?.vault) || 0;
+    if (amount <= 0) return null;
+    const currency = (invoice.refund?.vaultCurrency || invoice.currency || 'JOD') as Currency;
+    return {
+      type: 'income',
+      category: 'purchase',
+      amount: roundForCurrency(amount, currency),
+      currency,
+      description: `Purchase return #${invoice.invoiceNumber || invoice.id}${invoice.returnOfNumber ? ` (purchase #${invoice.returnOfNumber})` : ''}`,
+      source: 'purchase_return',
+      refId: invoice.id,
+    };
+  }
   if (invoice.type === 'sale' && invoice.paymentMethod === 'credit') return null;
   const nonCash = invoice.paymentMethod === 'card' || invoice.paymentMethod === 'wallet';
   if (nonCash && !opts.includeNonCash) return null;
@@ -96,11 +127,14 @@ export function planInvoiceVaultEntry(invoice: Invoice, opts: { includeNonCash?:
   const ref = invoice.invoiceNumber || invoice.id;
   const isSale = invoice.type === 'sale';
   const method = invoice.paymentMethod && invoice.paymentMethod !== 'cash' ? ` [${invoice.paymentMethod}]` : '';
+  // A credit purchase takes from the vault only what was paid when the goods came in.
+  const amount = isSale ? Number(invoice.totalAmount) || 0 : purchasePayment(invoice).paid;
+  if (!isSale && invoice.paymentMethod === 'credit' && amount <= 0) return null;
 
   return {
     type: isSale ? 'income' : 'expense',
     category: isSale ? 'sale' : 'purchase',
-    amount: roundForCurrency(invoice.totalAmount, currency),
+    amount: roundForCurrency(amount, currency),
     currency,
     description: (isSale ? `Revenue from Invoice #${ref}` : `Purchase Invoice #${ref}`) + method,
     source: isSale ? 'sale_invoice' : 'purchase_invoice',

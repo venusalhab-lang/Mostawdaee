@@ -333,7 +333,7 @@ CREATE TABLE IF NOT EXISTS public.merchant_documents (
     CONSTRAINT merchant_documents_collection_check CHECK (collection IN (
         'settings', 'inventory', 'invoices', 'employees', 'payroll', 'customers',
         'customer_transactions', 'stock_movements', 'vault_records', 'warehouses', 'audit_logs',
-        'invoice_numbers'
+        'invoice_numbers', 'suppliers', 'supplier_transactions', 'shifts', 'orders'
     ))
 );
 
@@ -342,7 +342,7 @@ ALTER TABLE public.merchant_documents DROP CONSTRAINT IF EXISTS merchant_documen
 ALTER TABLE public.merchant_documents ADD CONSTRAINT merchant_documents_collection_check CHECK (collection IN (
     'settings', 'inventory', 'invoices', 'employees', 'payroll', 'customers',
     'customer_transactions', 'stock_movements', 'vault_records', 'warehouses', 'audit_logs',
-    'invoice_numbers'
+    'invoice_numbers', 'suppliers', 'supplier_transactions', 'shifts', 'orders'
 ));
 
 ALTER TABLE public.merchant_documents ENABLE ROW LEVEL SECURITY;
@@ -425,6 +425,25 @@ BEGIN
         IF (p_col = 'invoices' AND p_new->>'type' IS DISTINCT FROM 'sale')
            OR (p_col = 'vault_records' AND p_new->>'type' IS DISTINCT FROM 'income')
            OR (p_col = 'customer_transactions' AND p_new->>'type' IS DISTINCT FROM 'invoice') THEN
+            RAISE EXCEPTION 'role not allowed';
+        END IF;
+        RETURN;
+    END IF;
+
+    -- A cashier opens a shift and later closes it; the opening float and time cannot change afterwards.
+    IF p_col = 'shifts' THEN
+        IF p_old IS NULL THEN
+            IF p_new->>'status' IS DISTINCT FROM 'open' THEN
+                RAISE EXCEPTION 'role not allowed';
+            END IF;
+            RETURN;
+        END IF;
+        IF p_new->>'status' IS DISTINCT FROM 'closed'
+           OR (p_new - 'status' - 'closedAt' - 'counted' - 'summary' - 'closingNotes'
+                     - 'actorId' - 'actorEmail' - 'closedById' - 'closedByEmail')
+              IS DISTINCT FROM
+              (p_old - 'status' - 'closedAt' - 'counted' - 'summary' - 'closingNotes'
+                     - 'actorId' - 'actorEmail' - 'closedById' - 'closedByEmail') THEN
             RAISE EXCEPTION 'role not allowed';
         END IF;
         RETURN;
@@ -558,6 +577,14 @@ BEGIN
         IF col IN ('audit_logs', 'stock_movements', 'invoice_numbers') AND (op = 'delete' OR existing IS NOT NULL) THEN
             RAISE EXCEPTION 'history is append-only';
         END IF;
+        -- A closed shift is a signed-off cash count: nobody edits or deletes it.
+        IF col = 'shifts' AND existing IS NOT NULL AND existing->>'status' = 'closed' THEN
+            RAISE EXCEPTION 'shift is closed';
+        END IF;
+        IF col = 'shifts' AND member_role = 'cashier' AND existing IS NOT NULL
+           AND existing->>'actorId' IS DISTINCT FROM actor::text THEN
+            RAISE EXCEPTION 'role not allowed';
+        END IF;
 
         IF op = 'delete' THEN
             PERFORM public.assert_role_can_write(member_role, op, col, did, existing, NULL);
@@ -630,15 +657,21 @@ BEGIN
                 END IF;
             END IF;
             -- Who created a record is set here, never trusted from the device, and an edit keeps it.
-            IF col IN ('invoices', 'vault_records', 'customer_transactions', 'stock_movements', 'audit_logs') THEN
+            IF col IN ('invoices', 'vault_records', 'customer_transactions', 'supplier_transactions', 'stock_movements', 'audit_logs', 'shifts', 'orders') THEN
+                IF actor_email IS NULL THEN
+                    SELECT lower(u.email) INTO actor_email FROM auth.users u WHERE u.id = actor;
+                END IF;
                 IF existing IS NULL THEN
-                    IF actor_email IS NULL THEN
-                        SELECT lower(u.email) INTO actor_email FROM auth.users u WHERE u.id = actor;
-                    END IF;
                     payload := payload || jsonb_build_object('actorId', actor::text, 'actorEmail', COALESCE(actor_email, ''));
                 ELSE
                     payload := (payload - 'actorId' - 'actorEmail')
                         || jsonb_strip_nulls(jsonb_build_object('actorId', existing->'actorId', 'actorEmail', existing->'actorEmail'));
+                END IF;
+            END IF;
+            IF col = 'shifts' THEN
+                payload := payload - 'closedById' - 'closedByEmail';
+                IF payload->>'status' = 'closed' THEN
+                    payload := payload || jsonb_build_object('closedById', actor::text, 'closedByEmail', COALESCE(actor_email, ''));
                 END IF;
             END IF;
             INSERT INTO public.merchant_documents (user_id, collection, doc_id, data, updated_at)

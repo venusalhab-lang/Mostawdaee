@@ -41,16 +41,18 @@ export function summarizeSales(invoices: Invoice[], now = Date.now()): Assistant
   const month = startOfMonth(now);
   const rows = new Map<Currency, AssistantSalesRow>();
   for (const inv of invoices || []) {
-    if (inv?.type !== 'sale' || !isCurrency(inv.currency)) continue;
+    if ((inv?.type !== 'sale' && inv?.type !== 'return') || !isCurrency(inv.currency)) continue;
     const date = Number(inv.date) || 0;
     if (date < month || date > now) continue;
-    const total = Number(inv.totalAmount) || 0;
+    // Totals are net of returns; counts are sales only.
+    const isSale = inv.type === 'sale';
+    const total = (isSale ? 1 : -1) * (Number(inv.totalAmount) || 0);
     const row = rows.get(inv.currency) || { currency: inv.currency, todayTotal: 0, todayCount: 0, monthTotal: 0, monthCount: 0 };
     row.monthTotal += total;
-    row.monthCount += 1;
+    if (isSale) row.monthCount += 1;
     if (date >= day) {
       row.todayTotal += total;
-      row.todayCount += 1;
+      if (isSale) row.todayCount += 1;
     }
     rows.set(inv.currency, row);
   }

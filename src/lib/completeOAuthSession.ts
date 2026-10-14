@@ -76,12 +76,13 @@ export async function completeOAuthSessionFromLocation(): Promise<boolean> {
   }
 
   const { code } = readOAuthCallbackParams();
-  if (code) {
+  try {
+    if (!code) return false;
     const { error } = await supabase.auth.exchangeCodeForSession(code);
     if (error) throw error;
-    cleanOAuthParamsFromUrl();
     return true;
+  } finally {
+    // A code works once; leaving a used or rejected one in the address bar fails again on every reload.
+    cleanOAuthParamsFromUrl();
   }
-
-  return false;
 }

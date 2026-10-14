@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { 
   Users, 
   UserPlus, 
@@ -50,8 +50,12 @@ export default function CustomerManagement({ language, settings }: Props) {
     deleteCustomer, 
     deleteCustomerLedgerTransaction,
     recordCustomerLedgerTransaction,
-    vaultTransactions
+    vaultTransactions,
+    invoices
   } = useFirebase();
+  const returnIds = React.useMemo(() => new Set(invoices.filter((i) => i.type === 'return').map((i) => i.id)), [invoices]);
+  /** A sales return lowers the debt like a payment, but no money was received. */
+  const isReturnCredit = (tx: CustomerTransaction) => tx.type === 'payment' && !!tx.invoiceId && returnIds.has(tx.invoiceId);
 
   // Dialog & Form State
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -88,6 +92,8 @@ export default function CustomerManagement({ language, settings }: Props) {
   const [debtAmount, setDebtAmount] = useState<number>(0);
   const [debtNote, setDebtNote] = useState<string>('');
   const [syncToVault, setSyncToVault] = useState<boolean>(true);
+  const payDraftRef = useRef<string | null>(null);
+  useEffect(() => { payDraftRef.current = null; }, [isPayModalOpen, selectedCustomer?.id, debtAction, debtAmount, syncToVault]);
   const [isActionLoading, setIsActionLoading] = useState(false);
 
   // WhatsApp Message Composer
@@ -166,7 +172,7 @@ export default function CustomerManagement({ language, settings }: Props) {
           message += `لا توجد عمليات مسجلة حالياً.\n`;
         } else {
           recentTx.forEach(tx => {
-            const typeEmoji = tx.type === 'invoice' ? "➕ فاتورة" : "➖ دفعة مستلمة";
+            const typeEmoji = tx.type === 'invoice' ? "➕ فاتورة" : isReturnCredit(tx) ? "➖ مرتجع مبيعات" : "➖ دفعة مستلمة";
             const dateStr = tx.date ? tx.date.substring(0, 10) : '';
             message += `${typeEmoji} بتاريخ ${dateStr} بقيمة *${formatMoney(tx.amount, tx.currency, 'en-US')}*\n`;
             if (tx.notes) {
@@ -190,7 +196,7 @@ export default function CustomerManagement({ language, settings }: Props) {
           message += `No transaction ledger entries recorded.\n`;
         } else {
           recentTx.forEach(tx => {
-            const typeEmoji = tx.type === 'invoice' ? "➕ Credit Invoice" : "➖ Payment Received";
+            const typeEmoji = tx.type === 'invoice' ? "➕ Credit Invoice" : isReturnCredit(tx) ? "➖ Sales Return" : "➖ Payment Received";
             const dateStr = tx.date ? tx.date.substring(0, 10) : '';
             message += `${typeEmoji} on ${dateStr} for *${formatMoney(tx.amount, tx.currency, 'en-US')}*\n`;
             if (tx.notes) {
@@ -351,16 +357,18 @@ export default function CustomerManagement({ language, settings }: Props) {
         change,
         type,
         notesText,
-        syncToVault
+        syncToVault,
+        (payDraftRef.current ||= crypto.randomUUID()),
       );
 
       // 4. Update state / close modal after successful execution
+      payDraftRef.current = null;
       setIsPayModalOpen(false);
       toast.success(isRtl ? 'تم سداد الدفعة بنجاح!' : 'Payment processed successfully!');
     } catch (err: any) {
       // 5. Secure handler for any occurred exception to prevent app crashes
       console.error("خطأ أثناء عملية السداد / المعاملة:", err?.message || err);
-      toast.error(isRtl 
+      if (!err?.notified) toast.error(isRtl 
         ? `عذراً، تعذر إتمام العملية: ${err?.message || 'خطأ غير معروف'}` 
         : `An error occurred while processing transaction: ${err?.message || 'Unknown error'}`
       );
@@ -373,6 +381,12 @@ export default function CustomerManagement({ language, settings }: Props) {
   const handleDeleteLedgerTransaction = async (tx: CustomerTransaction) => {
     const cust = customers.find(c => c.id === tx.customerId);
     if (!cust) return;
+    if (isReturnCredit(tx)) {
+      toast.error(isRtl
+        ? 'هذا القيد ناتج عن مرتجع مبيعات. احذف فاتورة المرتجع نفسها من شاشة الفواتير ليُعكس الدين والمخزون معاً.'
+        : 'This entry comes from a sales return. Delete the return invoice itself so the debt and stock are reversed together.');
+      return;
+    }
     if (tx.invoiceId || tx.id.startsWith('inv-')) {
       toast.error(isRtl
         ? 'هذا القيد ناتج عن فاتورة بيع آجل. احذف الفاتورة نفسها من شاشة الفواتير ليُعكس الدين والمخزون معاً.'
@@ -1217,7 +1231,7 @@ export default function CustomerManagement({ language, settings }: Props) {
                       <p className="text-lg font-black text-emerald-400 tracking-tight font-mono">
                         {formatAmount(
                           customerTransactions
-                            .filter(tx => tx.customerId === selectedLedgerCustomer.id && tx.type === 'payment')
+                            .filter(tx => tx.customerId === selectedLedgerCustomer.id && tx.type === 'payment' && !isReturnCredit(tx))
                             .reduce((acc, current) => acc + current.amount, 0),
                           selectedLedgerCustomer.currency,
                           'en-US'
@@ -1311,7 +1325,7 @@ export default function CustomerManagement({ language, settings }: Props) {
                                   <div className="flex items-center gap-2">
                                     <p className="text-xs font-black text-white">
                                       {isPayment 
-                                        ? (isRtl ? 'دفعة نقدية مسددة' : 'Payment Received') 
+                                        ? (isReturnCredit(tx) ? (isRtl ? 'مرتجع مبيعات' : 'Sales return') : (isRtl ? 'دفعة نقدية مسددة' : 'Payment Received'))
                                         : (isRtl ? 'فاتورة بيع بالآجل' : 'Credit Sale Invoice')}
                                     </p>
                                     <span className="font-mono text-[9px] px-1.5 py-0.5 rounded bg-teal-950/40 text-teal-400 font-bold uppercase select-all">
@@ -1383,7 +1397,7 @@ export default function CustomerManagement({ language, settings }: Props) {
                         <tr>
                           <td style="text-align: center; font-family: monospace;">#${escapeHtml(tx.transactionId || tx.id)}</td>
                           <td>${escapeHtml(new Date(tx.date).toLocaleString(isRtl ? 'ar' : 'en'))}</td>
-                          <td>${tx.type === 'payment' ? (isRtl ? 'سداد دفعة' : 'Payment Received') : (isRtl ? 'فاتورة بيع بالآجل' : 'Credit Sale')}</td>
+                          <td>${tx.type === 'payment' ? (isReturnCredit(tx) ? (isRtl ? 'مرتجع مبيعات' : 'Sales return') : (isRtl ? 'سداد دفعة' : 'Payment Received')) : (isRtl ? 'فاتورة بيع بالآجل' : 'Credit Sale')}</td>
                           <td>${escapeHtml(tx.notes || '')}</td>
                           <td style="text-align: right; font-weight: bold; color: ${tx.type === 'payment' ? '#10b981' : '#ef4444'};">
                             ${tx.type === 'payment' ? '-' : '+'}${escapeHtml(formatMoney(Number(tx.amount) || 0, tx.currency || selectedLedgerCustomer.currency || 'JOD'))}

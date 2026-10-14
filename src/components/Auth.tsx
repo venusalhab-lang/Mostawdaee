@@ -20,6 +20,7 @@ import { useAuth } from './AuthContext';
 import { supabase } from '../supabaseClient';
 import { APP_NAME_EN, appName } from '../lib/brand';
 import { NATIVE_OAUTH_REDIRECT } from '../lib/nativeAuth';
+import { isPasswordRecovery, setPasswordRecovery } from '../lib/passwordRecovery';
 import PrivacyPolicyBody from './PrivacyPolicyBody';
 
 interface Props {
@@ -103,7 +104,7 @@ export default function Auth({ language = 'ar', onLanguageToggle = () => {}, onL
   const [showPassword, setShowPassword] = useState(false);
   const [isSignUp, setIsSignUp] = useState(false);
   const [forgotMode, setForgotMode] = useState(false);
-  const [recoveryMode, setRecoveryMode] = useState(false);
+  const [recoveryMode, setRecoveryMode] = useState(isPasswordRecovery);
   const [authError, setAuthError] = useState<AuthErrorKey | null>(null);
   const [successKey, setSuccessKey] = useState<'created' | 'reset_sent' | 'password_updated' | null>(null);
 
@@ -145,7 +146,8 @@ export default function Auth({ language = 'ar', onLanguageToggle = () => {}, onL
         setRecoveryMode(false);
         setPassword('');
         setConfirmPassword('');
-        toast.success(isRtl ? 'تم تحديث كلمة المرور. يمكنك تسجيل الدخول الآن.' : 'Password updated. You can sign in now.');
+        toast.success(isRtl ? 'تم تحديث كلمة المرور.' : 'Password updated.');
+        setPasswordRecovery(false);
       } catch (err: any) {
         setAuthError(classifyAuthError(err));
       } finally {
@@ -469,6 +471,11 @@ export default function Auth({ language = 'ar', onLanguageToggle = () => {}, onL
             onClick={() => {
               sounds.playClick();
               if (forgotMode || recoveryMode) {
+                if (recoveryMode) {
+                  // The reset link signed this device in; leaving without a new password ends that session.
+                  setPasswordRecovery(false);
+                  void supabase.auth.signOut({ scope: 'local' });
+                }
                 setForgotMode(false);
                 setRecoveryMode(false);
                 setIsSignUp(false);

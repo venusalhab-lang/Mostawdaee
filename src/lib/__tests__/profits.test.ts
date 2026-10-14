@@ -54,6 +54,16 @@ describe('profits', () => {
     expect(t.saleCount).toBe(1);
   });
 
+  it('takes a return back out of revenue and cost without counting it as a sale', () => {
+    const ret = sale({ id: 'r1', type: 'return', items: [{ productId: 'p1', description: 'شاي', quantity: 1, unitPrice: 3, total: 3, unitCost: 2 }],
+      subtotal: 3, totalAmount: 3 });
+    const t = summarizeProfits([sale({}), ret], [product({})], rates, 'JOD', 'JOD');
+    expect(t.revenue).toBe(3);
+    expect(t.cost).toBe(2);
+    expect(t.profit).toBe(1);
+    expect(t.saleCount).toBe(1);
+  });
+
   it('snapshots the current product cost onto new sale lines', () => {
     const byId = new Map([['p1', product({ unitCost: 2.5, currency: 'USD' })]]);
     const [line] = snapshotLineCosts(sale({}).items, byId, 'JOD');

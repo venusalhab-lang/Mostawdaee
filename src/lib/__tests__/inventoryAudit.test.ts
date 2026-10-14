@@ -77,6 +77,12 @@ describe('inventory audit math', () => {
     expect(plan.lines[0].difference).toBe(-2);
   });
 
+  it('corrects a negative book stock to the counted quantity', () => {
+    const plan = planAuditApply([line({ productId: 'p1', expectedQty: -3, actualQty: 5, unitCost: 2 })], { p1: -3 });
+    expect(plan.ok).toBe(true);
+    expect(plan.lines[0]).toMatchObject({ action: 'update', difference: 8 });
+  });
+
   it('rejects a negative count', () => {
     const plan = planAuditApply([line({ productId: 'p1', expectedQty: 10, actualQty: -1 })], { p1: 10 });
     expect(plan.ok).toBe(false);

@@ -47,6 +47,8 @@ export function paymentMethodLabel(
 }
 
 export function invoiceTypeLabel(type: Invoice['type'], isRtl: boolean): string {
+  if (type === 'return') return isRtl ? 'مرتجع مبيعات' : 'Sales return';
+  if (type === 'purchase_return') return isRtl ? 'مرتجع مشتريات' : 'Purchase return';
   return type === 'sale'
     ? (isRtl ? 'مبيعات' : 'Sale')
     : (isRtl ? 'مشتريات' : 'Purchase');
@@ -59,6 +61,12 @@ export function invoiceDocumentTitle(
 ): string {
   if (inv.type === 'purchase') {
     return isRtl ? 'فاتورة مشتريات' : 'Purchase Invoice';
+  }
+  if (inv.type === 'return') {
+    return isRtl ? 'إشعار دائن (مرتجع مبيعات)' : 'Credit Note (Sales Return)';
+  }
+  if (inv.type === 'purchase_return') {
+    return isRtl ? 'إشعار مدين (مرتجع مشتريات)' : 'Debit Note (Purchase Return)';
   }
   if (hasTaxRegistration && (Number(inv.taxAmount) || 0) > 0) {
     return isRtl ? 'فاتورة ضريبية' : 'Tax Invoice';
@@ -101,6 +109,8 @@ export interface InvoicePrintContext {
   companyLogoUrl?: string;
   /** Present only when the national e-invoicing system accepted this invoice. */
   einvoice?: { qrDataUrl: string; number?: string };
+  /** Quotations and purchase orders reuse the layout with their own title, details and closing note. */
+  offer?: { title: string; partyLabel: string; details: { label: string; value: string }[]; note: string };
 }
 
 export function buildInvoicePrintHtml(ctx: InvoicePrintContext): string {
@@ -115,6 +125,7 @@ export function buildInvoicePrintHtml(ctx: InvoicePrintContext): string {
     taxRegistrationNumber,
     companyLogoUrl,
     einvoice,
+    offer,
   } = ctx;
 
   const currency = inv.currency || 'USD';
@@ -130,8 +141,9 @@ export function buildInvoicePrintHtml(ctx: InvoicePrintContext): string {
     hour: '2-digit',
     minute: '2-digit',
   });
-  const party = inv.customerName || inv.supplierName || (isRtl ? 'زبون نقدي' : 'Walk-in');
-  const title = invoiceDocumentTitle(inv, isRtl, !!taxRegistrationNumber);
+  const party = (inv.type === 'purchase_return' ? inv.supplierName : inv.customerName || inv.supplierName) || (isRtl ? 'زبون نقدي' : 'Walk-in');
+  const isReturn = inv.type === 'return' || inv.type === 'purchase_return';
+  const title = offer?.title ?? invoiceDocumentTitle(inv, isRtl, !!taxRegistrationNumber);
   const skuLabel = isRtl ? 'رمز الصنف' : 'SKU';
 
   const itemsHtml = inv.items.map((item, idx) => {
@@ -217,9 +229,13 @@ export function buildInvoicePrintHtml(ctx: InvoicePrintContext): string {
 
     <section class="meta">
       <div><span>${isRtl ? 'التاريخ' : 'Date'}</span><br/><b>${escapeHtml(dateStr)} · ${escapeHtml(timeStr)}</b></div>
-      <div><span>${inv.type === 'sale' ? (isRtl ? 'إلى' : 'Bill to') : (isRtl ? 'من' : 'From')}</span><br/><b>${escapeHtml(party)}</b></div>
-      <div><span>${isRtl ? 'طريقة الدفع' : 'Payment'}</span><br/><b>${escapeHtml(paymentMethodLabel(inv.paymentMethod, isRtl))}</b></div>
+      <div><span>${escapeHtml(offer?.partyLabel ?? (inv.type === 'purchase' ? (isRtl ? 'من' : 'From') : (isRtl ? 'إلى' : 'Bill to')))}</span><br/><b>${escapeHtml(party)}</b></div>
+      ${offer
+        ? offer.details.map((d) => `<div><span>${escapeHtml(d.label)}</span><br/><b>${escapeHtml(d.value)}</b></div>`).join('')
+        : `<div><span>${isRtl ? 'طريقة الدفع' : 'Payment'}</span><br/><b>${escapeHtml(paymentMethodLabel(inv.paymentMethod, isRtl))}</b></div>`}
       <div><span>${isRtl ? 'العملة' : 'Currency'}</span><br/><b>${escapeHtml(currency)}</b></div>
+      ${isReturn && inv.returnOfNumber ? `<div><span>${isRtl ? 'عن الفاتورة' : 'For invoice'}</span><br/><b dir="ltr">#${escapeHtml(inv.returnOfNumber)}</b></div>` : ''}
+      ${isReturn && inv.returnReason ? `<div style="grid-column:1 / -1"><span>${isRtl ? 'سبب الإرجاع' : 'Reason'}</span><br/><b>${escapeHtml(inv.returnReason)}</b></div>` : ''}
     </section>
 
     <table>
@@ -250,7 +266,7 @@ export function buildInvoicePrintHtml(ctx: InvoicePrintContext): string {
       </div>
     </div>` : ''}
 
-    <p class="notes">${isRtl ? 'يرجى مراجعة الكميات والمبالغ عند الاستلام.' : 'Please verify quantities and amounts on receipt.'}</p>
+    <p class="notes">${escapeHtml(offer?.note ?? (isRtl ? 'يرجى مراجعة الكميات والمبالغ عند الاستلام.' : 'Please verify quantities and amounts on receipt.'))}</p>
 
     <div class="signs">
       <div class="sign">${isRtl ? 'توقيع المستلم' : 'Received by'}</div>

@@ -121,16 +121,19 @@ export function summarizeProfits(
   const totals: ProfitTotals = { revenue: 0, cost: 0, profit: 0, margin: 0, saleCount: 0, unknownCostLines: 0, purchases: 0 };
   for (const inv of invoices) {
     const currency = inv.currency || defaultCurrency;
-    if (inv.type === 'purchase') {
-      totals.purchases += convertAmount(num(inv.totalAmount), currency, displayCurrency, rates);
+    if (inv.type === 'purchase' || inv.type === 'purchase_return') {
+      const sign = inv.type === 'purchase_return' ? -1 : 1;
+      totals.purchases += sign * convertAmount(num(inv.totalAmount), currency, displayCurrency, rates);
       continue;
     }
-    if (inv.type !== 'sale') continue;
+    if (inv.type !== 'sale' && inv.type !== 'return') continue;
+    // A return takes its revenue and the cost of the goods back out.
+    const sign = inv.type === 'return' ? -1 : 1;
     const p = saleInvoiceProfit(inv, byId, rates, defaultCurrency);
-    totals.revenue += convertAmount(p.revenue, currency, displayCurrency, rates);
-    totals.cost += convertAmount(p.cost, currency, displayCurrency, rates);
+    totals.revenue += sign * convertAmount(p.revenue, currency, displayCurrency, rates);
+    totals.cost += sign * convertAmount(p.cost, currency, displayCurrency, rates);
     totals.unknownCostLines += p.unknownCostLines;
-    totals.saleCount += 1;
+    if (inv.type === 'sale') totals.saleCount += 1;
   }
   totals.profit = totals.revenue - totals.cost;
   totals.margin = totals.revenue > 0 ? (totals.profit / totals.revenue) * 100 : 0;

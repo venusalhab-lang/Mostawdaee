@@ -1,4 +1,6 @@
 import { printHtmlDocument } from '../lib/printHtml';
+import { buildReceiptHtml } from '../lib/receipt';
+import { printReceipt, printerErrorMessage, readReceiptPrinter } from '../lib/receiptPrinter';
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Html5Qrcode } from 'html5-qrcode';
 import { 
@@ -20,7 +22,8 @@ import {
   CreditCard,
   Smartphone,
   PauseCircle,
-  Package
+  Package,
+  Clock
 } from 'lucide-react';
 import { useFirebase } from './FirebaseProvider';
 import { readUserCache, writeUserCache, migrateLegacyUserCache } from '../lib/userStorage';
@@ -50,6 +53,8 @@ import { computeStockStatus } from '../lib/stock';
 import { pickForPurchase, pickForSale, productsForCode } from '../lib/productLookup';
 import { formatPackStock, isPackLine, lineAsPack, lineKey, lineQuantityText, lineUnits, productPack, productsForPackCode, unitsInCart } from '../lib/packs';
 import CurrencyPicker from './CurrencyPicker';
+import ShiftPanel from './ShiftPanel';
+import { openShiftOf } from '../lib/shifts';
 import ShowMoreBar from './ui/ShowMoreBar';
 import { useProgressiveList } from '../hooks/useProgressiveList';
 
@@ -71,6 +76,32 @@ const QUICK_CASH: Record<string, number[]> = {
   IQD: [1000, 5000, 10000, 25000],
 };
 
+/** Keeps what the cashier is typing; only a whole number above zero changes the line, and 0 on leave removes it. */
+function QtyInput({ value, onCommit, className, style }: { value: number; onCommit: (qty: number) => void; className?: string; style?: React.CSSProperties }) {
+  const [draft, setDraft] = useState(String(value));
+  useEffect(() => { setDraft(String(value)); }, [value]);
+  return (
+    <input
+      type="number"
+      min="0"
+      inputMode="numeric"
+      value={draft}
+      onChange={(e) => {
+        setDraft(e.target.value);
+        const qty = parseInt(e.target.value, 10);
+        if (qty > 0) onCommit(qty);
+      }}
+      onBlur={() => {
+        const qty = parseInt(draft, 10);
+        if (qty === 0) onCommit(0);
+        else setDraft(String(value));
+      }}
+      className={className}
+      style={style}
+    />
+  );
+}
+
 function escapeHtml(v: unknown): string {
   return String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] as string));
 }
@@ -79,7 +110,9 @@ export default function POSSystem({ language }: POSSystemProps) {
   const t = translations[language];
   const isRtl = language === 'ar';
   
-  const { products, saveInvoice, settings, saveProduct, warehouses, user, can, workspace } = useFirebase();
+  const { products, saveInvoice, settings, saveProduct, warehouses, user, can, workspace, shifts } = useFirebase();
+  const myShift = openShiftOf(shifts, user?.uid);
+  const [showShiftPanel, setShowShiftPanel] = useState(false);
   const canManageCatalog = can('manage_catalog');
   const storeCurrency = isPosCurrency(settings?.currency) ? settings.currency : 'JOD';
   const [posCurrency, setPosCurrency] = useState<PosCurrency>(() => {
@@ -176,7 +209,7 @@ export default function POSSystem({ language }: POSSystemProps) {
       currency: activeCurrency,
       mode: 'sale' as const,
     };
-    setHeldBills([...heldBills, newHeldBill]);
+    setHeldBills(prev => [...prev, newHeldBill]);
     setScannedItems([]);
     setDiscount(0);
     setReceivedAmount('');
@@ -202,7 +235,7 @@ export default function POSSystem({ language }: POSSystemProps) {
     if (isPosCurrency(bill.currency)) {
       setPosCurrency(bill.currency);
     }
-    setHeldBills(heldBills.filter(b => b.id !== bill.id));
+    setHeldBills(prev => prev.filter(b => b.id !== bill.id));
     playBeep('success');
     toast.success(isRtl ? 'تم استرجاع الفاتورة المعلقة بنجاح للواجهة' : 'Suspended bill restored successfully');
   };
@@ -210,7 +243,7 @@ export default function POSSystem({ language }: POSSystemProps) {
   // Discard a held bill
   const handleDiscardHeldBill = (billId: string) => {
     if (window.confirm(isRtl ? 'هل أنت متأكد من رغبتك في حذف وإلغاء هذه الفاتورة المعلقة تماماً؟' : 'Are you sure you want to permanently discard this held bill?')) {
-      setHeldBills(heldBills.filter(b => b.id !== billId));
+      setHeldBills(prev => prev.filter(b => b.id !== billId));
       playBeep('error');
       toast.success(isRtl ? 'تم إلغاء الفاتورة المعلقة وإزالتها من الذاكرة بنجاح' : 'Held bill discarded successfully');
     }
@@ -447,6 +480,11 @@ export default function POSSystem({ language }: POSSystemProps) {
         );
       } else {
         playBeep('error');
+        setBarcodeInput('');
+        if (!canManageCatalog) {
+          toast.error(isRtl ? `الباركود "${cleanText}" غير مسجل. اطلب من المدير إضافته.` : `Barcode "${cleanText}" is not registered. Ask a manager to add it.`);
+          return;
+        }
         setQuickRegForm({
           sku: cleanText,
           name: '',
@@ -468,6 +506,9 @@ export default function POSSystem({ language }: POSSystemProps) {
       }
     }
   };
+
+  const scanHandlerRef = useRef(handleScannedProductCode);
+  scanHandlerRef.current = handleScannedProductCode;
 
   // Setup live camera scanner effect with high-performance Html5Qrcode
   useEffect(() => {
@@ -496,7 +537,7 @@ export default function POSSystem({ language }: POSSystemProps) {
                   console.warn("Could not stop camera cleanly:", err);
                 }
               }
-              handleScannedProductCode(decodedText);
+              scanHandlerRef.current(decodedText);
             };
 
             const onScanFailure = (error: any) => {
@@ -1009,134 +1050,29 @@ export default function POSSystem({ language }: POSSystemProps) {
     currency: activeCurrency as Currency,
   });
 
-  // Print Thermal 80mm Receipt
-  const printThermalReceipt = (invoiceObj: Invoice) => {
-    let itemsHtml = '';
-    invoiceObj.items.forEach(item => {
-      itemsHtml += `
-        <tr>
-          <td class="item-name">${escapeHtml(item.description)}</td>
-          <td class="item-qty">${escapeHtml(lineQuantityText(item, isRtl))}</td>
-          <td class="item-price">${formatCurrencyValue(item.total, invoiceObj.currency)}</td>
-        </tr>
-      `;
+  const printThermalReceipt = (invoiceObj: Invoice, cashSale = false) => {
+    const html = buildReceiptHtml({
+      invoice: invoiceObj,
+      isRtl,
+      paper: readReceiptPrinter().paper,
+      businessName: settings?.businessName || (isRtl ? 'مستودعي' : 'Mostawdaee'),
+      businessAddress: settings?.businessAddress,
+      businessPhone: settings?.businessPhone,
+      taxRegistrationNumber: settings?.taxRegistrationNumber,
+      money: (amount, currency) => formatMoney(amount, currency || activeCurrency),
+      formatDate: (ms) => new Date(ms).toLocaleString(isRtl ? 'ar-JO' : 'en-US'),
     });
-
-    const currentDate = new Date(invoiceObj.date).toLocaleString(isRtl ? 'ar-JO' : 'en-US');
-    const currencyStr = invoiceObj.currency || activeCurrency;
-    const symbolMap: Record<string, string> = {
-      JOD: 'د.أ',
-      ILS: '₪',
-      USD: '$',
-      IQD: 'د.ع',
-      SAR: 'ر.س',
-      AED: 'د.إ',
-      LYD: 'د.ل',
-      EGP: 'ج.م',
-    };
-    const symbol = symbolMap[currencyStr] || currencyStr;
-
-    const receiptHTML = `
-      <html>
-      <head>
-          <style>
-              @page { margin: 0; size: 80mm auto; }
-              body { 
-                  font-family: 'Inter', system-ui, -apple-system, sans-serif; 
-                  font-size: 11px; 
-                  color: #000; 
-                  margin: 0; 
-                  padding: 8px; 
-                  width: 72mm;
-                  direction: ${isRtl ? 'rtl' : 'ltr'}; 
-              }
-              .header-title { text-align: center; font-size: 15px; font-weight: 900; margin: 5px 0 2px 0; letter-spacing: -0.5px; }
-              .header-sub { text-align: center; font-size: 8px; color: #555; margin-bottom: 8px; font-weight: bold; text-transform: uppercase; }
-              .info { text-align: center; font-size: 9px; line-height: 1.4; margin-bottom: 10px; }
-              .divider { border-bottom: 1px dashed #000; margin: 8px 0; }
-              table { width: 100%; border-collapse: collapse; }
-              th { border-bottom: 1px solid #000; padding-bottom: 4px; text-align: ${isRtl ? 'right' : 'left'}; font-size: 9px; font-weight: 900; }
-              td { padding: 4px 0; border-bottom: 1px dotted #ccc; font-size: 10px; }
-              .item-name { text-align: ${isRtl ? 'right' : 'left'}; }
-              .item-qty { text-align: center; font-weight: bold; }
-              .item-price { text-align: ${isRtl ? 'left' : 'right'}; font-family: monospace; }
-              .calc-row { display: flex; justify-content: space-between; font-size: 10px; padding: 2px 0; }
-              .total-section { margin-top: 8px; font-weight: 900; font-size: 12px; display: flex; justify-content: space-between; border-top: 1px dashed #000; padding-top: 4px; }
-              .footer { text-align: center; margin-top: 15px; font-size: 8px; line-height: 1.4; font-weight: bold; }
-          </style>
-      </head>
-      <body>
-          <div class="header-title">${escapeHtml(settings?.businessName || (isRtl ? 'مستودعي الذكي' : 'Mostawdaee'))}</div>
-          <div class="header-sub">Enterprise Management POS System</div>
-          <div class="info">
-              <b>${isRtl ? 'رقم الفاتورة' : 'Invoice No'}: #${escapeHtml(invoiceObj.invoiceNumber)}</b><br>
-              ${isRtl ? 'التاريخ والوقت' : 'Date/Time'}: ${currentDate}<br>
-              ${isRtl ? 'نوع العملية' : 'Process Type'}: ${invoiceObj.type === 'sale' ? (isRtl ? 'مبيعات نقاط البيع فوري' : 'POS Sales Direct') : (isRtl ? 'توريد بضائع مستودع' : 'Stock Supply Direct')}
-          </div>
-          
-          <div class="divider"></div>
-          
-          <table>
-              <thead>
-                  <tr>
-                      <th class="item-name">${isRtl ? 'المادة السلعية' : 'Item Description'}</th>
-                      <th style="width: 15%; text-align: center;">${isRtl ? 'الكمية' : 'Qty'}</th>
-                      <th style="width: 30%; text-align: ${isRtl ? 'left' : 'right'};">${isRtl ? 'المجموع' : 'Total'}</th>
-                  </tr>
-              </thead>
-              <tbody>
-                  ${itemsHtml}
-              </tbody>
-          </table>
-          
-          <div class="divider"></div>
-
-          <div class="calc-row">
-              <span>${isRtl ? 'المجموع الفرعي:' : 'Subtotal:'}</span>
-              <span>${formatCurrencyValue(invoiceObj.subtotal, invoiceObj.currency)}</span>
-          </div>
-          ${invoiceObj.discount ? `
-          <div class="calc-row" style="color: #d32f2f;">
-              <span>${isRtl ? 'الخصم:' : 'Discount:'}</span>
-              <span>-${formatCurrencyValue(invoiceObj.discount, invoiceObj.currency)}</span>
-          </div>
-          ` : ''}
-          <div class="calc-row">
-              <span>${isRtl ? 'ضريبة القيمة المضافة:' : 'VAT Tax:'}</span>
-              <span>${formatCurrencyValue(invoiceObj.taxAmount, invoiceObj.currency)}</span>
-          </div>
-          
-          <div class="total-section">
-              <span>${isRtl ? 'المجموع النهائي الكلي:' : 'GRAND TOTAL:'}</span>
-              <span>${formatCurrencyValue(invoiceObj.totalAmount, invoiceObj.currency)}</span>
-          </div>
-
-          ${invoiceObj.cashReceived !== undefined ? `
-          <div class="calc-row" style="margin-top: 4px; font-weight: bold;">
-              <span>${isRtl ? 'المبلغ المستلم:' : 'Cash Received:'}</span>
-              <span>${formatCurrencyValue(invoiceObj.cashReceived, invoiceObj.currency)}</span>
-          </div>
-          ` : ''}
-          ${invoiceObj.changeDue !== undefined ? `
-          <div class="calc-row" style="font-weight: bold;">
-              <span>${isRtl ? 'المبلغ المتبقي (المرتجع):' : 'Change Due:'}</span>
-              <span>${formatCurrencyValue(invoiceObj.changeDue, invoiceObj.currency)}</span>
-          </div>
-          ` : ''}
-          
-          <div class="footer">
-              ${isRtl ? 'شكراً لتعاملكم وشراكتكم معنا' : 'Thank you for your business and partnership'}<br>
-              ${isRtl ? 'نظام مستودعي لإدارة الفواتير والمخزون' : 'Mostawdaee Automated Ledger Platform'}
-          </div>
-      </body>
-      </html>
-    `;
-
-    printHtmlDocument(receiptHTML);
+    printReceipt(html, invoiceObj.invoiceNumber, { cashSale }).catch((err) => {
+      toast.error(printerErrorMessage(err, isRtl), {
+        id: 'receipt-print',
+        action: { label: isRtl ? 'طباعة عبر النظام' : 'Use system print', onClick: () => printHtmlDocument(html, invoiceObj.invoiceNumber) },
+      });
+    });
   };
 
   // Submit standard invoice
-  const handleSubmitProcess = async (cashOverride?: number) => {
+  const handleSubmitProcess = async (cashOverride?: number, methodOverride?: 'cash' | 'card' | 'wallet') => {
+    const method = methodOverride || paymentMethod;
     if (submitLockRef.current) return;
     if (scannedItems.length === 0) {
       playBeep('error');
@@ -1148,7 +1084,7 @@ export default function POSSystem({ language }: POSSystemProps) {
     setIsSubmitting(true);
     try {
       const typedCash = typeof cashOverride === 'number' ? cashOverride : parseFloat(receivedAmount);
-      const isCashSale = posMode === 'sale' && paymentMethod === 'cash';
+      const isCashSale = posMode === 'sale' && method === 'cash';
       const parsedCash = isCashSale ? (Number.isFinite(typedCash) && typedCash > 0 ? typedCash : grandTotal) : grandTotal;
       if (isCashSale && parsedCash < grandTotal - 1e-6) {
         setIsSubmitting(false);
@@ -1176,7 +1112,7 @@ export default function POSSystem({ language }: POSSystemProps) {
         cashReceived: parsedCash,
         changeDue: changeDue,
         // Supply received at the counter is paid from the vault; a card choice left over from a sale must not skip it.
-        paymentMethod: posMode === 'purchase' ? 'cash' : paymentMethod
+        paymentMethod: posMode === 'purchase' ? 'cash' : method
       };
 
       // Persist first: any failure here aborts checkout (cart is kept) instead of showing a false success.
@@ -1194,7 +1130,7 @@ export default function POSSystem({ language }: POSSystemProps) {
       }
 
       // Optional mirror to a third-party API (only when VITE_EXTERNAL_SALES_API is configured).
-      if (externalApi) {
+      if (externalApi && user && posMode === 'sale') {
         const invoiceData = {
           id: Date.now(),
           items: scannedItems.map((item) => ({
@@ -1227,8 +1163,8 @@ export default function POSSystem({ language }: POSSystemProps) {
         }
       }
 
-      // Auto-trigger printing of thermal receipt for instant fast-paced checkout flow
-      printThermalReceipt(officialInvoice);
+      // Only a sale that was actually saved may open the cash drawer; reprints never do.
+      printThermalReceipt(officialInvoice, isCashSale && Boolean(user));
 
       // Clear State
       setLastInvoiceNumber(officialInvoice.invoiceNumber);
@@ -1238,6 +1174,7 @@ export default function POSSystem({ language }: POSSystemProps) {
       setDiscount(0);
       setEnableTax(false);
       setReceivedAmount('');
+      setPaymentMethod('cash');
       setIsSubmitting(false);
       setShowCashPaymentModal(false);
       setShowSuccessModal(true);
@@ -1282,6 +1219,23 @@ export default function POSSystem({ language }: POSSystemProps) {
           </p>
         </div>
 
+        <div className="flex flex-wrap items-center gap-2 self-start">
+        <button
+          type="button"
+          onClick={() => setShowShiftPanel(true)}
+          className={`inline-flex items-center gap-2 rounded-2xl border px-4 py-2.5 text-xs font-black cursor-pointer transition-colors ${
+            myShift
+              ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-300'
+              : 'border-slate-200 bg-white text-slate-600 hover:text-slate-900 dark:border-slate-800 dark:bg-slate-900/60 dark:text-slate-300'
+          }`}
+        >
+          <Clock size={15} />
+          {myShift
+            ? (isRtl
+              ? `الوردية مفتوحة منذ ${new Date(myShift.openedAt).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })}`
+              : `Shift open since ${new Date(myShift.openedAt).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}`)
+            : (isRtl ? 'الوردية' : 'Shift')}
+        </button>
         {/* Premium Mode Segment Switcher */}
         <div className="flex items-center bg-slate-100 dark:bg-slate-900/60 p-1 rounded-2xl border border-slate-200/60 dark:border-slate-800/60 w-fit self-start shrink-0 select-none">
           <button 
@@ -1310,7 +1264,9 @@ export default function POSSystem({ language }: POSSystemProps) {
             <span>{isRtl ? 'وضع توريد البضائع' : 'Stock Supply Mode'}</span>
           </button>}
         </div>
+        </div>
       </div>
+      <ShiftPanel isOpen={showShiftPanel} onClose={() => setShowShiftPanel(false)} language={isRtl ? 'ar' : 'en'} defaultCurrency={activeCurrency} />
 
       {/* Main Grid Workspace */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-6 flex-1 items-stretch">
@@ -1703,14 +1659,9 @@ export default function POSSystem({ language }: POSSystemProps) {
                         >
                           -
                         </button>
-                        <input
-                          type="number"
-                          min="0"
+                        <QtyInput
                           value={item.quantity}
-                          onChange={(e) => {
-                            const val = parseInt(e.target.value, 10);
-                            setItemQty(key, isNaN(val) ? 0 : val);
-                          }}
+                          onCommit={(qty) => setItemQty(key, qty)}
                           className="w-10 bg-transparent text-center font-bold text-xs text-slate-900 dark:text-white border-0 p-0 focus:outline-none focus:ring-1 focus:ring-emerald-500 rounded font-mono select-all [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
                           style={{ MozAppearance: 'textfield' }}
                         />
@@ -2086,7 +2037,7 @@ export default function POSSystem({ language }: POSSystemProps) {
                     className="flex-1 py-3 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-100 font-extrabold rounded-xl text-xs transition active:scale-95 cursor-pointer flex items-center justify-center gap-2"
                   >
                     <Printer size={15} />
-                    <span>{isRtl ? 'طباعة فاتورة حرارية 80مم' : 'Print Thermal 80mm'}</span>
+                    <span>{isRtl ? 'طباعة الإيصال' : 'Print receipt'}</span>
                   </button>
                 )}
                 <button
@@ -2216,7 +2167,7 @@ export default function POSSystem({ language }: POSSystemProps) {
         currency={POS_SYMBOLS[activeCurrency] || activeCurrency}
         decimals={currencyDecimals(activeCurrency)}
         quickAmounts={QUICK_CASH[activeCurrency] || QUICK_CASH.USD}
-        onConfirm={(received) => handleSubmitProcess(received)}
+        onConfirm={(received) => handleSubmitProcess(received, 'cash')}
         language={isRtl ? 'ar' : 'en'}
       />
 

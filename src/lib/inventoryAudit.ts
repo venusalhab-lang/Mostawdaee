@@ -68,7 +68,8 @@ export function planAuditApply(
       movement: stocktakeMovement(difference),
     };
 
-    if (!Number.isFinite(expectedQty) || expectedQty < 0 || !Number.isFinite(actualQty) || actualQty < 0 || !Number.isFinite(unitCost) || unitCost < 0) {
+    // The book may be below zero (sales taken offline); a count is how that gets corrected, so only the count must be >= 0.
+    if (!Number.isFinite(expectedQty) || !Number.isFinite(actualQty) || actualQty < 0 || !Number.isFinite(unitCost) || unitCost < 0) {
       return { ...base, action: 'unchanged' as const, block: 'INVALID_QTY' as const };
     }
     if (!Number.isFinite(bookQty)) {
