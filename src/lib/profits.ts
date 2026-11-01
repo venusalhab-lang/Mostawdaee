@@ -1,5 +1,5 @@
 import type { Invoice, InvoiceItem, Product } from '../types';
-import { convertAmount } from './exchangeRates';
+import { convertAmount, roundMoney } from './exchangeRates';
 import { lineUnits } from './packs';
 
 export interface InvoiceProfit {
@@ -29,13 +29,17 @@ export function lineUnitCost(
   rates: Record<string, number>,
   defaultCurrency: string
 ): number | null {
+  const asInvoiceCurrency = (amount: number, from: string): number | null => {
+    const converted = convertAmount(amount, from, invoiceCurrency, rates);
+    return Number.isFinite(converted) ? converted : null;
+  };
   if (typeof item.unitCost === 'number' && Number.isFinite(item.unitCost) && item.unitCost >= 0) {
-    return convertAmount(item.unitCost, item.costCurrency || invoiceCurrency, invoiceCurrency, rates);
+    return asInvoiceCurrency(item.unitCost, item.costCurrency || invoiceCurrency);
   }
   if (!product) return null;
   const cost = num(product.unitCost ?? product.costPrice);
   if (cost <= 0) return null;
-  return convertAmount(cost, product.currency || defaultCurrency, invoiceCurrency, rates);
+  return asInvoiceCurrency(cost, product.currency || defaultCurrency);
 }
 
 /** Revenue excludes VAT (collected for the tax office) and already includes the discount. */
@@ -59,9 +63,9 @@ export function saleInvoiceProfit(
       unknownCostLines += 1;
       continue;
     }
-    cost += unit * lineUnits(item);
+    cost = roundMoney(cost + unit * lineUnits(item), currency);
   }
-  return { revenue, cost, profit: revenue - cost, unknownCostLines };
+  return { revenue, cost, profit: roundMoney(revenue - cost, currency), unknownCostLines };
 }
 
 export interface LineProfit {
@@ -119,19 +123,24 @@ export function summarizeProfits(
 ): ProfitTotals {
   const byId = new Map(products.map((p) => [p.id, p]));
   const totals: ProfitTotals = { revenue: 0, cost: 0, profit: 0, margin: 0, saleCount: 0, unknownCostLines: 0, purchases: 0 };
+  const addConverted = (into: number, amount: number, from: string) => {
+    const converted = convertAmount(amount, from, displayCurrency, rates);
+    // Skip unknown FX — never let one bad rate turn the whole dashboard into NaN.
+    return Number.isFinite(converted) ? into + converted : into;
+  };
   for (const inv of invoices) {
     const currency = inv.currency || defaultCurrency;
     if (inv.type === 'purchase' || inv.type === 'purchase_return') {
       const sign = inv.type === 'purchase_return' ? -1 : 1;
-      totals.purchases += sign * convertAmount(num(inv.totalAmount), currency, displayCurrency, rates);
+      totals.purchases = addConverted(totals.purchases, sign * num(inv.totalAmount), currency);
       continue;
     }
     if (inv.type !== 'sale' && inv.type !== 'return') continue;
     // A return takes its revenue and the cost of the goods back out.
     const sign = inv.type === 'return' ? -1 : 1;
     const p = saleInvoiceProfit(inv, byId, rates, defaultCurrency);
-    totals.revenue += sign * convertAmount(p.revenue, currency, displayCurrency, rates);
-    totals.cost += sign * convertAmount(p.cost, currency, displayCurrency, rates);
+    totals.revenue = addConverted(totals.revenue, sign * p.revenue, currency);
+    totals.cost = addConverted(totals.cost, sign * p.cost, currency);
     totals.unknownCostLines += p.unknownCostLines;
     if (inv.type === 'sale') totals.saleCount += 1;
   }
@@ -166,10 +175,16 @@ export function weightedAverageCost(
   defaultCurrency: string,
 ): number | null {
   if (!(receivedQty > 0) || !Number.isFinite(receivedTotal) || receivedTotal < 0) return null;
-  if ((product.currency || defaultCurrency) !== purchaseCurrency) return null;
   const onHand = num(product.quantity);
   const onHandCost = num(product.unitCost ?? product.costPrice);
   const purchaseUnit = receivedTotal / receivedQty;
+  const sameCurrency = (product.currency || defaultCurrency) === purchaseCurrency;
+  // Mixing a new currency into an existing cost basis would invent a rate — refuse.
+  // Empty or unpriced stock may adopt the purchase currency (caller should write product.currency).
+  if (!sameCurrency) {
+    if (onHand > 0 && onHandCost > 0) return null;
+    return Math.round(purchaseUnit * 10_000) / 10_000;
+  }
   const averaged = onHand > 0 && onHandCost > 0
     ? (onHand * onHandCost + receivedTotal) / (onHand + receivedQty)
     : purchaseUnit;

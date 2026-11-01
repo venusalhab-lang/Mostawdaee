@@ -28,6 +28,20 @@ export function canTransition(type: ChequeType, from: ChequeStatus, to: ChequeSt
   return allowedTransitions(type, from).includes(to);
 }
 
+/**
+ * Status steps to bring a live cheque in line with a backup row under server transition rules.
+ * Empty when already aligned; null when the live status cannot reach the backup status.
+ */
+export function chequeRestorePath(type: ChequeType, from: ChequeStatus, to: ChequeStatus): ChequeStatus[] | null {
+  if (from === to) return [];
+  if (canTransition(type, from, to)) return [to];
+  // Bounced can return to pending, then move to the target in one more step.
+  if (from === 'bounced' && to !== 'pending' && canTransition(type, 'bounced', 'pending') && canTransition(type, 'pending', to)) {
+    return ['pending', to];
+  }
+  return null;
+}
+
 export type ChequeInputError =
   | 'number'
   | 'bank'

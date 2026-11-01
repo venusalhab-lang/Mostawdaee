@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { convertMoney, convertAmount, formatMoney, currencyDecimals, buildUsdUnitRates, POS_CURRENCY_CODES, roundMoney, conversionBasis, DEBT_RATE_MAX_AGE_MS } from '../exchangeRates';
+import { convertMoney, safeConvertMoney, convertAmount, formatMoney, currencyDecimals, buildUsdUnitRates, POS_CURRENCY_CODES, roundMoney, conversionBasis, DEBT_RATE_MAX_AGE_MS } from '../exchangeRates';
 import { roundForCurrency } from '../vaultMath';
 
 describe('conversionBasis', () => {
@@ -71,6 +71,14 @@ describe('exchangeRates', () => {
 
   it('is identity for the same currency', () => {
     expect(convertAmount(12.5, 'JOD', 'JOD')).toBe(12.5);
+  });
+
+  it('refuses unknown or zero rates instead of treating them as USD', () => {
+    expect(Number.isNaN(convertAmount(100, 'EUR', 'USD', { USD: 1, JOD: 0.709 }))).toBe(true);
+    expect(Number.isNaN(convertMoney(100, 'USD', 'EUR', { USD: 1 }))).toBe(true);
+    expect(Number.isNaN(convertAmount(10, 'USD', 'JOD', { USD: 1, JOD: 0 }))).toBe(true);
+    expect(safeConvertMoney(100, 'USD', 'EUR', { USD: 1 })).toBeNull();
+    expect(safeConvertMoney(10, 'USD', 'JOD', { USD: 1, JOD: 0.709 })).toBeCloseTo(7.09, 5);
   });
 
   it('round-trips through USD consistently', () => {

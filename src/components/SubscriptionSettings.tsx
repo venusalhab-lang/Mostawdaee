@@ -7,6 +7,7 @@ import { useAuth } from './AuthContext';
 import PremiumUpgradeModal from './PremiumUpgradeModal';
 import { sounds } from '../lib/sounds';
 import { arCount } from '../lib/arabicPlural';
+import { PLAY_PREMIUM_PRODUCT_ID } from '../services/billing';
 
 const WITHIN_DAYS = { one: 'يوم واحد', two: 'يومين', few: '{n} أيام', many: '{n} يوماً', other: '{n} يوم' };
 const DAYS_LEFT = { one: 'يوم واحد متبقٍ', two: 'يومان متبقيان', few: '{n} أيام متبقية', many: '{n} يوماً متبقياً', other: '{n} يوم متبقٍ' };
@@ -16,7 +17,7 @@ interface Props {
 }
 
 const PLAY_SUBSCRIPTIONS_URL =
-  'https://play.google.com/store/account/subscriptions?sku=mostawdaee_premium_100&package=com.mostawdaee.app';
+  `https://play.google.com/store/account/subscriptions?sku=${PLAY_PREMIUM_PRODUCT_ID}&package=com.mostawdaee.app`;
 
 /** Subscription status + upgrade/renew entry point (lives in Settings, not in the sidebar). */
 export default function SubscriptionSettings({ language }: Props) {

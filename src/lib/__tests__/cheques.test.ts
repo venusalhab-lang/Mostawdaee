@@ -4,6 +4,7 @@ import {
   allowedTransitions,
   appendNote,
   canTransition,
+  chequeRestorePath,
   chequePaymentPlan,
   daysUntilDue,
   dueCounts,
@@ -69,6 +70,14 @@ describe('cheque status rules', () => {
     for (const status of ['cashed', 'endorsed', 'returned'] as const) {
       expect(allowedTransitions('incoming', status)).toEqual([]);
     }
+  });
+
+  it('plans restore status steps under the same rules as the server', () => {
+    expect(chequeRestorePath('incoming', 'pending', 'pending')).toEqual([]);
+    expect(chequeRestorePath('incoming', 'pending', 'cashed')).toEqual(['cashed']);
+    expect(chequeRestorePath('incoming', 'bounced', 'cashed')).toEqual(['pending', 'cashed']);
+    expect(chequeRestorePath('incoming', 'cashed', 'pending')).toBeNull();
+    expect(chequeRestorePath('outgoing', 'pending', 'endorsed')).toBeNull();
   });
 });
 

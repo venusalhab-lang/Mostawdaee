@@ -1,5 +1,5 @@
 -- National e-invoicing (Jordan JoFotara). Run once in the Supabase SQL editor; safe to run again.
--- Run after supabase_production_setup.sql.
+-- Run after supabase_production_setup.sql (needs merchant_documents and workspace_owner).
 -- The linking credentials are written and read only by the server (service role); the app never sees the secret.
 -- Every submission is logged with the exact XML and the system's answer, which the law requires keeping.
 

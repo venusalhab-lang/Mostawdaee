@@ -476,9 +476,8 @@ export function joFotaraFromInvoice(inv: Invoice, opts: JoFotaraFromInvoiceOptio
 
   const built = buildJoFotaraXml(doc);
   if (built.ok === false) return { ok: false, issues: built.issues };
-  // Line totals and tax were rounded per line when the sale was saved; anything beyond that is a real mismatch.
-  const tolerance = 0.001 + 0.0006 * items.length;
-  if (Math.abs(Number(built.totals.payable) - (Number(inv.totalAmount) || 0)) > tolerance) {
+  // JoFotara is always JOD (fils = 0.001). Do not grow tolerance with line count — that hid payable ≠ charged total.
+  if (Math.abs(Number(built.totals.payable) - (Number(inv.totalAmount) || 0)) > 0.001 + 1e-9) {
     return { ok: false, issues: [{ code: 'totals_mismatch' }] };
   }
   return { ok: true, doc };

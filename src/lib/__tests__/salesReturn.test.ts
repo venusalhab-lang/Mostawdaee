@@ -87,4 +87,22 @@ describe('refund split', () => {
     expect(splitRefund(credit, withDebt, 5)).toEqual({ vault: 9, vaultCurrency: 'USD', debt: 5, debtCurrency: 'USD', external: 0 });
     expect(splitRefund(credit, withDebt, -3)).toEqual({ vault: 14, vaultCurrency: 'USD', debt: 0, debtCurrency: 'USD', external: 0 });
   });
+
+  it('returns the cash slice of a split tender and lowers the on-account remainder', () => {
+    const split = sale({
+      paymentMethod: 'credit',
+      paidAmount: 30,
+      totalAmount: 50,
+      debtAmount: 20,
+      debtCurrency: 'JOD',
+      vaultPosted: true,
+    });
+    const full = { subtotal: 50, discount: 0, taxAmount: 0, totalAmount: 50, debtAmount: 20 };
+    expect(splitRefund(split, full, 20)).toEqual({
+      vault: 30, vaultCurrency: 'JOD', debt: 20, debtCurrency: 'JOD', external: 0,
+    });
+    expect(splitRefund(split, full, 5)).toEqual({
+      vault: 45, vaultCurrency: 'JOD', debt: 5, debtCurrency: 'JOD', external: 0,
+    });
+  });
 });

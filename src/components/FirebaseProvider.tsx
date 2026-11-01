@@ -1,12 +1,14 @@
 import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import { OperationType, handleFirestoreError, User, signInWithPopup, signOut, auth, GoogleAuthProvider, googleProvider } from '../services/firebase';
+import { OperationType, handleFirestoreError, type User } from '../lib/storeErrors';
+import { clearDriveConnect, finishDriveConnect, isDriveConnectPending } from '../lib/driveConnect';
 import { supabase } from '../supabaseClient';
 import { SYNC_PROBLEM_EVENT, collection, db, deleteDoc, doc, onSnapshot, resetSync, runTransaction, setDoc, updateDoc } from '../lib/supabaseDocs';
 import { Product, AppSettings, Transaction, Employee, Customer, CustomerTransaction, VaultTransaction, Vault, StockMovement, Invoice, Currency, PayrollRecord, Warehouse, AuditLog, Supplier, SupplierTransaction, Shift, TradeOrder } from '../types';
 import { toast } from 'sonner';
 import { setDriveAccessToken } from '../services/googleDrive';
-import { completeOAuthSessionFromLocation, urlLooksLikeOAuthCallback } from '../lib/completeOAuthSession';
+import { completeOAuthSessionFromLocation, oauthProviderError, urlLooksLikeOAuthCallback } from '../lib/completeOAuthSession';
 import { clearUserCache, migrateLegacyUserCache, readUserCache, removeUserCache, writeUserCache } from '../lib/userStorage';
+import { readHeldBills } from '../lib/heldBills';
 import { computeStockStatus, roundQty } from '../lib/stock';
 import { sameSku } from '../lib/productLookup';
 import { mergeProductEdit } from '../lib/productEdit';
@@ -16,16 +18,33 @@ import { snapshotLineCosts, weightedAverageCost } from '../lib/profits';
 import { planStockReversal, quantitiesByProduct } from '../lib/invoiceReversal';
 import { planSalesReturn, splitRefund, type ReturnLineRequest } from '../lib/salesReturn';
 import { costAfterReturn, planPurchaseReturn, returnedCostByProduct, splitPurchaseRefund } from '../lib/purchaseReturn';
-import { findSupplierByName, owedBalances, purchasePayment, supplierBalance, withBalance } from '../lib/suppliers';
+import { findSupplierByName, owedBalances, purchaseDeleteRequiresSupplierLedger, purchasePayment, supplierBalance, withBalance } from '../lib/suppliers';
 import { lineUnits } from '../lib/packs';
-import { cashDifference, openShiftOf, summarizeShift } from '../lib/shifts';
-import { QueuedInvoice, belongsToStore, canQueueOffline, enqueueInvoice, isOfflineError, localSaleShortages, readQueue, writeQueue } from '../lib/offlineQueue';
+import { canOpenShift, cashDifference, openShiftOf, summarizeShift } from '../lib/shifts';
+import {
+  QueuedInvoice,
+  applyQueuedSalesToProducts,
+  applyQueuedSalesToVault,
+  belongsToStore,
+  canDeferSaleToQueue,
+  canQueueOffline,
+  enqueueInvoice,
+  isOfflineError,
+  localSaleShortages,
+  mergeQueuedInvoices,
+  mergeQueuedVaultRecords,
+  readQueue,
+  withQueueLock,
+  writeQueue,
+} from '../lib/offlineQueue';
 import { type Workspace, currentWorkspace, ensureWorkspace, refreshWorkspace, subscribeWorkspace } from '../lib/workspace';
 import { type WorkspaceAction, can as roleCan, canOpenScreen as roleCanOpenScreen } from '../lib/roles';
 import type { PlatformRole } from '../lib/platformStaff';
 import { fetchPlatformRole } from '../lib/adminSubscriptionApi';
 import { setPasswordRecovery } from '../lib/passwordRecovery';
 import { INSUFFICIENT_VAULT_FUNDS, applyVaultDelta, buildVaultDoc, planInvoiceVaultEntry, readVaultBalances, roundForCurrency } from '../lib/vaultMath';
+import { salePayment } from '../lib/salesPayment';
+import { checkManualArIncrease, formatManualArNote } from '../lib/customerLedger';
 
 // Recursively strips any properties with 'undefined' values, since Firestore errors if passed 'undefined'.
 export const PRODUCT_NOT_FOUND = 'Product not found';
@@ -82,7 +101,14 @@ interface FirebaseContextType {
   auditLogs: AuditLog[];
   vault: Vault | null;
   saveSettings: (settings: AppSettings) => Promise<void>;
-  saveProduct: (product: Product, options?: { reason?: string; skipMovement?: boolean; baseQuantity?: number; baseProduct?: Product }) => Promise<void>;
+  saveProduct: (product: Product, options?: {
+    reason?: string;
+    skipMovement?: boolean;
+    baseQuantity?: number;
+    baseProduct?: Product;
+    /** Set quantity to the submitted value only if the stored book still equals `baseQuantity`. */
+    absoluteQuantity?: boolean;
+  }) => Promise<void>;
   deleteProduct: (id: string) => Promise<void>;
   stockMovements: StockMovement[];
   /** Resolves with the invoice number actually stored (the server may add a suffix if another device used it). */
@@ -106,6 +132,14 @@ interface FirebaseContextType {
   deleteCustomerLedgerTransaction: (txId: string, options?: { reverseVault?: boolean }) => Promise<void>;
   saveWarehouse: (warehouse: Warehouse) => Promise<void>;
   transferStock: (productId: string, toWarehouseId: string, quantity: number) => Promise<void>;
+  /**
+   * Applies a stocktake in one transaction: every counted line is written together or none are.
+   * Each line must still match `expectedQty` on the server (book drift aborts the whole apply).
+   */
+  applyStocktake: (input: {
+    auditNumber: string;
+    lines: Array<{ productId: string; productName: string; expectedQty: number; actualQty: number; movementLabel: string }>;
+  }) => Promise<void>;
   deleteWarehouse: (id: string) => Promise<void>;
   /** `draftId` makes a retry of the same entry a no-op instead of a second payment. */
   recordCustomerLedgerTransaction: (customerId: string, amount: number, type: 'invoice' | 'payment', notes: string, syncToVault?: boolean, draftId?: string) => Promise<void>;
@@ -125,7 +159,6 @@ interface FirebaseContextType {
   closeShift: (input: { id: string; counted: Partial<Record<Currency, number>>; notes?: string }) => Promise<Shift>;
   recalibrateVault: (newBalance: number, currency: Currency, reason: string) => Promise<void>;
   logUserActivity: (action: string, details: string, category: 'product' | 'invoice' | 'settings' | 'employee' | 'customer' | 'warehouse' | 'vault' | 'payroll') => Promise<void>;
-  login: () => Promise<void>;
   logout: () => Promise<void>;
   /** The store this account works in; null until it is known for the signed-in user. */
   workspace: Workspace | null;
@@ -153,10 +186,10 @@ const FirebaseContext = createContext<FirebaseContextType | undefined>(undefined
 
 function syncRejectionMessage(code: string | undefined): string | null {
   const ar = typeof document === 'undefined' || document.documentElement.dir !== 'ltr';
-  if (code === 'schema-missing') {
+  if (code === 'schema-missing' || code === 'collection-not-installed') {
     return ar
-      ? 'المزامنة السحابية غير مفعّلة على الخادم بعد، فلم يُحفظ هذا التغيير في السحابة. تواصل مع الدعم.'
-      : 'Cloud sync is not enabled on the server yet, so this change was not saved to the cloud. Contact support.';
+      ? 'قاعدة البيانات غير مكتملة بعد (شغّل ملفات Supabase SQL). لم يُحفظ هذا التغيير. تواصل مع الدعم.'
+      : 'The database schema is incomplete (run the Supabase SQL files). This change was not saved. Contact support.';
   }
   if (code === 'unauthenticated') {
     return ar
@@ -288,13 +321,12 @@ async function commitSalesReturn(uid: string, input: SalesReturnInput, opts: Com
       if (!planned.ok) throw fail(`Return rejected: ${planned.error.code}`, 'return-invalid', { detail: planned.error });
       const { plan } = planned;
 
-      const missingProducts: string[] = [];
+      // Fail closed: never refund money/AR if any returned product is gone (purchase returns already refuse).
       for (const [productId, { qty, description }] of quantitiesByProduct(plan.items)) {
         const productRef = doc(db, 'users', uid, 'inventory', productId);
         const productSnap = await transaction.get(productRef);
         if (!productSnap.exists()) {
-          missingProducts.push(description || productId);
-          continue;
+          throw fail(`${PRODUCT_NOT_FOUND}: ${description || productId}`, 'product-not-found', { productName: description || productId });
         }
         const product = productSnap.data() as Product;
         const quantity = roundQty((Number(product.quantity) || 0) + qty);
@@ -303,6 +335,7 @@ async function commitSalesReturn(uid: string, input: SalesReturnInput, opts: Com
           status: computeStockStatus(quantity, product.lowStockThreshold, opts.lowStockThreshold),
         });
       }
+      const missingProducts: string[] = [];
 
       let currentDebt = 0;
       const customerRef = original.customerId ? doc(db, 'users', uid, 'customers', original.customerId) : null;
@@ -387,8 +420,10 @@ async function commitSalesReturn(uid: string, input: SalesReturnInput, opts: Com
     return await run(claim);
   } catch (error: any) {
     if (!claim || error?.code !== 'collection-not-installed') throw error;
-    invoiceNumberClaimsEnabled = false;
-    return run(false);
+    throw Object.assign(
+      new Error('Invoice numbering is not installed on the database. Run supabase_production_setup.sql.'),
+      { code: 'collection-not-installed' },
+    );
   }
 }
 
@@ -523,9 +558,11 @@ async function commitInvoice(uid: string, invoice: Invoice, opts: CommitInvoiceO
     return await commitInvoiceOnce(uid, invoice, opts, claim);
   } catch (error: any) {
     if (!claim || error?.code !== 'collection-not-installed') throw error;
-    invoiceNumberClaimsEnabled = false;
-    console.warn('[commitInvoice] invoice_numbers is not installed; saving without a number claim. Run supabase_production_setup.sql.');
-    return commitInvoiceOnce(uid, invoice, opts, false);
+    // Fail closed: unique invoice numbers require supabase_production_setup.sql.
+    throw Object.assign(
+      new Error('Invoice numbering is not installed on the database. Run supabase_production_setup.sql.'),
+      { code: 'collection-not-installed' },
+    );
   }
 }
 
@@ -579,15 +616,22 @@ async function commitInvoiceOnce(uid: string, requested: Invoice, opts: CommitIn
         result.negativeStock.push(productData.name);
       }
       const newQuantity = roundQty(invoice.type === 'sale' ? currentQty - movedQty : currentQty + movedQty);
-      const newCost = invoice.type === 'purchase'
-        ? weightedAverageCost(
-            productData,
-            movedQty,
-            invoice.items.filter((i) => i.productId === productId).reduce((sum, i) => sum + (Number(i.total) || 0), 0) * costScale,
-            invoice.currency,
-            opts.defaultCurrency,
-          )
-        : null;
+      const productCurrency = productData.currency || opts.defaultCurrency;
+      let newCost: number | null = null;
+      let adoptPurchaseCurrency = false;
+      if (invoice.type === 'purchase') {
+        const receivedTotal = invoice.items
+          .filter((i) => i.productId === productId)
+          .reduce((sum, i) => sum + (Number(i.total) || 0), 0) * costScale;
+        newCost = weightedAverageCost(productData, movedQty, receivedTotal, invoice.currency, opts.defaultCurrency);
+        if (newCost === null && productCurrency !== invoice.currency && currentQty > 0 && (Number(productData.unitCost ?? productData.costPrice) || 0) > 0) {
+          throw Object.assign(
+            new Error(`Purchase currency ${invoice.currency} differs from product cost currency ${productCurrency} for ${productData.name}`),
+            { code: 'currency-mismatch', productName: productData.name },
+          );
+        }
+        adoptPurchaseCurrency = productCurrency !== invoice.currency && newCost !== null;
+      }
       if (newCost !== null) {
         const before = Number(productData.unitCost ?? productData.costPrice);
         costChanges[productId] = { before: Number.isFinite(before) ? before : 0, after: newCost };
@@ -596,6 +640,7 @@ async function commitInvoiceOnce(uid: string, requested: Invoice, opts: CommitIn
         quantity: newQuantity,
         status: computeStockStatus(newQuantity, productData.lowStockThreshold, opts.lowStockThreshold),
         ...(newCost !== null ? { unitCost: newCost } : {}),
+        ...(adoptPurchaseCurrency ? { currency: invoice.currency } : {}),
       });
     }
     // Credit, card and wallet invoices don't touch the cash vault.
@@ -619,40 +664,52 @@ async function commitInvoiceOnce(uid: string, requested: Invoice, opts: CommitIn
     }
 
     // A credit sale and its customer debt are one write: neither can exist without the other.
+    // Split tender: vault already took `paid`; only the unpaid slice goes on the customer.
     if (invoice.type === 'sale' && invoice.paymentMethod === 'credit') {
       if (!invoice.customerId) {
         throw Object.assign(new Error('Credit sales need a registered customer'), { code: 'customer-required' });
       }
-      const customerRef = doc(db, 'users', uid, 'customers', invoice.customerId);
-      const customerSnap = await transaction.get(customerRef);
-      if (!customerSnap.exists()) {
-        throw Object.assign(new Error('Customer not found'), { code: 'customer-not-found' });
+      const { paid, owed } = salePayment(invoice);
+      invoiceToWrite.paidAmount = paid;
+      if (owed > 0) {
+        const customerRef = doc(db, 'users', uid, 'customers', invoice.customerId);
+        const customerSnap = await transaction.get(customerRef);
+        if (!customerSnap.exists()) {
+          throw Object.assign(new Error('Customer not found'), { code: 'customer-not-found' });
+        }
+        const customer = customerSnap.data() as Customer;
+        const debtCurrency = (customer.currency || invoice.currency) as Currency;
+        const debtAmount = invoice.debtCurrency === debtCurrency && Number.isFinite(invoice.debtAmount)
+          ? Number(invoice.debtAmount)
+          : debtCurrency === invoice.currency ? owed : null;
+        if (debtAmount === null) {
+          throw Object.assign(new Error('Customer currency changed; reopen the invoice'), { code: 'customer-currency-changed' });
+        }
+        if (!(debtAmount > 0)) {
+          throw Object.assign(new Error('Credit remainder must be positive'), { code: 'debt-invalid' });
+        }
+        const remaining = roundForCurrency((Number(customer.totalDebt) || 0) + debtAmount, debtCurrency);
+        transaction.update(customerRef, { totalDebt: remaining });
+        const txId = `inv-${invoice.id}`;
+        const ledgerEntry: CustomerTransaction = {
+          id: txId,
+          transactionId: txId,
+          customerId: invoice.customerId,
+          type: 'invoice',
+          invoiceId: invoice.id,
+          amount: debtAmount,
+          currency: debtCurrency,
+          exchangeRate: owed > 0 ? debtAmount / owed : 1,
+          date: new Date(invoice.date || Date.now()).toISOString(),
+          notes: paid > 0
+            ? `${opts.ar ? 'بيع نقد+آجل' : 'Cash + credit sale'} #${invoice.invoiceNumber}`
+            : `${opts.ar ? 'فاتورة بيع آجل' : 'Credit sale'} #${invoice.invoiceNumber}`,
+          remainingBalanceAfter: remaining,
+        };
+        transaction.set(doc(db, 'users', uid, 'customer_transactions', txId), removeUndefined(ledgerEntry));
+        invoiceToWrite.debtAmount = debtAmount;
+        invoiceToWrite.debtCurrency = debtCurrency;
       }
-      const customer = customerSnap.data() as Customer;
-      const debtCurrency = (customer.currency || invoice.currency) as Currency;
-      const debtAmount = invoice.debtCurrency === debtCurrency && Number.isFinite(invoice.debtAmount)
-        ? Number(invoice.debtAmount)
-        : debtCurrency === invoice.currency ? invoice.totalAmount : null;
-      if (debtAmount === null) {
-        throw Object.assign(new Error('Customer currency changed; reopen the invoice'), { code: 'customer-currency-changed' });
-      }
-      const remaining = roundForCurrency((Number(customer.totalDebt) || 0) + debtAmount, debtCurrency);
-      transaction.update(customerRef, { totalDebt: remaining });
-      const txId = `inv-${invoice.id}`;
-      const ledgerEntry: CustomerTransaction = {
-        id: txId,
-        transactionId: txId,
-        customerId: invoice.customerId,
-        type: 'invoice',
-        invoiceId: invoice.id,
-        amount: debtAmount,
-        currency: debtCurrency,
-        exchangeRate: invoice.totalAmount > 0 ? debtAmount / invoice.totalAmount : 1,
-        date: new Date(invoice.date || Date.now()).toISOString(),
-        notes: `${opts.ar ? 'فاتورة بيع آجل' : 'Credit sale'} #${invoice.invoiceNumber}`,
-        remainingBalanceAfter: remaining,
-      };
-      transaction.set(doc(db, 'users', uid, 'customer_transactions', txId), removeUndefined(ledgerEntry));
     }
 
     // The unpaid part of a credit purchase is owed to the supplier in the purchase currency, in the same write.
@@ -755,7 +812,15 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     // Initialize with current session (if any) with defensive validation
     (async () => {
       try {
-        if (urlLooksLikeOAuthCallback()) {
+        const returnedFromGoogle = urlLooksLikeOAuthCallback();
+        const driveError = isDriveConnectPending() ? oauthProviderError(window.location.href) : null;
+        if (driveError) {
+          clearDriveConnect();
+          toast.error(document.documentElement.dir === 'ltr'
+            ? `Google Drive was not connected: ${driveError}`
+            : `لم يتم ربط Google Drive: ${driveError}`);
+        }
+        if (returnedFromGoogle) {
           try {
             await completeOAuthSessionFromLocation();
           } catch (oauthError) {
@@ -770,6 +835,9 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
         const { data, error: sessionError } = await supabase.auth.getSession();
         let session = data?.session;
+        if (session && (await finishDriveConnect(session, returnedFromGoogle)) === 'wrong-account') {
+          session = (await supabase.auth.getSession()).data.session;
+        }
 
         // Offline with an expired token: Supabase keeps the stored session but cannot refresh it.
         // Keep the merchant signed in on this device; writes go to the offline queue until it refreshes.
@@ -811,6 +879,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         if (event === 'INITIAL_SESSION') return;
 
         if (session && session.access_token) {
+          // A Google account other than the store's came back from "connect Drive": the store session is being restored.
+          if ((await finishDriveConnect(session)) === 'wrong-account') return;
           const mapped = mapSessionUser(session);
           if (mapped) {
             if (lastUidRef.current && lastUidRef.current !== mapped.uid) {
@@ -829,7 +899,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         clearUserCache(lastUidRef.current);
         lastUidRef.current = null;
         resetSync();
-        try { await signOut(auth); } catch (e) {}
+        clearDriveConnect();
+        setDriveAccessToken('');
         setUser(null);
         setLoading(false);
         resetLocalBusinessState();
@@ -880,9 +951,10 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const uid = user.uid;
     lastUidRef.current = uid;
     migrateLegacyUserCache(uid);
+    const bootQueue = readQueue(uid);
     setSettings(readUserCache(uid, 'settings', null));
-    setProducts(readUserCache(uid, 'products', []));
-    setInvoices(readUserCache(uid, 'invoices', []));
+    setProducts(applyQueuedSalesToProducts(readUserCache(uid, 'products', []), bootQueue));
+    setInvoices(mergeQueuedInvoices(readUserCache(uid, 'invoices', []), bootQueue));
     setEmployees(readUserCache(uid, 'employees', []));
     setPayrollRecords(readUserCache(uid, 'payroll', []));
     setCustomers(readUserCache(uid, 'customers', []));
@@ -891,9 +963,10 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     setSupplierTransactions(readUserCache(uid, 'supplier_transactions', []));
     setShifts(readUserCache(uid, 'shifts', []));
     setOrders(readUserCache(uid, 'orders', []));
-    setVaultTransactions(readUserCache(uid, 'vault_records', []));
+    const bootVault = readUserCache(uid, 'vault', null);
+    setVaultTransactions(mergeQueuedVaultRecords(readUserCache(uid, 'vault_records', []), bootQueue, undefined, bootVault));
     setWarehouses(readUserCache(uid, 'warehouses', []));
-    setVault(readUserCache(uid, 'vault', null));
+    setVault(applyQueuedSalesToVault(bootVault, bootQueue) as Vault | null);
     setAuditLogs(readUserCache(uid, 'audit_logs', []));
     let isMounted = true;
     const onSyncProblem = (event: Event) => {
@@ -1085,7 +1158,10 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       if (!isMounted) return;
       const items: Product[] = [];
       snap.forEach(doc => items.push({ ...doc.data() } as Product));
-      setProducts(items);
+      // Cache the server snapshot only. Queue deductions are applied for display, never persisted
+      // into the cache — otherwise a reload would subtract the same offline sales twice.
+      const merged = applyQueuedSalesToProducts(items, readQueue(uid), currentWorkspace()?.ownerId);
+      setProducts(merged);
       try {
         writeUserCache(uid, 'products', items);
       } catch (e) {
@@ -1108,7 +1184,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       if (!isMounted) return;
       const items: Invoice[] = [];
       snap.forEach(doc => items.push({ ...doc.data() } as Invoice));
-      const sorted = items.sort((a,b) => b.date - a.date);
+      const sorted = mergeQueuedInvoices(items.sort((a,b) => b.date - a.date), readQueue(uid), currentWorkspace()?.ownerId);
       setInvoices(sorted);
       writeUserCache(uid, 'invoices', sorted);
     }, (error) => {
@@ -1257,9 +1333,17 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       if (!isMounted) return;
       const items: VaultTransaction[] = [];
       snap.forEach(doc => items.push({ ...doc.data() } as VaultTransaction));
-      const sorted = items.sort((a,b) => b.timestamp - a.timestamp);
+      const serverRows = items.sort((a, b) => b.timestamp - a.timestamp);
+      const sorted = mergeQueuedVaultRecords(
+        serverRows,
+        readQueue(uid),
+        currentWorkspace()?.ownerId,
+        // Prefer live vault state when present; otherwise the last server vault cache.
+        vault || readUserCache(uid, 'vault', null),
+      );
       setVaultTransactions(sorted);
-      writeUserCache(uid, 'vault_records', sorted);
+      // Cache server rows only — boot merges the queue once.
+      writeUserCache(uid, 'vault_records', serverRows);
     }, (error) => {
       console.error(`[FirebaseProvider] VaultTransactions stream error:`, error);
       if (isMounted) setLoading(false);
@@ -1276,9 +1360,15 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       if (!isMounted) return;
       if (snap.exists()) {
         const snapData = snap.data();
-        const stateObj = buildVaultDoc(readVaultBalances(snapData), snapData.lastUpdated || Date.now());
+        const serverVault = buildVaultDoc(readVaultBalances(snapData), snapData.lastUpdated || Date.now());
+        const stateObj = applyQueuedSalesToVault(
+          serverVault,
+          readQueue(uid),
+          currentWorkspace()?.ownerId,
+        ) as Vault;
         setVault(stateObj);
-        writeUserCache(uid, 'vault', stateObj);
+        // Persist the server vault only; boot re-applies the offline queue once.
+        writeUserCache(uid, 'vault', serverVault);
       } else {
         const defaultVault = buildVaultDoc(readVaultBalances({}));
         setDoc(vaultStateRef, defaultVault).catch(e => console.error("Error initializing vault", e));
@@ -1336,51 +1426,68 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const syncOfflineInvoices = async () => {
       if (syncing || !isMounted) return;
       if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
-      const queue = readQueue(uid);
-      if (queue.length === 0) return;
       const store = currentWorkspace();
       if (!store || store.userId !== uid) return;
+      if (readQueue(uid).length === 0) return;
       syncing = true;
       const current = latestSettingsRef.current;
       const ar = current?.defaultLanguage !== 'en';
-      const remaining: QueuedInvoice[] = [];
       const negative = new Set<string>();
       const missing = new Set<string>();
       const needsReview: string[] = [];
       let otherStore = 0;
       let sent = 0;
       try {
-        for (let i = 0; i < queue.length; i++) {
-          const entry = queue[i];
-          if (!belongsToStore(entry, store.ownerId)) {
-            remaining.push(entry);
-            otherStore += 1;
-            continue;
-          }
-          try {
-            const r = await commitInvoice(uid, entry.invoice, {
-              lowStockThreshold: current?.lowStockThreshold,
-              defaultCurrency: current?.currency || 'JOD',
-              allowNegativeStock: true,
-              allowMissingProducts: true,
-              ar: current?.defaultLanguage !== 'en',
-            });
-            sent += 1;
-            r.negativeStock.forEach((name) => negative.add(name));
-            r.missingProducts?.forEach((name) => missing.add(name));
-          } catch (err: any) {
-            if (isOfflineError(err) || err?.code === 'unauthenticated') {
-              remaining.push(...queue.slice(i));
-              break;
+        await withQueueLock(uid, async () => {
+          const queue = readQueue(uid);
+          if (queue.length === 0) return;
+          const remaining: QueuedInvoice[] = [];
+          for (let i = 0; i < queue.length; i++) {
+            let entry = queue[i];
+            // Pre-storeId queue rows: only the store owner may claim them into this store.
+            if (!entry.storeId && uid === store.ownerId) {
+              entry = { ...entry, storeId: store.ownerId };
             }
-            remaining.push({ ...entry, attempts: entry.attempts + 1, lastError: String(err?.message || err) });
-            needsReview.push(entry.invoice.invoiceNumber);
+            if (!belongsToStore(entry, store.ownerId)) {
+              remaining.push(entry);
+              otherStore += 1;
+              continue;
+            }
+            try {
+              const r = await commitInvoice(uid, entry.invoice, {
+                lowStockThreshold: current?.lowStockThreshold,
+                defaultCurrency: current?.currency || 'JOD',
+                // Fail closed: conflicted offline sales stay queued for review, not negative stock.
+                allowNegativeStock: false,
+                allowMissingProducts: false,
+                ar: current?.defaultLanguage !== 'en',
+              });
+              sent += 1;
+              r.negativeStock.forEach((name) => negative.add(name));
+              r.missingProducts?.forEach((name) => missing.add(name));
+            } catch (err: any) {
+              if (canDeferSaleToQueue(err)) {
+                remaining.push(...queue.slice(i));
+                break;
+              }
+              if (err?.code === 'insufficient-stock' || err?.code === 'product-not-found') {
+                remaining.push({ ...entry, attempts: entry.attempts + 1, lastError: String(err?.message || err) });
+                needsReview.push(entry.invoice.invoiceNumber);
+                if (err?.code === 'insufficient-stock' && err?.productName) negative.add(String(err.productName));
+                if (err?.code === 'product-not-found' && err?.productName) missing.add(String(err.productName));
+                continue;
+              }
+              remaining.push({ ...entry, attempts: entry.attempts + 1, lastError: String(err?.message || err) });
+              needsReview.push(entry.invoice.invoiceNumber);
+            }
           }
-        }
+          const processed = new Set(queue.map((q) => q.invoice.id));
+          const addedMeanwhile = readQueue(uid).filter((q) => !processed.has(q.invoice.id));
+          writeQueue(uid, [...remaining, ...addedMeanwhile]);
+        }, { required: true });
+      } catch (err: any) {
+        if (err?.code !== 'queue-locked') console.warn('[offline sync] unexpected error:', err);
       } finally {
-        const processed = new Set(queue.map((q) => q.invoice.id));
-        const addedMeanwhile = readQueue(uid).filter((q) => !processed.has(q.invoice.id));
-        writeQueue(uid, [...remaining, ...addedMeanwhile]);
         syncing = false;
       }
       if (!isMounted) return;
@@ -1388,14 +1495,14 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         toast.success(ar ? `أُرسلت ${sent} عملية بيع حُفظت أثناء انقطاع الاتصال.` : `${sent} sale(s) taken offline were sent.`);
       }
       if (negative.size > 0) {
-        toast.warning(ar
-          ? `مبيعات دون اتصال جعلت مخزون هذه الأصناف سالباً، راجع الجرد: ${Array.from(negative).join('، ')}`
-          : `Offline sales made stock negative for: ${Array.from(negative).join(', ')}. Please recount.`, { duration: 12000 });
+        toast.error(ar
+          ? `مبيعات محفوظة بلا اتصال لم تُرسل لأن المخزون غير كافٍ. راجع الجرد ثم أعد المحاولة: ${Array.from(negative).join('، ')}`
+          : `Queued offline sales were not sent — insufficient stock. Recount, then retry: ${Array.from(negative).join(', ')}`, { duration: 12000 });
       }
       if (missing.size > 0) {
-        toast.warning(ar
-          ? `سُجّلت مبيعات دون اتصال لأصناف حُذفت من المخزون لاحقاً، فلم يتغيّر مخزونها ولا تُعرف تكلفتها: ${Array.from(missing).join('، ')}`
-          : `Offline sales were recorded for items deleted from inventory since; their stock was not changed and their cost is unknown: ${Array.from(missing).join(', ')}`, { duration: 12000 });
+        toast.error(ar
+          ? `مبيعات محفوظة بلا اتصال لم تُرسل لأن الصنف لم يعد في المخزون: ${Array.from(missing).join('، ')}`
+          : `Queued offline sales were not sent — product no longer in inventory: ${Array.from(missing).join(', ')}`, { duration: 12000 });
       }
       if (otherStore > 0) {
         toast.error(ar
@@ -1471,20 +1578,6 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
   };
 
-  const login = async () => {
-    try {
-      const result = await signInWithPopup(auth, googleProvider);
-      const credential = GoogleAuthProvider.credentialFromResult(result);
-      if (credential?.accessToken) {
-        setDriveAccessToken(credential.accessToken);
-        toast.success(settings?.defaultLanguage === 'ar' ? "تم حفظ الوصول إلى Google Drive" : "Google Drive access granted");
-      }
-    } catch (error) {
-      toast.error("Login failed");
-      console.error(error);
-    }
-  };
-
   const logout = async () => {
     const uid = lastUidRef.current || user?.uid;
     const ar = settings?.defaultLanguage !== 'en';
@@ -1498,9 +1591,17 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         { id: 'logout-pending', duration: 10000 });
       throw Object.assign(new Error('Pending offline sales'), { code: 'pending-offline', notified: true });
     }
+    const held = uid ? readHeldBills(uid).length : 0;
+    if (held > 0) {
+      toast.error(ar
+        ? `توجد ${held} فاتورة معلّقة على هذا الجهاز. أتمم بيعها أو احذفها من نقطة البيع قبل تسجيل الخروج.`
+        : `${held} held bill(s) are still on this device. Finish or discard them in POS before signing out.`,
+        { id: 'logout-held', duration: 10000 });
+      throw Object.assign(new Error('Held bills pending'), { code: 'pending-held', notified: true });
+    }
     clearUserCache(uid);
     lastUidRef.current = null;
-    try { await signOut(auth); } catch { /* legacy Firebase session */ }
+    clearDriveConnect();
     // Only this device: other devices of the store (a cashier's phone) stay signed in.
     await supabase.auth.signOut({ scope: 'local' });
     setDriveAccessToken('');
@@ -1603,10 +1704,17 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   /**
    * `baseQuantity` is the quantity the caller started from (e.g. when the edit form opened).
-   * Only the difference is applied to the stored quantity, so a sale made meanwhile is never erased.
+   * By default only the difference is applied to the stored quantity, so a sale made meanwhile is never erased.
+   * `absoluteQuantity` sets the submitted quantity when the stored book still equals `baseQuantity` (import / set-to-N).
    * `baseProduct` is the whole product as the form loaded it: fields the user did not touch keep the stored value.
    */
-  const saveProduct = async (product: Product, options?: { reason?: string; skipMovement?: boolean; baseQuantity?: number; baseProduct?: Product }) => {
+  const saveProduct = async (product: Product, options?: {
+    reason?: string;
+    skipMovement?: boolean;
+    baseQuantity?: number;
+    baseProduct?: Product;
+    absoluteQuantity?: boolean;
+  }) => {
     if (!user) throw guestWriteBlocked();
     // Determine action for logging before state updates
     const exists = products.some(p => p.id === product.id);
@@ -1633,6 +1741,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
     const previousProduct = products.find(p => p.id === product.id);
     const uid = user.uid;
+    const ar = settings?.defaultLanguage !== 'en';
     try {
       if (options?.skipMovement) {
         // Backup restore: the saved document is written exactly as it was.
@@ -1647,10 +1756,23 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           let quantity = roundQty(Number(product.quantity) || 0);
           let fields = product;
           if (stored) {
-            const base = options?.baseQuantity ?? options?.baseProduct?.quantity ?? (Number(previousProduct?.quantity) || 0);
-            quantity = roundQty((Number(stored.quantity) || 0) + (quantity - base));
+            const base = roundQty(options?.baseQuantity ?? options?.baseProduct?.quantity ?? (Number(previousProduct?.quantity) || 0));
+            const book = roundQty(Number(stored.quantity) || 0);
+            if (options?.absoluteQuantity) {
+              if (book !== base) {
+                throw Object.assign(
+                  new Error(ar
+                    ? `كمية «${product.name}» تغيّرت (المتوفر الآن ${book}).`
+                    : `Quantity for “${product.name}” changed (now ${book}).`),
+                  { code: 'stock-changed', available: book },
+                );
+              }
+              quantity = roundQty(Number(product.quantity) || 0);
+            } else {
+              quantity = roundQty(book + (quantity - base));
+            }
             if (quantity < 0) {
-              throw Object.assign(new Error('Stock would go negative'), { code: 'negative-stock', available: Number(stored.quantity) || 0 });
+              throw Object.assign(new Error('Stock would go negative'), { code: 'negative-stock', available: book });
             }
             if (options?.baseProduct) fields = mergeProductEdit(options.baseProduct, product, stored);
           }
@@ -1673,6 +1795,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         try { writeUserCache(user.uid, 'products', reverted); } catch (e) {}
         return reverted;
       });
+      if (error?.code === 'stock-changed') throw error;
       throw productWriteError(error);
     }
   };
@@ -1774,6 +1897,90 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     );
   };
 
+  const applyStocktake = async (input: {
+    auditNumber: string;
+    lines: Array<{ productId: string; productName: string; expectedQty: number; actualQty: number; movementLabel: string }>;
+  }) => {
+    if (!user) throw guestWriteBlocked();
+    const uid = user.uid;
+    const ar = settings?.defaultLanguage !== 'en';
+    const lines = input.lines.filter((line) => roundQty(line.expectedQty) !== roundQty(line.actualQty));
+    if (!lines.length) return;
+
+    const updatedById = new Map<string, Product>();
+    const movements: StockMovement[] = [];
+
+    try {
+      await runTransaction(db, async (transaction) => {
+        // All reads first (required by the doc transaction model).
+        const snaps = await Promise.all(
+          lines.map((line) => transaction.get(doc(db, 'users', uid, 'inventory', line.productId))),
+        );
+
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i];
+          const snap = snaps[i];
+          if (!snap.exists()) {
+            throw Object.assign(
+              new Error(ar ? `الصنف «${line.productName}» لم يعد في المخزون` : `“${line.productName}” is no longer in stock`),
+              { code: 'product-missing', productName: line.productName },
+            );
+          }
+          const stored = { ...(snap.data() as Product), id: line.productId };
+          const book = roundQty(Number(stored.quantity) || 0);
+          const expected = roundQty(line.expectedQty);
+          const actual = roundQty(line.actualQty);
+          if (actual < 0) {
+            throw Object.assign(new Error(ar ? 'الكمية المعدودة لا يمكن أن تكون سالبة' : 'Counted quantity cannot be negative'), { code: 'invalid-qty' });
+          }
+          if (book !== expected) {
+            throw Object.assign(
+              new Error(ar
+                ? `كمية «${line.productName}» تغيّرت بعد بدء الجرد (المتوفر الآن ${book}).`
+                : `Quantity for “${line.productName}” changed after the count started (now ${book}).`),
+              { code: 'stock-changed', productName: line.productName, available: book },
+            );
+          }
+          if (book === actual) continue;
+
+          const saved: Product = {
+            ...stored,
+            quantity: actual,
+            status: computeStockStatus(actual, stored.lowStockThreshold, settings?.lowStockThreshold),
+          };
+          transaction.set(doc(db, 'users', uid, 'inventory', line.productId), removeUndefined(saved));
+          const movement = buildStockMovement(stored, saved, line.movementLabel || `${ar ? 'جرد' : 'Stocktake'} ${input.auditNumber}`);
+          if (movement) {
+            transaction.set(doc(db, 'users', uid, 'stock_movements', movement.id), removeUndefined(movement));
+            movements.push(movement);
+          }
+          updatedById.set(saved.id, saved);
+        }
+      });
+    } catch (error: any) {
+      if (error?.code === 'stock-changed' || error?.code === 'product-missing' || error?.code === 'invalid-qty') {
+        throw error;
+      }
+      throw productWriteError(error);
+    }
+
+    if (updatedById.size) {
+      setProducts((prev) => {
+        const next = prev.map((p) => updatedById.get(p.id) || p);
+        try { writeUserCache(uid, 'products', next); } catch { /* ignore */ }
+        return next;
+      });
+    }
+    if (movements.length) setStockMovements((prev) => [...movements, ...prev]);
+    logUserActivity(
+      ar ? 'اعتماد جرد' : 'Apply stocktake',
+      ar
+        ? `اعتُمد الجرد ${input.auditNumber} · ${updatedById.size} صنف`
+        : `Stocktake ${input.auditNumber} applied · ${updatedById.size} products`,
+      'product',
+    );
+  };
+
   const deleteProduct = async (id: string) => {
     const prod = products.find(p => p.id === id);
     const prodName = prod ? prod.name : id;
@@ -1844,7 +2051,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       if (status === 'saved') logInvoice(invoiceNumber);
       return invoiceNumber;
     } catch (error: any) {
-      if (!isOfflineError(error)) {
+      if (!canDeferSaleToQueue(error)) {
         const rejection = syncRejectionMessage(error?.code);
         if (rejection) throw Object.assign(new Error(rejection), { code: error?.code });
         if (String(error?.message || '').startsWith(INSUFFICIENT_VAULT_FUNDS)) {
@@ -1859,6 +2066,11 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             ? `الصنف «${error.productName}» غير موجود في المخزون (ربما حُذف). أزله من الفاتورة وأعد المحاولة.`
             : `“${error.productName}” is no longer in inventory (it may have been deleted). Remove it and try again.`);
           throw Object.assign(error, { notified: true });
+        }
+        if (error?.code === 'currency-mismatch') {
+          throw notify(ar
+            ? `عملة الشراء تختلف عن عملة تكلفة «${error.productName}» وللصنف رصيد بتكلفة مسجّلة. غيّر عملة الفاتورة أو صفّر الرصيد أولاً. لم تُسجَّل العملية.`
+            : `Purchase currency differs from the cost currency of “${error.productName}”, which still has a costed balance. Change the invoice currency or clear stock first. Nothing was recorded.`, { code: 'currency-mismatch' });
         }
         if (error?.code === 'customer-not-found' || error?.code === 'customer-required') {
           throw notify(ar
@@ -1887,9 +2099,14 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         }
         throw error;
       }
+      // Expired session + purchase/credit: refuse (cannot safely queue those). Cash sales fall through.
+      if (error?.code === 'unauthenticated' && !canQueueOffline(invoice)) {
+        const rejection = syncRejectionMessage('unauthenticated');
+        throw Object.assign(new Error(rejection || error.message), { code: 'unauthenticated' });
+      }
     }
 
-    // --- No connection ---
+    // --- No connection / deferred cash sale ---
     if (!canQueueOffline(invoice)) {
       throw notify(ar
         ? 'انقطع الاتصال بالإنترنت قبل تأكيد الحفظ. فواتير الشراء والبيع الآجل تحتاج اتصالاً لأنها تمسّ الخزنة أو ديون الزبائن. أعد المحاولة عند عودة الاتصال؛ لن تُسجَّل الفاتورة مرتين.'
@@ -1904,7 +2121,24 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
     const productsById = new Map(products.map((p) => [p.id, p]));
     const queuedInvoice: Invoice = { ...invoice, items: snapshotLineCosts(invoice.items, productsById, defaultCurrency) };
-    if (!enqueueInvoice(uid, queuedInvoice, currentWorkspace()?.ownerId)) {
+    const ownerId = currentWorkspace()?.ownerId;
+    if (!ownerId) {
+      throw notify(ar
+        ? 'تعذّر تحديد المتجر لحفظ البيع أثناء انقطاع الاتصال. لم تُسجَّل العملية.'
+        : 'Could not determine which store should keep this offline sale. Nothing was recorded.', { code: 'no-store' });
+    }
+    let queued: boolean;
+    try {
+      queued = await withQueueLock(uid, () => enqueueInvoice(uid, queuedInvoice, ownerId), { required: true });
+    } catch (lockErr: any) {
+      if (lockErr?.code === 'queue-locked') {
+        throw notify(ar
+          ? 'جهاز آخر على نفس الحساب يحفظ بيعاً الآن. أعد المحاولة بعد لحظات؛ لم تُسجَّل العملية.'
+          : 'Another tab on this account is saving a sale. Try again in a moment; nothing was recorded.', { code: 'queue-locked' });
+      }
+      throw lockErr;
+    }
+    if (!queued) {
       throw notify(ar
         ? 'لا يوجد اتصال، وتعذّر حفظ البيع على هذا الجهاز لأن مساحة التخزين ممتلئة. لم تُسجَّل العملية.'
         : 'No connection, and this device has no storage space left to keep the sale. Nothing was recorded.', { code: 'storage-full' });
@@ -1917,21 +2151,27 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       return { ...p, quantity: newQty, status: computeStockStatus(newQty, p.lowStockThreshold, settings?.lowStockThreshold) };
     });
     setProducts(updatedProducts);
-    writeUserCache(uid, 'products', updatedProducts);
+    // Do not write deducted stock into the product cache — the queue is the source of pending
+    // deductions and boot applies it on top of the last server snapshot.
 
+    let nextVaultTxs = vaultTransactions;
     const plan = planInvoiceVaultEntry(invoice);
     if (plan) {
       const { doc: nextDoc, balanceAfter } = applyVaultDelta(vault, plan.currency, plan.type === 'income' ? plan.amount : -plan.amount);
       const localVaultTx: VaultTransaction = { ...plan, id: `inv-${invoice.id}`, timestamp: Date.now(), balanceAfter };
+      nextVaultTxs = [localVaultTx, ...vaultTransactions.filter((tx) => tx.id !== localVaultTx.id)];
       setVault(nextDoc as Vault);
-      setVaultTransactions((prev) => [localVaultTx, ...prev]);
-      writeUserCache(uid, 'vault', nextDoc);
+      setVaultTransactions(nextVaultTxs);
+      // Same rule as products: keep vault cache as last server doc; queue re-applies on boot.
+      writeUserCache(uid, 'vault_records', nextVaultTxs);
     }
-    setInvoices((prev) => [queuedInvoice, ...prev.filter((i) => i.id !== invoice.id)].sort((a, b) => b.date - a.date));
+    const nextInvoices = [queuedInvoice, ...invoices.filter((i) => i.id !== invoice.id)].sort((a, b) => b.date - a.date);
+    setInvoices(nextInvoices);
+    writeUserCache(uid, 'invoices', nextInvoices);
 
     toast.warning(ar
-      ? 'لا يوجد اتصال: حُفظ البيع على هذا الجهاز وسيُرسل تلقائياً عند عودة الاتصال. لا تسجّل الخروج قبل ذلك.'
-      : 'Offline: the sale is kept on this device and will be sent automatically when the connection returns. Do not sign out before then.',
+      ? 'تعذّر الوصول للسحابة: حُفظ البيع على هذا الجهاز وسيُرسل تلقائياً عند عودة الاتصال. لا تسجّل الخروج قبل ذلك.'
+      : 'Cloud unreachable: the sale is kept on this device and will be sent automatically when the connection returns. Do not sign out before then.',
       { duration: 7000 });
 
     logInvoice();
@@ -1970,6 +2210,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       const messages: Record<string, [string, string]> = {
         'not-found': ['الفاتورة الأصلية غير موجودة (ربما حُذفت).', 'The original invoice no longer exists.'],
         'return-invalid': ['تغيّرت الكميات المتاحة للإرجاع (ربما سُجّل مرتجع من جهاز آخر). أعد فتح الفاتورة وحاول مجدداً.', 'The quantities left to return changed (perhaps another device recorded a return). Reopen the invoice and try again.'],
+        'product-not-found': ['صنف في المرتجع لم يعد في المخزون، فلم يُسجَّل المرتجع ولا استرداد المال.', 'A returned product is no longer in inventory, so the return and refund were not recorded.'],
         'customer-not-found': ['حساب العميل لهذه الفاتورة الآجلة غير موجود، فلا يمكن خصم المرتجع من دينه.', "This credit sale's customer account no longer exists, so the return cannot lower the debt."],
         'customer-currency-changed': ['تغيّرت عملة حساب العميل بعد الفاتورة، فلم يُسجَّل المرتجع.', "The customer's account currency changed after the sale, so the return was not recorded."],
         aborted: ['تغيّرت البيانات من جهاز آخر أثناء الحفظ. لم يُسجَّل المرتجع، أعد المحاولة.', 'The data changed on another device while saving. Nothing was recorded; try again.'],
@@ -1994,11 +2235,6 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           : `Return #${saved.invoiceNumber} for invoice #${saved.returnOfNumber} - ${formatMoney(saved.totalAmount, saved.currency)}`,
         'invoice',
       );
-    }
-    if (result.missingProducts.length) {
-      toast.warning(ar
-        ? `سُجّل المرتجع. أصناف لم تعد في المخزون فلم تُعَد كميتها: ${result.missingProducts.join('، ')}`
-        : `Return recorded. These products no longer exist, so their stock was not restored: ${result.missingProducts.join(', ')}`);
     }
     return saved;
   };
@@ -2140,8 +2376,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           transaction.set(doc(db, 'users', uid, 'vault_records', recId), removeUndefined(reversal));
         }
 
-        // 3. Customer debt
-        if (inv.type === 'sale' && inv.paymentMethod === 'credit' && inv.customerId) {
+        // 3. Customer debt (only when an unpaid slice was posted on the customer)
+        if (inv.type === 'sale' && inv.paymentMethod === 'credit' && inv.customerId && salePayment(inv).owed > 0) {
           let ledgerId = `inv-${id}`;
           let ledgerSnap = await transaction.get(doc(db, 'users', uid, 'customer_transactions', ledgerId));
           if (!ledgerSnap.exists() && legacyLedgerId) {
@@ -2171,9 +2407,15 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         }
 
         // 4. Supplier balance: the unpaid part of a credit purchase comes off what is owed.
+        // Fail closed when a ledger row is required but missing — never leave inflated AP after delete.
         if (inv.type === 'purchase' && inv.paymentMethod === 'credit' && inv.supplierId) {
           const ledgerRef = doc(db, 'users', uid, 'supplier_transactions', `inv-${id}`);
           const ledgerSnap = await transaction.get(ledgerRef);
+          if (purchaseDeleteRequiresSupplierLedger(inv) && !ledgerSnap.exists()) {
+            throw fail(ar
+              ? 'لم نجد قيد الدين المرتبط بهذه فاتورة الشراء الآجلة في حساب المورد، فلم تُحذف كي لا يختلّ الرصيد.'
+              : 'The supplier debt entry for this credit purchase was not found, so it was not deleted.', 'ledger-not-found');
+          }
           if (ledgerSnap.exists()) {
             const entry = ledgerSnap.data() as SupplierTransaction;
             const supplierRef = doc(db, 'users', uid, 'suppliers', inv.supplierId);
@@ -2197,6 +2439,11 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         if (inv.type === 'purchase_return' && (Number(inv.refund?.debt) || 0) > 0 && inv.supplierId) {
           const ledgerRef = doc(db, 'users', uid, 'supplier_transactions', `inv-${id}`);
           const ledgerSnap = await transaction.get(ledgerRef);
+          if (purchaseDeleteRequiresSupplierLedger(inv) && !ledgerSnap.exists()) {
+            throw fail(ar
+              ? 'لم نجد قيد المرتجع في حساب المورد، فلم يُحذف كي لا يختلّ الرصيد.'
+              : 'The supplier ledger entry for this purchase return was not found, so it was not deleted.', 'ledger-not-found');
+          }
           const supplierRef = doc(db, 'users', uid, 'suppliers', inv.supplierId);
           const supplierSnap = await transaction.get(supplierRef);
           if (ledgerSnap.exists() && supplierSnap.exists()) {
@@ -2523,7 +2770,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             currency,
             exchangeRate: 1,
             date: new Date().toISOString(),
-            notes: ar ? 'رصيد افتتاحي' : 'Opening balance',
+            notes: formatManualArNote(ar ? 'رصيد افتتاحي عند إنشاء العميل' : 'Opening balance on customer create', ar),
             remainingBalanceAfter: opening,
           };
           transaction.set(doc(db, 'users', uid, 'customer_transactions', txId), removeUndefined(entry));
@@ -2719,7 +2966,22 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     draftId?: string,
   ) => {
     if (!user) throw guestWriteBlocked();
-    if (!Number.isFinite(amount) || amount <= 0) throw new Error('Amount must be a positive number');
+    const ar = settings?.defaultLanguage !== 'en';
+    const fail = (message: string, code: string) => Object.assign(new Error(message), { code, notified: false });
+    if (!Number.isFinite(amount) || amount <= 0) throw fail(ar ? 'المبلغ يجب أن يكون أكبر من صفر.' : 'Amount must be a positive number', 'invalid-amount');
+    // Hand-typed debt increases are not sales — require an audit reason so AR cannot inflate silently.
+    let ledgerNotes = String(notes || '').trim();
+    if (type === 'invoice') {
+      if (checkManualArIncrease(ledgerNotes)) {
+        throw fail(
+          ar
+            ? 'اكتب سبب تسوية الرصيد (3 أحرف على الأقل). هذه ليست فاتورة بيع.'
+            : 'Enter a reason for the balance adjustment (at least 3 characters). This is not a sales invoice.',
+          'reason-required',
+        );
+      }
+      ledgerNotes = formatManualArNote(ledgerNotes, ar);
+    }
     const uid = user.uid;
     const timestamp = Date.now();
     const key = draftId || crypto.randomUUID();
@@ -2733,13 +2995,13 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         const customerRef = doc(db, 'users', uid, 'customers', customerId);
         const customerSnap = await transaction.get(customerRef);
         if (!customerSnap.exists()) {
-          throw new Error('Customer does not exist!');
+          throw fail(ar ? 'العميل غير موجود.' : 'Customer does not exist.', 'not-found');
         }
         const customerData = customerSnap.data() as Customer;
         const currency = (customerData.currency || 'JOD') as Currency;
         const currentDebt = roundForCurrency(Number(customerData.totalDebt) || 0, currency);
         const value = roundForCurrency(amount, currency);
-        if (value <= 0) throw new Error('Amount is too small for this currency');
+        if (value <= 0) throw fail(ar ? 'المبلغ صغير جداً لهذه العملة.' : 'Amount is too small for this currency', 'invalid-amount');
 
         // 2. Perform vault read only if we will sync an actual cash receipt
         const vaultStateRef = doc(db, 'users', uid, 'settings', 'vault');
@@ -2752,7 +3014,10 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
         if (type === 'payment' && value > currentDebt) {
           // A payment larger than the debt would silently erase debt while extra cash enters the vault.
-          throw new Error(`Payment exceeds the customer's outstanding debt (${currentDebt})`);
+          throw fail(
+            ar ? `المبلغ أكبر من دين العميل (${currentDebt}).` : `Payment exceeds the customer's outstanding debt (${currentDebt})`,
+            'payment-exceeds-debt',
+          );
         }
 
         // 3. Compute new debt
@@ -2772,7 +3037,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           currency,
           exchangeRate: 1,
           date: new Date().toISOString(),
-          notes: notes || (type === 'payment' ? 'دفعة نقدية مسددة' : 'فاتورة بيع بالآجل'),
+          notes: ledgerNotes || (type === 'payment' ? (ar ? 'دفعة نقدية مسددة' : 'Cash payment') : ledgerNotes),
           remainingBalanceAfter: finalDebt,
           ...(shouldSyncVault ? { vaultRecordId } : {})
         };
@@ -3150,8 +3415,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       throw fail(ar ? 'رصيد الافتتاح يجب أن يكون صفراً أو أكثر.' : 'The opening float must be zero or more.', 'invalid-amount');
     }
     const openingFloat = roundForCurrency(raw, input.currency);
-    const current = openShiftOf(shifts, uid);
-    if (current && current.id !== input.id) {
+    // Fast local guard; the transaction also locks via settings/active_shift for multi-device races.
+    if (!canOpenShift(shifts, uid, input.id)) {
       throw fail(ar ? 'لديك وردية مفتوحة. أغلقها أولاً قبل فتح وردية جديدة.' : 'You already have an open shift. Close it before opening a new one.', 'shift-open');
     }
     let created = false;
@@ -3159,8 +3424,20 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       await runTransaction(db, async (transaction) => {
         created = false;
         const ref = doc(db, 'users', uid, 'shifts', input.id);
-        const snap = await transaction.get(ref);
+        const lockRef = doc(db, 'users', uid, 'settings', 'active_shift');
+        const [snap, lockSnap] = await Promise.all([transaction.get(ref), transaction.get(lockRef)]);
         if (snap.exists()) return;
+
+        if (lockSnap.exists()) {
+          const lockedId = String((lockSnap.data() as { shiftId?: string })?.shiftId || '');
+          if (lockedId && lockedId !== input.id) {
+            const otherSnap = await transaction.get(doc(db, 'users', uid, 'shifts', lockedId));
+            if (otherSnap.exists() && (otherSnap.data() as Shift).status === 'open') {
+              throw fail(ar ? 'لديك وردية مفتوحة. أغلقها أولاً قبل فتح وردية جديدة.' : 'You already have an open shift. Close it before opening a new one.', 'shift-open');
+            }
+          }
+        }
+
         created = true;
         const record: Shift = {
           id: input.id,
@@ -3174,8 +3451,10 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           actorEmail: user.email || undefined,
         };
         transaction.set(ref, removeUndefined(record));
+        transaction.set(lockRef, removeUndefined({ shiftId: input.id, actorId: uid, openedAt: record.openedAt }), { merge: true });
       });
     } catch (error: any) {
+      if (error?.code === 'shift-open') throw error;
       throw shiftWriteError(error, ar, 'لا يوجد اتصال بالإنترنت؛ لم تُفتح الوردية.', 'No connection: the shift was not opened.');
     }
     if (created) {
@@ -3212,22 +3491,35 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     try {
       await runTransaction(db, async (transaction) => {
         const ref = doc(db, 'users', uid, 'shifts', input.id);
-        const snap = await transaction.get(ref);
+        const lockRef = doc(db, 'users', uid, 'settings', 'active_shift');
+        const [snap, lockSnap] = await Promise.all([transaction.get(ref), transaction.get(lockRef)]);
         if (!snap.exists()) throw fail(ar ? 'لم تُعثر على الوردية.' : 'Shift not found.', 'not-found');
         const stored = snap.data() as Shift;
         if (stored.status === 'closed') throw fail(ar ? 'هذه الوردية مغلقة مسبقاً.' : 'This shift is already closed.', 'shift-closed');
         const closedAt = Date.now();
-        const summary = summarizeShift({ ...stored, closedAt }, invoices, closedAt);
+        const summary = summarizeShift({ ...stored, id: stored.id || input.id, closedAt }, invoices, closedAt, shifts);
         const missing = summary.filter((t) => counted[t.currency] === undefined && (t.currency === stored.currency || t.expectedCash !== 0));
         if (missing.length) {
           const list = missing.map((t) => t.currency).join(ar ? '، ' : ', ');
           throw fail(ar ? `أدخل النقد المعدود بعملة: ${list}.` : `Enter the counted cash in: ${list}.`, 'count-required');
         }
-        const closing = { status: 'closed' as const, closedAt, counted, summary, closingNotes: input.notes?.trim() || undefined };
+        const closing = {
+          status: 'closed' as const,
+          closedAt,
+          counted,
+          summary,
+          closingNotes: input.notes?.trim() || undefined,
+          closedByEmail: user.email || undefined,
+        };
         closed = { ...stored, ...closing };
         transaction.update(ref, removeUndefined(closing));
+        const lockedId = String((lockSnap.exists() ? (lockSnap.data() as { shiftId?: string })?.shiftId : '') || '');
+        if (lockedId === input.id || lockedId === stored.id) {
+          transaction.delete(lockRef);
+        }
       });
     } catch (error: any) {
+      if (error?.code === 'shift-closed' || error?.code === 'not-found' || error?.code === 'count-required' || error?.code === 'pending-offline' || error?.code === 'invalid-amount') throw error;
       throw shiftWriteError(error, ar, 'لا يوجد اتصال بالإنترنت؛ لم تُغلق الوردية.', 'No connection: the shift was not closed.');
     }
     const result = closed as Shift | null;
@@ -3249,11 +3541,19 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const recalibrateVault = async (newBalance: number, currency: Currency, reason: string) => {
     if (!user) throw guestWriteBlocked();
     const uid = user.uid;
+    const ar = settings?.defaultLanguage !== 'en';
+    const trimmedReason = String(reason || '').trim();
+    if (trimmedReason.length < 3) {
+      const message = ar
+        ? 'اكتب سبب التسوية (3 أحرف على الأقل)؛ يُحفظ في سجل التدقيق.'
+        : 'Enter a reason for the adjustment (at least 3 characters); it is kept in the audit record.';
+      toast.error(message);
+      throw Object.assign(new Error(message), { code: 'reason-required', notified: true });
+    }
     const timestamp = Date.now();
     const vaultStateRef = doc(db, 'users', uid, 'settings', 'vault');
     const target = roundForCurrency(Number(newBalance) || 0, currency);
     if (!Number.isFinite(Number(newBalance)) || target < 0) {
-      const ar = settings?.defaultLanguage !== 'en';
       const message = ar ? 'رصيد الخزنة لا يمكن أن يكون سالباً. أدخل المبلغ الموجود فعلاً في الصندوق.' : 'The vault balance cannot be negative. Enter the cash actually in the drawer.';
       toast.error(message);
       throw Object.assign(new Error(message), { code: 'invalid-amount', notified: true });
@@ -3281,7 +3581,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           source: 'manual',
           amount: Math.abs(diff),
           currency,
-          description: reason || `Manual recalibration [${currency}]: Adjusted to ${target}`,
+          description: trimmedReason,
           timestamp,
           balanceAfter: target
         };
@@ -3289,7 +3589,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       });
 
       if (appliedDiff === 0) {
-        toast.info(settings?.defaultLanguage === 'ar' ? `لم يتم تغيير رصيد ${currency}` : `No balance change was requested for ${currency}`);
+        toast.info(ar ? `لم يتم تغيير رصيد ${currency}` : `No balance change was requested for ${currency}`);
         return;
       }
 
@@ -3364,6 +3664,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       deleteCustomerLedgerTransaction,
       saveWarehouse,
       transferStock,
+      applyStocktake,
       deleteWarehouse,
       recordCustomerLedgerTransaction,
       saveSupplier,
@@ -3377,7 +3678,6 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       closeShift,
       recalibrateVault,
       logUserActivity,
-      login, 
       logout,
       workspace: activeWorkspace,
       isStoreOwner: storeRole === 'owner',

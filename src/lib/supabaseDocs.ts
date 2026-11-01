@@ -506,11 +506,37 @@ export function onSnapshot(
   };
 }
 
+/** Hung mobile networks must not leave the POS submit button locked forever. */
+const COMMIT_TIMEOUT_MS = 25_000;
+
+async function rpcWithTimeout(fn: () => PromiseLike<{ error: any }>): Promise<{ error: any }> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      Promise.resolve(fn()),
+      new Promise<{ error: any }>((_, reject) => {
+        timer = setTimeout(() => {
+          reject(Object.assign(new Error('Request timed out'), { code: 'offline' }));
+        }, COMMIT_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 async function writeOne(ref: DocRef, op: 'set' | 'delete', data?: Record<string, unknown>, merge = false) {
-  const { error } = await supabase.rpc('merchant_commit', {
-    p_expected: [],
-    p_ops: [{ op, collection: ref.collection, id: ref.id, data: data ?? null, merge }],
-  });
+  let error: any;
+  try {
+    ({ error } = await rpcWithTimeout(() => supabase.rpc('merchant_commit', {
+      p_expected: [],
+      p_ops: [{ op, collection: ref.collection, id: ref.id, data: data ?? null, merge }],
+    })));
+  } catch (err) {
+    const wrapped = schemaError(err as { message?: string; code?: string });
+    reportProblem(wrapped);
+    throw wrapped;
+  }
   if (error) {
     const wrapped = schemaError(error);
     reportProblem(wrapped);
@@ -584,7 +610,14 @@ export async function runTransaction(_db: unknown, work: (transaction: any) => P
 
     await work(transaction);
     if (ops.length === 0) return;
-    const { error } = await supabase.rpc('merchant_commit', { p_expected: expected, p_ops: ops });
+    let error: any;
+    try {
+      ({ error } = await rpcWithTimeout(() => supabase.rpc('merchant_commit', { p_expected: expected, p_ops: ops })));
+    } catch (err) {
+      const wrapped = schemaError(err as { message?: string; code?: string });
+      reportProblem(wrapped);
+      throw wrapped;
+    }
     if (!error) {
       await applyCommitted(ops);
       return;

@@ -1,7 +1,17 @@
 import { describe, it, expect } from 'vitest';
-import { expenseCategoryOf, expenseDescription, topExpenseCategory } from '../expenseCategories';
+import {
+  EXPENSE_ENTRY_CATEGORY_IDS,
+  expenseCategoryOf,
+  expenseDescription,
+  topExpenseCategory,
+} from '../expenseCategories';
 
 describe('expenseCategories', () => {
+  it('does not offer salary when logging a new operating expense', () => {
+    expect(EXPENSE_ENTRY_CATEGORY_IDS).not.toContain('salary');
+    expect(EXPENSE_ENTRY_CATEGORY_IDS).toContain('general');
+  });
+
   it('reads the category from current and older saved labels in both languages', () => {
     expect(expenseCategoryOf({ category: 'other', description: '[مصرف تشغيلي عام] قرطاسية' })).toBe('general');
     expect(expenseCategoryOf({ category: 'other', description: '[مصروف تشغيلي عام] قرطاسية' })).toBe('general');

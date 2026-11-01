@@ -5,6 +5,7 @@ import {
   countBarcode,
   newAuditNumber,
   planAuditApply,
+  refreshExpectedFromBook,
   stocktakeMovement,
 } from '../inventoryAudit';
 import type { InventoryAuditLine } from '../../types';
@@ -87,5 +88,16 @@ describe('inventory audit math', () => {
     const plan = planAuditApply([line({ productId: 'p1', expectedQty: 10, actualQty: -1 })], { p1: 10 });
     expect(plan.ok).toBe(false);
     expect(plan.lines[0].block).toBe('INVALID_QTY');
+  });
+
+  it('refreshes expected qty from the live book without changing the count', () => {
+    const lines = [line({ productId: 'p1', expectedQty: 10, actualQty: 8 })];
+    const refreshed = refreshExpectedFromBook(lines, { p1: 9 });
+    expect(refreshed[0].expectedQty).toBe(9);
+    expect(refreshed[0].actualQty).toBe(8);
+    expect(refreshed[0].difference).toBe(-1);
+    const ready = planAuditApply(refreshed, { p1: 9 });
+    expect(ready.ok).toBe(true);
+    expect(ready.lines[0].action).toBe('update');
   });
 });

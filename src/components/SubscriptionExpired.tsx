@@ -3,7 +3,7 @@ import { Capacitor } from '@capacitor/core';
 import { Globe2, HelpCircle, Lock, LogOut, RotateCw, ShieldCheck, Smartphone, WifiOff } from 'lucide-react';
 import { toast } from 'sonner';
 import { sounds } from '../lib/sounds';
-import { initializeBilling, makePurchase } from '../services/billing';
+import { initializeBilling, makePurchase, PLAY_PREMIUM_PRODUCT_ID } from '../services/billing';
 import { activatePaidSubscription, restoreOwnedPurchases, syncPaidSubscription } from '../lib/activateSubscription';
 
 export type LockReason = 'trial' | 'paid' | 'unverified';
@@ -19,7 +19,7 @@ interface Props {
   member?: { storeName: string; ownerEmail: string; onLeave: () => Promise<void> } | null;
 }
 
-const PRODUCT_ID = 'mostawdaee_premium_100';
+const PRODUCT_ID = PLAY_PREMIUM_PRODUCT_ID;
 
 export default function SubscriptionExpired({ language, onLanguageToggle, reason, expiryDate, onRefresh, onLogout, member }: Props) {
   const isRtl = language === 'ar';

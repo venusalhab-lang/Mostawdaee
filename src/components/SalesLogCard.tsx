@@ -3,7 +3,7 @@ import { ChevronDown, ChevronUp } from 'lucide-react';
 import type { Invoice } from '../types';
 import { formatMoney } from '../lib/exchangeRates';
 import { periodWindow, type HomeRange } from '../lib/homeDesk';
-import { paymentMethodLabel } from '../lib/invoiceDocument';
+import { invoicePaymentLabel, invoiceOwed, invoicePaidNow, isSplitTender } from '../lib/invoiceList';
 import { lineQuantityText } from '../lib/packs';
 import { saleLogRows, sellerName, sellerSummaries, type SellerContext } from '../lib/salesLog';
 import { requestScreenSearch } from '../lib/screenSearch';
@@ -120,7 +120,10 @@ export default function SalesLogCard({ invoices, range, now, isRtl, storeCurrenc
                     <span className="block text-xs text-slate-400 truncate">
                       <span dir="auto">{sellerName(seller, isRtl)}</span>
                       {' · '}
-                      {paymentMethodLabel(invoice.paymentMethod, isRtl)}
+                      {invoicePaymentLabel(invoice, isRtl)}
+                      {isSplitTender(invoice)
+                        ? ` · ${money(invoicePaidNow(invoice), invoice.currency || storeCurrency)} / ${money(Number(invoice.debtAmount) || invoiceOwed(invoice), invoice.debtCurrency || invoice.currency || storeCurrency)}`
+                        : ''}
                       {invoice.customerName ? ` · ${invoice.customerName}` : ''}
                       {pending && (
                         <span className="text-amber-600 dark:text-amber-400 font-bold">

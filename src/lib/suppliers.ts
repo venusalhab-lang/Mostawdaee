@@ -14,6 +14,22 @@ export function purchasePayment(inv: Pick<Invoice, 'type' | 'paymentMethod' | 'p
   return { paid, owed: roundMoney(total - paid, inv.currency) };
 }
 
+/**
+ * Deleting this document must reverse a supplier ledger row; if that row is missing, refuse the delete
+ * so supplier balances cannot stay inflated after the invoice is gone.
+ */
+export function purchaseDeleteRequiresSupplierLedger(
+  inv: Pick<Invoice, 'type' | 'paymentMethod' | 'paidAmount' | 'totalAmount' | 'currency' | 'supplierId' | 'refund'>,
+): boolean {
+  if (inv.type === 'purchase' && inv.paymentMethod === 'credit' && inv.supplierId) {
+    return purchasePayment(inv).owed > 0;
+  }
+  if (inv.type === 'purchase_return' && inv.supplierId && num(inv.refund?.debt) > 0) {
+    return true;
+  }
+  return false;
+}
+
 export type PurchasePaymentError = 'supplier_required' | 'paid_invalid' | 'paid_exceeds_total';
 
 /** Checks what is paid now on a credit purchase. Cash purchases are always paid in full. */

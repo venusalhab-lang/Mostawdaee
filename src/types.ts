@@ -42,6 +42,8 @@ export interface AppSettings {
   businessPhone?: string;
   businessAddress?: string;
   businessEmail?: string;
+  /** Epoch ms when the owner finished or skipped first-run setup. Absent on older stores. */
+  onboardingCompletedAt?: number;
 }
 
 export interface Product {
@@ -281,14 +283,21 @@ export interface Invoice {
   discount?: number;
   cashReceived?: number;
   changeDue?: number;
-  /** 'credit' = آجل: no cash enters the vault until the customer pays (or, on a purchase, until the supplier is paid). Missing = cash. */
+  /**
+   * 'credit' = آجل (full or split): unpaid part is on the customer (or supplier for purchases).
+   * Missing = cash. Card/wallet never enter the cash vault.
+   */
   paymentMethod?: 'cash' | 'card' | 'wallet' | 'credit';
   customerId?: string;
   /** Purchases: the registered supplier. Required when part of the purchase is owed. */
   supplierId?: string;
-  /** Credit purchases: the part paid from the vault when the goods came in; the rest is owed to the supplier. */
+  /**
+   * Credit sales/purchases: amount settled when the invoice was saved (invoice currency).
+   * Sale: cash into the vault now; purchase: cash leaving the vault now. The rest is owed.
+   * Omitted on legacy full-credit sales (= paid 0).
+   */
   paidAmount?: number;
-  /** Credit sale: debt added to the customer, in the customer's own currency. */
+  /** Credit sale: debt added to the customer, in the customer's own currency (the unpaid part). */
   debtAmount?: number;
   debtCurrency?: Currency;
   /** Whether saving this invoice moved the cash vault. Missing on invoices saved before card/wallet were excluded. */

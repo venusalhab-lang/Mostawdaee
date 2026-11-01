@@ -20,10 +20,10 @@ import { motion, AnimatePresence } from 'motion/react';
 import { TactileButton } from './ui/TactileButton';
 import { useFirebase } from './FirebaseProvider';
 import { toast } from 'sonner';
-import { db } from '../services/firebase';
-import { doc, setDoc } from '../lib/supabaseDocs';
-import { restoreVaultBalance, vaultRestoreMessage } from '../lib/vaultRestore';
-import { buildStoreBackup, isStoreBackup, restoreStoreBackup } from '../lib/storeBackup';
+import { db } from '../lib/supabaseDocs';
+import { assertCanRestore, backupDownloadName, buildLiveBooks, makeRestoreActions, restoreBlockedMessage } from '../lib/backupIo';
+import { loadChequesForBackup, loadChequesForRestore } from '../lib/chequesStore';
+import { buildStoreBackup, isLegacyTableBackup, isStoreBackup, restoreStoreBackup, type RestoreMode } from '../lib/storeBackup';
 
 interface Props {
   language: Language;
@@ -54,6 +54,7 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
     shifts = [],
     orders = [],
     vaultTransactions = [],
+    stockMovements = [],
     warehouses = [],
     vault = null,
     saveSettings,
@@ -101,6 +102,8 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
   };
 
   const [selectedBackupForLocalRestore, setSelectedBackupForLocalRestore] = useState<any | null>(null);
+  const [localRestoreMode, setLocalRestoreMode] = useState<RestoreMode>('merge');
+  const [localReplaceAck, setLocalReplaceAck] = useState(false);
   const [isLocalRestoreInProgress, setIsLocalRestoreInProgress] = useState(false);
   
   const [recalibrateData, setRecalibrateData] = useState({ amount: '', currency: 'JOD' as Currency, reason: '' });
@@ -172,22 +175,28 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
     { id: 'system', label: t.systemManagement, icon: Database },
   ];
 
-  const handleExportData = () => {
-    const payload = buildStoreBackup({
-      creator: user?.email,
-      settings: formData,
-      products, invoices, employees, payrollRecords, customers, customerTransactions, suppliers, supplierTransactions, shifts, orders,
-      vaultTransactions, warehouses, vault,
-    });
+  const handleExportData = async () => {
+    try {
+      const cheques = await loadChequesForBackup(user?.uid);
+      const payload = buildStoreBackup({
+        creator: user?.email,
+        settings: formData,
+        products, invoices, employees, payrollRecords, customers, customerTransactions, suppliers, supplierTransactions, shifts, orders,
+        cheques, vaultTransactions, warehouses, vault,
+      });
 
-    const data = JSON.stringify(payload, null, 2);
-    const blob = new Blob([data], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `mustawdae_local_backup_${new Date().toISOString().split('T')[0]}.json`;
-    a.click();
-    toast.success(isRtl ? "تم تحميل ملف النسخة الاحتياطية بنجاح! 💾" : "Backup file downloaded successfully! 💾");
+      const data = JSON.stringify(payload, null, 2);
+      const blob = new Blob([data], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = backupDownloadName();
+      a.click();
+      toast.success(isRtl ? 'تم تنزيل النسخة. احتفظ بالملف في مكان آمن.' : 'Backup downloaded. Keep the file somewhere safe.');
+    } catch (err) {
+      console.error(err);
+      toast.error(isRtl ? 'تعذّر تجهيز النسخة. تحقق من الاتصال ثم أعد المحاولة.' : 'Could not prepare the backup. Check your connection and try again.');
+    }
   };
 
   const handleLocalFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -200,15 +209,19 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
         const text = event.target?.result as string;
         const backupData = JSON.parse(text);
 
-        if (!isStoreBackup(backupData)) {
-          toast.error(isRtl ? "هذا الملف غير متوافق مع نظام مستودعي الذكي!" : "Invalid file structure! Not a valid Mostawdaee System backup.");
+        if (isLegacyTableBackup(backupData) || !isStoreBackup(backupData)) {
+          toast.error(isRtl
+            ? 'هذا الملف ليس نسخة احتياطية من مستودعي، أو من صيغة قديمة لا تحوي دفاتر المتجر.'
+            : 'This file is not a Mostawdaee backup, or uses an old format without the store books.');
           return;
         }
 
+        setLocalRestoreMode('merge');
+        setLocalReplaceAck(false);
         setSelectedBackupForLocalRestore(backupData);
       } catch (err) {
         console.error(err);
-        toast.error(isRtl ? "خطأ في قراءة وتحليل ملف JSON!" : "Error parsing JSON backup file!");
+        toast.error(isRtl ? 'تعذّر قراءة ملف النسخة.' : 'Could not read the backup file.');
       }
     };
     reader.readAsText(file);
@@ -217,30 +230,37 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
 
   const handleConfirmLocalRestore = async () => {
     if (!selectedBackupForLocalRestore || !user) return;
+    if (localRestoreMode === 'replace' && !localReplaceAck) return;
     setIsLocalRestoreInProgress(true);
     try {
-      toast.info(isRtl ? "جارٍ البدء في استعادة البيانات المحلية..." : "Starting local system restore...");
+      assertCanRestore(user.uid);
+      toast.info(isRtl ? 'جارٍ استعادة السجلات...' : 'Restoring records...');
 
-      await restoreStoreBackup(selectedBackupForLocalRestore, {
-        saveSettings, saveWarehouse, saveProduct, saveInvoice, saveEmployee, savePayrollRecord, saveCustomer, saveCustomerTransaction,
-        saveSupplierRecord: (sp) => setDoc(doc(db, 'users', user.uid, 'suppliers', sp.id), sp),
-        saveSupplierTransaction: (tx) => setDoc(doc(db, 'users', user.uid, 'supplier_transactions', tx.id), tx),
-        saveShift: (shift) => setDoc(doc(db, 'users', user.uid, 'shifts', shift.id), shift),
-        saveOrder: (order) => setDoc(doc(db, 'users', user.uid, 'orders', order.id), order),
-        saveVaultRecord: (tx) => setDoc(doc(db, 'users', user.uid, 'vault_records', tx.id), tx),
-        restoreVault: (v) => restoreVaultBalance(db, user.uid, v),
-      }, { invoices, vaultTransactions, customerTransactions, supplierTransactions });
+      const liveCheques = await loadChequesForRestore(user.uid);
+      await restoreStoreBackup(
+        selectedBackupForLocalRestore,
+        makeRestoreActions(db, user.uid, {
+          saveSettings, saveWarehouse, saveProduct, saveInvoice, saveEmployee, savePayrollRecord, saveCustomer, saveCustomerTransaction,
+        }),
+        buildLiveBooks({
+          invoices, vaultTransactions, customerTransactions, supplierTransactions, stockMovements,
+          cheques: liveCheques, vault, products, customers, suppliers, employees, payrollRecords, warehouses, orders, shifts,
+        }),
+        { mode: localRestoreMode },
+      );
       if (selectedBackupForLocalRestore.settings) setFormData(selectedBackupForLocalRestore.settings);
 
       toast.success(
-        isRtl 
-          ? "تمت استعادة البيانات من ملف النسخة الاحتياطية."
-          : "Data was restored from the backup file."
+        isRtl
+          ? 'تمت استعادة البيانات من ملف النسخة الاحتياطية.'
+          : 'Data was restored from the backup file.',
       );
       setSelectedBackupForLocalRestore(null);
+      setLocalRestoreMode('merge');
+      setLocalReplaceAck(false);
     } catch (err: any) {
       console.error(err);
-      toast.error(vaultRestoreMessage(err, isRtl) || (isRtl
+      toast.error(restoreBlockedMessage(err, isRtl) || (isRtl
         ? 'توقفت الاستعادة قبل اكتمالها. تحقق من الاتصال ومن أن الملف نسخة احتياطية من مستودعي، ثم أعد المحاولة.'
         : 'The restore stopped before finishing. Check your connection and that the file is a Mostawdaee backup, then try again.'));
     } finally {
@@ -869,7 +889,7 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
                         <Bell size={16} className={notificationPermission === 'granted' ? 'text-emerald-500 animate-none' : 'text-white animate-bounce'} />
                         {notificationPermission === 'granted'
                           ? (isRtl ? 'مُفعّلة ومسموح بها ✓' : 'Allowed & Active ✓')
-                          : (isRtl ? 'تفعيل الإشعارات الفورية' : 'Enable Live Alerts')}
+                          : (isRtl ? 'تفعيل إشعارات المتصفح' : 'Enable browser notifications')}
                       </button>
                     </div>
                   </div>
@@ -1017,14 +1037,14 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
                             {isRtl ? "نسخ احتياطي محلي" : "Local Backup"}
                           </h3>
                           <span className="text-[10px] text-indigo-300 font-bold uppercase tracking-wider font-mono">
-                            JSON Backup Package
+                            JSON
                           </span>
                         </div>
                       </div>
                       <p className="text-indigo-100/70 text-xs leading-relaxed mb-6 flex-1 font-arabic">
                         {isRtl 
-                          ? "قم بتحميل نسخة احتياطية متكاملة بجميع بيانات وتجارة وعملات وموظفي المستودع مباشرة على جهازك." 
-                          : "Download an offline standalone database snapshot containing all inventories, ledgers, and configurations safely."}
+                          ? 'نزّل ملف نسخة من دفاتر المتجر على هذا الجهاز.' 
+                          : 'Download a backup file of this store’s books to this device.'}
                       </p>
                       <button
                         type="button"
@@ -1047,7 +1067,7 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
                             {isRtl ? "استعادة نسخة محلية" : "Local Restore"}
                           </h3>
                           <span className="text-[10px] text-emerald-400 font-bold uppercase tracking-wider font-mono">
-                            JSON Recovery Engine
+                            JSON
                           </span>
                         </div>
                       </div>
@@ -1139,10 +1159,48 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
 
               <div className="p-5 bg-amber-500/5 border border-amber-500/10 rounded-2xl space-y-4 text-xs leading-relaxed text-slate-600 dark:text-slate-300">
                 <p className="font-arabic font-bold text-amber-600 dark:text-amber-400 text-sm">
-                  ⚠️ {isRtl 
-                    ? "ستُكتب سجلات هذا الملف فوق السجلات التي تحمل نفس المعرّف، وتبقى السجلات غير الموجودة فيه كما هي. تُستبدل الإعدادات ورصيد الخزنة بما في الملف، إلا إذا سُجّلت في الخزنة حركات أحدث منه. لا يمكن التراجع عن الاستعادة." 
-                    : "Records in this file will overwrite records with the same id; records that are not in it stay as they are. Settings and the vault balance are replaced by the file, unless the vault has newer movements. A restore cannot be undone."}
+                  ⚠️ {localRestoreMode === 'replace'
+                    ? (isRtl
+                      ? 'الاستبدال يحذف نهائياً كل سجل في المتجر غير موجود في هذه النسخة (بعد كتابة ما فيها). الإعدادات ورصيد الخزنة يُستبدلان. إذا وُجدت وردية مغلقة أو شيك نهائي خارج النسخة تُرفض العملية ولا يتغيّر شيء.'
+                      : 'Replace permanently deletes every live book row whose id is not in this backup (after writing the file). Settings and the vault balance are replaced. A closed shift or finalized cheque missing from the backup refuses the restore and changes nothing.')
+                    : (isRtl
+                      ? 'الدمج يكتب سجلات الملف فوق نفس المعرّف، وتبقى السجلات غير الموجودة فيه كما هي. تُستبدل الإعدادات ورصيد الخزنة. إذا كانت الخزنة أو نشاط المتجر أحدث تُرفض الاستعادة ولا يتغيّر شيء.'
+                      : 'Merge overwrites matching ids; rows not in the file stay. Settings and the vault balance are replaced. If the live vault or store activity is newer, restore is refused and nothing changes.')}
                 </p>
+
+                <div className="space-y-2">
+                  <label className="flex items-start gap-2 cursor-pointer text-sm font-bold text-slate-700 dark:text-slate-200">
+                    <input
+                      type="radio"
+                      name="local-restore-mode"
+                      checked={localRestoreMode === 'merge'}
+                      onChange={() => { setLocalRestoreMode('merge'); setLocalReplaceAck(false); }}
+                      className="mt-1"
+                    />
+                    <span>{isRtl ? 'دمج (افتراضي) — تبقى السجلات الزائدة' : 'Merge (default) — extra live rows stay'}</span>
+                  </label>
+                  <label className="flex items-start gap-2 cursor-pointer text-sm font-bold text-slate-700 dark:text-slate-200">
+                    <input
+                      type="radio"
+                      name="local-restore-mode"
+                      checked={localRestoreMode === 'replace'}
+                      onChange={() => setLocalRestoreMode('replace')}
+                      className="mt-1"
+                    />
+                    <span>{isRtl ? 'استبدال — احذف ما ليس في النسخة' : 'Replace — delete what is not in the backup'}</span>
+                  </label>
+                  {localRestoreMode === 'replace' && (
+                    <label className="flex items-start gap-2 cursor-pointer text-xs font-semibold text-rose-700 dark:text-rose-300 ms-6">
+                      <input
+                        type="checkbox"
+                        checked={localReplaceAck}
+                        onChange={(e) => setLocalReplaceAck(e.target.checked)}
+                        className="mt-0.5"
+                      />
+                      <span>{isRtl ? 'أفهم أن السجلات غير الموجودة في الملف ستُحذف نهائياً.' : 'I understand rows missing from the file will be permanently deleted.'}</span>
+                    </label>
+                  )}
+                </div>
 
                 {/* File Contents Overview */}
                 <div className="space-y-2 border-t border-b border-amber-500/10 py-3">
@@ -1185,7 +1243,7 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
 
               <div className="flex items-center justify-end gap-3 pt-2">
                 <button
-                  onClick={() => setSelectedBackupForLocalRestore(null)}
+                  onClick={() => { setSelectedBackupForLocalRestore(null); setLocalRestoreMode('merge'); setLocalReplaceAck(false); }}
                   disabled={isLocalRestoreInProgress}
                   className="px-5 py-3 text-xs bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 font-bold text-slate-700 dark:text-slate-300 rounded-xl transition active:scale-95 cursor-pointer"
                 >
@@ -1193,8 +1251,8 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
                 </button>
                 <button
                   onClick={handleConfirmLocalRestore}
-                  disabled={isLocalRestoreInProgress}
-                  className="px-6 py-3 text-xs font-black bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl shadow-md uppercase tracking-wider transition active:scale-95 cursor-pointer flex items-center gap-2"
+                  disabled={isLocalRestoreInProgress || (localRestoreMode === 'replace' && !localReplaceAck)}
+                  className="px-6 py-3 text-xs font-black bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-xl shadow-md uppercase tracking-wider transition active:scale-95 cursor-pointer flex items-center gap-2"
                 >
                   {isLocalRestoreInProgress ? <RefreshCw size={14} className="animate-spin" /> : <Check size={12} />}
                   {isRtl ? "نعم، استعد نسخة البيانات محلياً" : "Restore Database Now"}

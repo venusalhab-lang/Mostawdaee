@@ -46,4 +46,15 @@ describe('device copy of the books', () => {
     expect(store.has(userCacheKey('u1', 'invoices'))).toBe(false);
     expect(store.get(userCacheKey('u1', 'held_bills'))).toBe('[{"id":"cart"}]');
   });
+
+  it('keeps held bills and offline sales when clearing the user cache', async () => {
+    const { clearUserCache, userCacheKey } = await import('../userStorage');
+    store.set(userCacheKey('u1', 'products'), '[]');
+    store.set(userCacheKey('u1', 'held_bills'), '[{"id":"h1"}]');
+    store.set(userCacheKey('u1', 'offline_invoices'), '[{"invoice":{"id":"i1"}}]');
+    clearUserCache('u1');
+    expect(store.has(userCacheKey('u1', 'products'))).toBe(false);
+    expect(store.get(userCacheKey('u1', 'held_bills'))).toBe('[{"id":"h1"}]');
+    expect(store.get(userCacheKey('u1', 'offline_invoices'))).toBe('[{"invoice":{"id":"i1"}}]');
+  });
 });

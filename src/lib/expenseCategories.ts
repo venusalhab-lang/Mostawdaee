@@ -3,6 +3,14 @@ import type { VaultTransaction } from '../types';
 export const EXPENSE_CATEGORY_IDS = ['rent', 'utilities', 'shipping', 'salary', 'damaged', 'marketing', 'general'] as const;
 export type ExpenseCategoryId = (typeof EXPENSE_CATEGORY_IDS)[number];
 
+/**
+ * Categories offered when logging a new OpEx from Purchases/Expenses.
+ * Staff pay must go through Employees → Pay salary (real payroll + vault), never as a free-form “salary” expense.
+ * `salary` stays in EXPENSE_CATEGORY_IDS so historical rows and filters still classify correctly.
+ */
+export const EXPENSE_ENTRY_CATEGORY_IDS = ['rent', 'utilities', 'shipping', 'damaged', 'marketing', 'general'] as const;
+export type ExpenseEntryCategoryId = (typeof EXPENSE_ENTRY_CATEGORY_IDS)[number];
+
 const LABELS: Record<ExpenseCategoryId, { ar: string; en: string }> = {
   rent: { ar: 'إيجار', en: 'Rent' },
   utilities: { ar: 'كهرباء ومياه واشتراكات', en: 'Utilities and subscriptions' },

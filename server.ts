@@ -1,5 +1,5 @@
 import express from "express";
-import helmet, { contentSecurityPolicy } from "helmet";
+import helmet from "helmet";
 import compression from "compression";
 import path from "path";
 import fs from "fs";
@@ -99,6 +99,7 @@ function getSupabaseServiceClient() {
   return createClient(url, serviceKey, { auth: { persistSession: false, autoRefreshToken: false } });
 }
 
+/** Must match Google Play Console SKU and src/services/billing.ts PLAY_PREMIUM_PRODUCT_ID. Billed amount is set in Play Console (USD 119/year). */
 const PLAY_PRODUCT_ID = "mostawdaee_premium_100";
 const PLAY_PACKAGE_NAME = process.env.GOOGLE_PLAY_PACKAGE_NAME || "com.mostawdaee.app";
 
@@ -116,13 +117,17 @@ let playAuth: GoogleAuth | null = null;
 
 async function playAccessToken(): Promise<string | { status: number; message: string }> {
   const raw = process.env.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON;
-  if (!raw) return { status: 503, message: "GOOGLE_PLAY_SERVICE_ACCOUNT_JSON is not configured on the server" };
+  if (!raw) {
+    console.error("[Play] GOOGLE_PLAY_SERVICE_ACCOUNT_JSON is not configured");
+    return { status: 503, message: "Play billing verification is unavailable" };
+  }
   if (!playAuth) {
     let credentials: any;
     try {
       credentials = JSON.parse(raw);
     } catch {
-      return { status: 503, message: "GOOGLE_PLAY_SERVICE_ACCOUNT_JSON is not valid JSON" };
+      console.error("[Play] GOOGLE_PLAY_SERVICE_ACCOUNT_JSON is not valid JSON");
+      return { status: 503, message: "Play billing verification is unavailable" };
     }
     playAuth = new GoogleAuth({ credentials, scopes: ["https://www.googleapis.com/auth/androidpublisher"] });
   }
@@ -308,15 +313,45 @@ async function startServer() {
   if (isProduction) app.set("trust proxy", 1); // real client IP behind a reverse proxy
 
   app.disable("x-powered-by");
+  // Real CSP: self + Supabase + Google (sign-in / Drive). Vite HMR extras only outside production.
+  const supabaseOrigin = (() => {
+    try {
+      const raw = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || "";
+      return raw ? new URL(raw).origin : "";
+    } catch {
+      return "";
+    }
+  })();
+  const connectSrc = [
+    "'self'",
+    "https://*.supabase.co",
+    "wss://*.supabase.co",
+    "https://accounts.google.com",
+    "https://oauth2.googleapis.com",
+    "https://www.googleapis.com",
+    "https://www.google.com",
+    ...(supabaseOrigin ? [supabaseOrigin, supabaseOrigin.replace("https://", "wss://")] : []),
+    ...(!isProduction ? ["ws://localhost:*", "ws://127.0.0.1:*", "http://localhost:*", "http://127.0.0.1:*"] : []),
+  ];
   app.use(helmet({
-    // A full script/connect allowlist needs device testing of Google sign-in, Drive and Play first.
     contentSecurityPolicy: {
       useDefaults: false,
       directives: {
-        "default-src": contentSecurityPolicy.dangerouslyDisableDefaultSrc,
-        "frame-ancestors": ["'none'"],
-        "object-src": ["'none'"],
+        "default-src": ["'self'"],
         "base-uri": ["'self'"],
+        "object-src": ["'none'"],
+        "frame-ancestors": ["'none'"],
+        "form-action": ["'self'", "https://accounts.google.com"],
+        "script-src": isProduction
+          ? ["'self'"]
+          : ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
+        "style-src": ["'self'", "'unsafe-inline'"],
+        "img-src": ["'self'", "data:", "blob:", "https:"],
+        "font-src": ["'self'", "data:"],
+        "connect-src": connectSrc,
+        "frame-src": ["'self'", "https://accounts.google.com", "https://*.google.com"],
+        "worker-src": ["'self'", "blob:"],
+        "media-src": ["'self'", "blob:"],
       },
     },
     crossOriginEmbedderPolicy: false,
@@ -408,7 +443,7 @@ async function startServer() {
       const purchaseToken = String(req.body?.purchaseToken || "");
       const platform = String(req.body?.platform || "");
 
-      if (productId !== "mostawdaee_premium_100" || platform !== "play") {
+      if (productId !== PLAY_PRODUCT_ID || platform !== "play") {
         return res.status(400).json({ message: "Unsupported product or platform" });
       }
 
@@ -422,7 +457,7 @@ async function startServer() {
 
       const service = getSupabaseServiceClient();
       if (!service) {
-        return res.status(503).json({ message: "SUPABASE_SERVICE_ROLE_KEY is not configured" });
+        return res.status(503).json({ message: "Billing is not configured" });
       }
 
       // 1. Verify the purchase with Google Play (fails closed)
@@ -446,6 +481,26 @@ async function startServer() {
       }
       if (existingPurchase && existingPurchase.user_id !== user.id) {
         return res.status(409).json({ message: "This purchase is already linked to another account" });
+      }
+      // Re-subscribe / replace: the new token must stay with the account that owns the linked prior token.
+      if (!existingPurchase && verification.linkedPurchaseToken) {
+        const { data: linkedOwner, error: linkedError } = await service
+          .from("play_purchases")
+          .select("user_id")
+          .eq("purchase_token", verification.linkedPurchaseToken)
+          .maybeSingle();
+        if (linkedError) {
+          console.error("[Subscription activate] linked token lookup failed", linkedError.message);
+          return res.status(503).json({ message: "Purchase records are not available on the server" });
+        }
+        if (!linkedOwner?.user_id) {
+          return res.status(409).json({
+            message: "This purchase replaces another that is not linked yet. Open the original account first, or wait and try again.",
+          });
+        }
+        if (linkedOwner.user_id !== user.id) {
+          return res.status(409).json({ message: "This purchase is already linked to another account" });
+        }
       }
       if (!existingPurchase) {
         const { error: insertError } = await service.from("play_purchases").insert({
@@ -482,7 +537,7 @@ async function startServer() {
         return res.status(429).json({ message: "Too many requests" });
       }
       const service = getSupabaseServiceClient();
-      if (!service) return res.status(503).json({ message: "SUPABASE_SERVICE_ROLE_KEY is not configured" });
+      if (!service) return res.status(503).json({ message: "Billing is not configured" });
       const change = await syncPlayEntitlement(service, user.id);
       return res.json({ ok: true, changed: !!change });
     } catch (error: any) {
@@ -1598,8 +1653,15 @@ async function startServer() {
     });
   });
 
-  app.listen(Number(PORT), "0.0.0.0", () => {
+  const server = app.listen(Number(PORT), "0.0.0.0", () => {
     console.log(`Server running on port ${PORT}`);
+  });
+  server.on("error", (err: NodeJS.ErrnoException) => {
+    if (err.code === "EADDRINUSE") {
+      console.error(`[Server] Port ${PORT} is already in use. Stop the other process or set PORT to a free port.`);
+      process.exit(1);
+    }
+    throw err;
   });
 }
 

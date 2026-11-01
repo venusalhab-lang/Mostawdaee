@@ -43,12 +43,13 @@ import { formatPackStock, lineKey, lineQuantityText, productPack } from '../lib/
 import CurrencyPicker from './CurrencyPicker';
 import ShowMoreBar from './ui/ShowMoreBar';
 import { useProgressiveList } from '../hooks/useProgressiveList';
-import { readVaultBalances, INSUFFICIENT_VAULT_FUNDS, roundForCurrency } from '../lib/vaultMath';
+import { readVaultBalances, INSUFFICIENT_VAULT_FUNDS, planInvoiceVaultEntry, roundForCurrency } from '../lib/vaultMath';
 import { computeInvoiceTotals, resolveVatRate } from '../lib/invoiceTotals';
 import { localDayEnd, localDayStart, localIsoDate, timestampForLocalDay } from '../lib/localDate';
 import {
   EXPENSE_CATEGORY_IDS,
   type ExpenseCategoryId,
+  EXPENSE_ENTRY_CATEGORY_IDS,
   expenseCategoryLabel,
   expenseCategoryOf,
   expenseDescription as expenseDescriptionText,
@@ -166,7 +167,10 @@ export default function PurchasesExpenses({ language }: Props) {
   const [expenseCurrency, setExpenseCurrency] = useState<Currency>(settings?.currency || 'JOD');
   useEffect(() => { expenseIdRef.current = null; }, [expenseCategory, expenseAmount, expenseDescription, expenseCurrency]);
 
-  const expenseCategories = EXPENSE_CATEGORY_IDS.map((id) => ({ id, label: expenseCategoryLabel(id, isRtl) }));
+  /** New OpEx entries — no salary (payroll is Employees only). */
+  const expenseEntryCategories = EXPENSE_ENTRY_CATEGORY_IDS.map((id) => ({ id, label: expenseCategoryLabel(id, isRtl) }));
+  /** History filters keep salary so older payroll-linked rows remain findable. */
+  const expenseFilterCategories = EXPENSE_CATEGORY_IDS.map((id) => ({ id, label: expenseCategoryLabel(id, isRtl) }));
 
   // Generate a random invoice No if left empty
   const triggerAutoInvoiceNo = () => {
@@ -390,6 +394,14 @@ export default function PurchasesExpenses({ language }: Props) {
       return;
     }
 
+    // Payroll must go through Employees → Pay salary (atomic payroll + vault). Never mint a fake payroll row here.
+    if (expenseCategory === 'salary' || !EXPENSE_ENTRY_CATEGORY_IDS.includes(expenseCategory as (typeof EXPENSE_ENTRY_CATEGORY_IDS)[number])) {
+      toast.error(isRtl
+        ? 'صرف الرواتب من شاشة الموظفين فقط، حتى يبقى السجل مرتبطاً بالموظف والخزنة معاً.'
+        : 'Pay staff salaries from Employees only, so the payroll record and vault stay linked.');
+      return;
+    }
+
     savingRef.current = true;
     setIsSaving(true);
     expenseIdRef.current ||= crypto.randomUUID();
@@ -400,8 +412,8 @@ export default function PurchasesExpenses({ language }: Props) {
       await recordVaultTransaction({
         id: expenseIdRef.current,
         type: 'expense',
-        category: expenseCategory === 'salary' ? 'salary' : 'other',
-        source: expenseCategory === 'salary' ? 'payroll' : 'expense',
+        category: 'other',
+        source: 'expense',
         amount: amt,
         currency: expenseCurrency,
         description: descriptionText
@@ -560,7 +572,7 @@ export default function PurchasesExpenses({ language }: Props) {
           <p className="text-slate-500 dark:text-slate-400 mt-2 text-base">
             {isRtl 
               ? "إدارة متكاملة لفواتير توريد البضائع من الموردين وتسجيل التكاليف والمصاريف التشغيلية لربطها بالخزنة."
-              : "Consolidated system to track supplier purchases, increment warehouse products, and catalog utility costs."}
+              : 'Record supplier purchases, stock received, and operating expenses.'}
           </p>
         </div>
 
@@ -722,7 +734,7 @@ export default function PurchasesExpenses({ language }: Props) {
                 onChange={(e) => setExpenseFilter(e.target.value)}
               >
                 <option value="all">{isRtl ? "كافة فئات المصاريف" : "All Expense Categories"}</option>
-                {expenseCategories.map(cat => (
+                {expenseFilterCategories.map(cat => (
                   <option key={cat.id} value={cat.id}>{cat.label}</option>
                 ))}
               </select>
@@ -904,39 +916,68 @@ export default function PurchasesExpenses({ language }: Props) {
                                 <Undo2 size={14} />
                               </button>
                             )}
+                            {can('reverse_invoice') && (
                             <button
                               onClick={async () => {
                                 sounds.playClick();
+                                const vaultPlan = inv.vaultPosted === false
+                                  ? null
+                                  : planInvoiceVaultEntry(inv, { includeNonCash: inv.vaultPosted === undefined });
+                                const notifyDeleteError = (err: any, fallback: string) => {
+                                  if (err?.notified) return;
+                                  toast.error(err?.message || fallback);
+                                };
                                 if (inv.type === 'purchase_return') {
-                                  const back = isRtl
-                                    ? `حذف مرتجع المشتريات #${inv.invoiceNumber}؟ تعود كمياته إلى المخزون، ويُسحب من الخزنة ما ردّه المورد نقداً، ويعود ما خُصم إلى رصيد المورد.`
-                                    : `Delete purchase return #${inv.invoiceNumber}? Its quantities come back into stock, the supplier's cash refund leaves the vault and any balance reduction is added back.`;
-                                  if (!confirm(back)) return;
+                                  const debt = Number(inv.refund?.debt) || 0;
+                                  const parts = [
+                                    isRtl ? 'تعود كمياته إلى المخزون' : 'its quantities come back into stock',
+                                    vaultPlan
+                                      ? (isRtl
+                                        ? `يُسحب ${formatCurrencyValue(vaultPlan.amount, vaultPlan.currency)} من الخزنة (ما ردّه المورد نقداً)`
+                                        : `${formatCurrencyValue(vaultPlan.amount, vaultPlan.currency)} leaves the vault (supplier cash refund)`)
+                                      : '',
+                                    debt > 0
+                                      ? (isRtl ? 'يعود ما خُصم إلى رصيد المورد' : 'any balance reduction is added back to the supplier')
+                                      : '',
+                                  ].filter(Boolean).join(isRtl ? '، ' : ', ');
+                                  if (!confirm(isRtl
+                                    ? `حذف مرتجع المشتريات #${inv.invoiceNumber}؟ ${parts}.`
+                                    : `Delete purchase return #${inv.invoiceNumber}? ${parts}.`)) return;
                                   try {
                                     await deleteInvoice(inv.id);
                                     toast.success(isRtl ? 'حُذف المرتجع وعُكست آثاره' : 'Return deleted and reversed');
                                   } catch (err: any) {
-                                    toast.error(err?.message || (isRtl ? 'تعذّر حذف المرتجع' : 'Could not delete the return'));
+                                    notifyDeleteError(err, isRtl ? 'تعذّر حذف المرتجع' : 'Could not delete the return');
                                   }
                                   return;
                                 }
-                                const { paid, owed } = purchasePayment(inv);
-                                const parts = isRtl
-                                  ? [paid > 0 ? `يعود ${formatCurrencyValue(paid, inv.currency)} إلى الخزنة` : '', owed > 0 ? `يُخصم ${formatCurrencyValue(owed, inv.currency)} من المستحق للمورد` : '', 'وتُخصم كمياتها من المخزون'].filter(Boolean).join('، ')
-                                  : [paid > 0 ? `${formatCurrencyValue(paid, inv.currency)} returns to the vault` : '', owed > 0 ? `${formatCurrencyValue(owed, inv.currency)} comes off the supplier balance` : '', 'its quantities are removed from stock'].filter(Boolean).join(', ');
-                                if (confirm(isRtl ? `حذف فاتورة الشراء؟ ${parts}.` : `Delete this purchase? ${parts}.`)) {
-                                  try {
-                                    await deleteInvoice(inv.id);
-                                    toast.success(isRtl ? "تم حذف الفاتورة وعكس آثارها" : "Invoice deleted and reversed");
-                                  } catch (err: any) {
-                                    toast.error(err?.message || (isRtl ? "تعذّر حذف الفاتورة" : "Could not delete the invoice"));
-                                  }
+                                const { owed } = purchasePayment(inv);
+                                const parts = [
+                                  vaultPlan
+                                    ? (isRtl
+                                      ? `يعود ${formatCurrencyValue(vaultPlan.amount, vaultPlan.currency)} إلى الخزنة`
+                                      : `${formatCurrencyValue(vaultPlan.amount, vaultPlan.currency)} returns to the vault`)
+                                    : '',
+                                  owed > 0
+                                    ? (isRtl
+                                      ? `يُخصم ${formatCurrencyValue(owed, inv.currency)} من المستحق للمورد`
+                                      : `${formatCurrencyValue(owed, inv.currency)} comes off the supplier balance`)
+                                    : '',
+                                  isRtl ? 'وتُخصم كمياتها من المخزون' : 'its quantities are removed from stock',
+                                ].filter(Boolean).join(isRtl ? '، ' : ', ');
+                                if (!confirm(isRtl ? `حذف فاتورة الشراء؟ ${parts}.` : `Delete this purchase? ${parts}.`)) return;
+                                try {
+                                  await deleteInvoice(inv.id);
+                                  toast.success(isRtl ? 'تم حذف الفاتورة وعكس آثارها' : 'Invoice deleted and reversed');
+                                } catch (err: any) {
+                                  notifyDeleteError(err, isRtl ? 'تعذّر حذف الفاتورة' : 'Could not delete the invoice');
                                 }
                               }}
                               className="p-2 text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950/20 rounded-xl transition cursor-pointer"
                              aria-label={isRtl ? 'حذف' : 'Delete'}>
                               <Trash2 size={14} />
                             </button>
+                            )}
                           </div>
                         </td>
                       </tr>
@@ -1132,7 +1173,7 @@ export default function PurchasesExpenses({ language }: Props) {
                         onClick={triggerAutoInvoiceNo}
                         className="text-[10px] text-indigo-500 font-extrabold hover:underline"
                       >
-                        ⚡ {isRtl ? "توليد تلقائي" : "Auto Generate"}
+                        {isRtl ? 'توليد رقم' : 'Generate'}
                       </button>
                     </label>
                     <input
@@ -1455,7 +1496,7 @@ export default function PurchasesExpenses({ language }: Props) {
                   </div>
                   <div>
                     <h3 className="font-black text-xl">{isRtl ? "سحب وتسجيل مصروف" : "Log New Operational Expense"}</h3>
-                    <span className="text-[10px] text-slate-400 uppercase tracking-wider font-bold">Decrements physical central treasury ledger</span>
+                    <span className="text-[10px] text-slate-400 uppercase tracking-wider font-bold">{isRtl ? 'يُخصم من الخزنة' : 'Deducted from the vault'}</span>
                   </div>
                 </div>
 
@@ -1478,7 +1519,7 @@ export default function PurchasesExpenses({ language }: Props) {
                     value={expenseCategory}
                     onChange={(e) => setExpenseCategory(e.target.value)}
                   >
-                    {expenseCategories.map(cat => (
+                    {expenseEntryCategories.map(cat => (
                       <option key={cat.id} value={cat.id}>{cat.label}</option>
                     ))}
                   </select>

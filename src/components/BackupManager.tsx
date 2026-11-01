@@ -1,11 +1,11 @@
 import React, { useState, useRef } from 'react';
 import { useFirebase } from './FirebaseProvider';
-import { db } from '../services/firebase';
-import { doc, setDoc } from '../lib/supabaseDocs';
-import { restoreVaultBalance, vaultRestoreMessage } from '../lib/vaultRestore';
-import { backupCounts, buildStoreBackup, isLegacyTableBackup, isStoreBackup, restoreStoreBackup, stockCsv } from '../lib/storeBackup';
+import { db } from '../lib/supabaseDocs';
+import { assertCanRestore, backupDownloadName, buildLiveBooks, makeRestoreActions, restoreBlockedMessage } from '../lib/backupIo';
+import { loadChequesForBackup, loadChequesForRestore } from '../lib/chequesStore';
+import { backupCounts, buildStoreBackup, isLegacyTableBackup, isStoreBackup, restoreStoreBackup, stockCsv, type RestoreMode } from '../lib/storeBackup';
 import { 
-  Download, Upload, AlertTriangle, CheckCircle, Database, CloudLightning, FileSpreadsheet
+  Download, Upload, AlertTriangle, CheckCircle, Database, FileSpreadsheet
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { sounds } from '../lib/sounds';
@@ -30,7 +30,7 @@ export default function BackupManager({ language }: BackupManagerProps) {
   const isRtl = language === 'ar';
   const {
     user, settings, products, invoices, employees, payrollRecords, customers, customerTransactions,
-    suppliers, supplierTransactions, shifts, orders, vaultTransactions, warehouses, vault,
+    suppliers, supplierTransactions, shifts, orders, vaultTransactions, stockMovements, warehouses, vault,
     saveSettings, saveWarehouse, saveProduct, saveInvoice, saveEmployee, savePayrollRecord, saveCustomer, saveCustomerTransaction,
   } = useFirebase();
 
@@ -43,24 +43,27 @@ export default function BackupManager({ language }: BackupManagerProps) {
   const importingRef = useRef(false);
 
   const t = {
-    title: isRtl ? 'النسخ الاحتياطي والأمان' : 'Backup & Data Security Hub',
-    subtitle: isRtl 
-      ? 'احفظ دفاتر متجرك في ملف على جهازك، واستعدها منه عند الحاجة.' 
+    title: isRtl ? 'النسخ الاحتياطي' : 'Backup',
+    subtitle: isRtl
+      ? 'احفظ دفاتر متجرك في ملف على جهازك، واستعدها منه عند الحاجة.'
       : 'Save your store books to a file on this device and restore them when needed.',
-    exportTitle: isRtl ? 'تصدير البيانات وحفظها' : 'Export your books',
-    exportDesc: isRtl 
-      ? 'ملف واحد يحوي الأصناف والمستودعات والفواتير والعملاء وديونهم والموردين وأرصدتهم وحركات الخزنة ورصيدها والورديات وأوامر الشراء وعروض الأسعار والموظفين والرواتب والإعدادات.' 
-      : 'One file with products, warehouses, invoices, customers and their debts, suppliers and their balances, vault movements and balance, shifts, purchase orders and quotations, employees, payroll and settings.',
-    btnExport: isRtl ? 'تحميل نسخة احتياطية الآن' : 'Download a backup now',
+    exportTitle: isRtl ? 'تصدير نسخة' : 'Export a backup',
+    exportDesc: isRtl
+      ? 'ملف واحد يحوي الأصناف والمستودعات والفواتير والعملاء وديونهم والموردين وأرصدتهم وحركات الخزنة ورصيدها والورديات والشيكات وأوامر الشراء وعروض الأسعار والموظفين والرواتب والإعدادات.'
+      : 'One file with products, warehouses, invoices, customers and their debts, suppliers and their balances, vault movements and balance, shifts, cheques, purchase orders and quotations, employees, payroll and settings.',
+    btnExport: isRtl ? 'تنزيل نسخة احتياطية' : 'Download backup',
     preparingBackup: isRtl ? 'جارٍ تجهيز النسخة...' : 'Preparing the backup...',
-    importTitle: isRtl ? 'استيراد واستعادة كامل البيانات' : 'Restore from a backup file',
-    importDesc: isRtl 
-      ? 'اختر ملف نسخة من مستودعي. تُعاد السجلات التي فيه، ولا يُستبدل رصيد الخزنة إذا سُجّلت بعده حركات أحدث.' 
-      : 'Choose a Mostawdaee backup file. Its records are written back; the vault balance is kept if newer movements were recorded after it.',
-    dragText: isRtl ? 'اضغط هنا لرفع ملف واستعادة البيانات' : 'Click or drop a backup file here to restore',
+    importTitle: isRtl ? 'استعادة من ملف' : 'Restore from a file',
+    importDesc: isRtl
+      ? 'اختر ملف نسخة من مستودعي. تُعاد السجلات التي فيه. إذا كانت الخزنة أو نشاط المتجر أحدث من النسخة، تُرفض الاستعادة ولا يتغيّر شيء.'
+      : 'Choose a Mostawdaee backup file. Its records are written back. If the live vault or store activity is newer than the backup, restore is refused and nothing changes.',
+    dragText: isRtl ? 'اختر ملفاً أو أفلتْه هنا للاستعادة' : 'Choose or drop a backup file to restore',
     confirmText: isRtl 
-      ? "ستُكتب سجلات هذا الملف فوق السجلات التي تحمل نفس المعرّف في متجرك.\nالسجلات غير الموجودة في الملف تبقى كما هي.\n\nهل تريد المتابعة؟"
-      : "Records in this file will overwrite records with the same id in your store.\nRecords that are not in the file stay as they are.\n\nContinue?",
+      ? "ستُكتب سجلات هذا الملف فوق السجلات التي تحمل نفس المعرّف في متجرك.\nالسجلات غير الموجودة في الملف تبقى كما هي (دمج).\n\nهل تريد المتابعة؟"
+      : "Records in this file will overwrite records with the same id in your store.\nRecords that are not in the file stay as they are (merge).\n\nContinue?",
+    replaceAsk: isRtl
+      ? 'هل تريد استبدالاً كاملاً؟\n\nموافق = احذف نهائياً كل سجل في المتجر غير موجود في هذه النسخة.\nإلغاء = دمج فقط (الإبقاء على السجلات الزائدة).'
+      : 'Full replace?\n\nOK = permanently delete every live book row whose id is not in this backup.\nCancel = merge only (keep extra live rows).',
     successTitle: isRtl ? 'تمت العملية بنجاح' : 'Done',
     processingRestore: isRtl ? 'جارٍ استعادة السجلات...' : 'Restoring records...',
     legacyFile: isRtl
@@ -77,22 +80,36 @@ export default function BackupManager({ language }: BackupManagerProps) {
     csvNoData: isRtl ? 'لا توجد أصناف لتصديرها بعد.' : 'There are no products to export yet.',
   };
 
-  const handleExportBackup = () => {
+  const handleExportBackup = async () => {
+    if (loading) return;
     sounds.playClick();
     setStatus({ type: '', message: '' });
-    const backup = buildStoreBackup({
-      creator: user?.email,
-      settings, products, invoices, employees, payrollRecords, customers, customerTransactions,
-      suppliers, supplierTransactions, shifts, orders, vaultTransactions, warehouses, vault,
-    });
-    downloadFile(JSON.stringify(backup, null, 2), 'application/json', `mostawdaee_backup_${new Date().toISOString().slice(0, 10)}.json`);
-    sounds.playSuccess();
-    setStatus({
-      type: 'success',
-      message: isRtl ? 'تم تنزيل النسخة. احتفظ بالملف في مكان آمن.' : 'Backup downloaded. Keep the file somewhere safe.',
-    });
-    setBackupStats(backupCounts(backup));
-    setBackupDate(new Date().toLocaleString(isRtl ? 'ar-EG' : 'en-US'));
+    setLoading(true);
+    try {
+      const cheques = await loadChequesForBackup(user?.uid);
+      const backup = buildStoreBackup({
+        creator: user?.email,
+        settings, products, invoices, employees, payrollRecords, customers, customerTransactions,
+        suppliers, supplierTransactions, shifts, orders, cheques, vaultTransactions, warehouses, vault,
+      });
+      downloadFile(JSON.stringify(backup, null, 2), 'application/json', backupDownloadName());
+      sounds.playSuccess();
+      setStatus({
+        type: 'success',
+        message: isRtl ? 'تم تنزيل النسخة. احتفظ بالملف في مكان آمن.' : 'Backup downloaded. Keep the file somewhere safe.',
+      });
+      setBackupStats(backupCounts(backup));
+      setBackupDate(new Date().toLocaleString(isRtl ? 'ar-EG' : 'en-US'));
+    } catch (err) {
+      console.error(err);
+      sounds.playError();
+      setStatus({
+        type: 'error',
+        message: isRtl ? 'تعذّر تجهيز النسخة. تحقق من الاتصال ثم أعد المحاولة.' : 'Could not prepare the backup. Check your connection and try again.',
+      });
+    } finally {
+      setLoading(false);
+    }
   };
 
   const executeFileImport = (file: File) => {
@@ -140,20 +157,25 @@ export default function BackupManager({ language }: BackupManagerProps) {
       sounds.playClick();
       return;
     }
+    const mode: RestoreMode = window.confirm(t.replaceAsk) ? 'replace' : 'merge';
     if (!user) return;
 
     setLoading(true);
     toast.info(t.processingRestore);
     try {
-      await restoreStoreBackup(data, {
-        saveSettings, saveWarehouse, saveProduct, saveInvoice, saveEmployee, savePayrollRecord, saveCustomer, saveCustomerTransaction,
-        saveSupplierRecord: (sp) => setDoc(doc(db, 'users', user.uid, 'suppliers', sp.id), sp),
-        saveSupplierTransaction: (tx) => setDoc(doc(db, 'users', user.uid, 'supplier_transactions', tx.id), tx),
-        saveShift: (shift) => setDoc(doc(db, 'users', user.uid, 'shifts', shift.id), shift),
-        saveOrder: (order) => setDoc(doc(db, 'users', user.uid, 'orders', order.id), order),
-        saveVaultRecord: (tx) => setDoc(doc(db, 'users', user.uid, 'vault_records', tx.id), tx),
-        restoreVault: (v) => restoreVaultBalance(db, user.uid, v),
-      }, { invoices, vaultTransactions, customerTransactions, supplierTransactions });
+      assertCanRestore(user.uid);
+      const liveCheques = await loadChequesForRestore(user.uid);
+      await restoreStoreBackup(
+        data,
+        makeRestoreActions(db, user.uid, {
+          saveSettings, saveWarehouse, saveProduct, saveInvoice, saveEmployee, savePayrollRecord, saveCustomer, saveCustomerTransaction,
+        }),
+        buildLiveBooks({
+          invoices, vaultTransactions, customerTransactions, supplierTransactions, stockMovements,
+          cheques: liveCheques, vault, products, customers, suppliers, employees, payrollRecords, warehouses, orders, shifts,
+        }),
+        { mode },
+      );
       sounds.playSuccess();
       setStatus({ type: 'success', message: isRtl ? 'تمت استعادة السجلات من الملف.' : 'Records were restored from the file.' });
       setBackupStats(backupCounts(data));
@@ -163,7 +185,7 @@ export default function BackupManager({ language }: BackupManagerProps) {
       sounds.playError();
       setStatus({
         type: 'error',
-        message: vaultRestoreMessage(err, isRtl) || (isRtl
+        message: restoreBlockedMessage(err, isRtl) || (isRtl
           ? 'توقفت الاستعادة قبل اكتمالها. تحقق من الاتصال ومن أن الملف نسخة احتياطية من مستودعي، ثم أعد المحاولة.'
           : 'The restore stopped before finishing. Check your connection and that the file is a Mostawdaee backup, then try again.'),
       });
@@ -219,6 +241,7 @@ export default function BackupManager({ language }: BackupManagerProps) {
     { key: 'invoices', ar: 'الفواتير', en: 'Invoices' },
     { key: 'employees', ar: 'الموظفون', en: 'Employees' },
     { key: 'customers', ar: 'العملاء', en: 'Customers' },
+    { key: 'cheques', ar: 'الشيكات', en: 'Cheques' },
     { key: 'vaultTransactions', ar: 'حركات الخزنة', en: 'Vault movements' },
   ];
 
@@ -356,7 +379,7 @@ export default function BackupManager({ language }: BackupManagerProps) {
         <div className="mt-8 bg-slate-50 dark:bg-slate-900/50 border border-slate-200/50 dark:border-white/5 p-6 rounded-[2rem] space-y-4">
           <div className="flex items-center justify-between border-b border-slate-200/50 dark:border-white/5 pb-3">
             <h4 className="text-xs font-black text-slate-400 dark:text-slate-500 uppercase tracking-widest block leading-none flex items-center gap-2">
-              <CloudLightning size={14} className="text-indigo-500" />
+              <Database size={14} className="text-indigo-500" />
               {isRtl ? 'محتوى النسخة' : 'Backup contents'}
             </h4>
             <span className="text-[10px] font-mono opacity-60">{backupDate}</span>

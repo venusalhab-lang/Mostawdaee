@@ -1,14 +1,24 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Barcode, ChevronLeft, ChevronRight, ClipboardCheck, ShoppingBag, Users } from 'lucide-react';
+import {
+  Area,
+  CartesianGrid,
+  ComposedChart,
+  Line,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts';
 import type {
   AppSettings, Cheque, Currency, Customer, CustomerTransaction, Invoice, Language, PayrollRecord, Product, StockMovement, Vault, VaultTransaction,
 } from '../types';
 import { useFirebase } from './FirebaseProvider';
 import { usePreferredCurrency } from './CurrencyContext';
-import { formatMoney, POS_CURRENCY_CODES } from '../lib/exchangeRates';
+import { formatMoney, POS_CURRENCY_CODES, roundMoney } from '../lib/exchangeRates';
 import { readVaultBalances } from '../lib/vaultMath';
 import { loadCheques } from '../lib/chequesStore';
-import { readQueue } from '../lib/offlineQueue';
+import { OFFLINE_QUEUE_EVENT, belongsToStore, readQueue, type QueuedInvoice } from '../lib/offlineQueue';
 import { requestInventoryIntent } from '../lib/inventoryIntent';
 import type { Workspace } from '../lib/workspace';
 import type { SellerContext } from '../lib/salesLog';
@@ -19,13 +29,12 @@ import {
   asideMoney,
   compareAmounts,
   creditRows,
-  dailyTotals,
   outstandingDebts,
   periodWindow,
   recentActivity,
+  salesChartSeries,
   salesCount,
   salesPulse,
-  salesPulseGauge,
   salesRows,
   startOfLocalDay,
   stockSnapshot,
@@ -34,6 +43,7 @@ import {
   type DeskActivity,
   type HomeRange,
   type MoneyRow,
+  type SalesChartPoint,
   type SalesPulseTone,
 } from '../lib/homeDesk';
 
@@ -52,8 +62,6 @@ interface Props {
   language: Language;
   settings: AppSettings;
 }
-
-const DAY_MS = 24 * 60 * 60 * 1000;
 
 function openScreen(screen: string) {
   window.dispatchEvent(new CustomEvent('change-screen', { detail: screen }));
@@ -115,185 +123,45 @@ function pulseWord(tone: SalesPulseTone, isRtl: boolean): string {
   return (isRtl ? ar : en)[tone];
 }
 
-const PULSE_STROKE: Record<SalesPulseTone, string> = {
-  'strong-up': 'stroke-emerald-500',
-  up: 'stroke-emerald-400',
-  flat: 'stroke-slate-400',
-  down: 'stroke-amber-500',
-  'strong-down': 'stroke-rose-500',
-  idle: 'stroke-slate-300',
-  new: 'stroke-sky-500',
-};
-
-const PULSE_FILL: Record<SalesPulseTone, string> = {
-  'strong-up': 'fill-emerald-500',
-  up: 'fill-emerald-400',
-  flat: 'fill-slate-400',
-  down: 'fill-amber-500',
-  'strong-down': 'fill-rose-500',
-  idle: 'fill-slate-300',
-  new: 'fill-sky-500',
-};
-
-const GAUGE_CX = 60;
-const GAUGE_CY = 60;
-const GAUGE_R = 42;
-
-function gaugePoint(angleDeg: number, radius = GAUGE_R) {
-  const rad = (angleDeg * Math.PI) / 180;
-  return { x: GAUGE_CX + radius * Math.cos(rad), y: GAUGE_CY + radius * Math.sin(rad) };
-}
-
-function gaugeArc(fromDeg: number, toDeg: number) {
-  const start = gaugePoint(fromDeg);
-  const end = gaugePoint(toDeg);
-  const delta = toDeg - fromDeg;
-  const large = Math.abs(delta) > 180 ? 1 : 0;
-  const sweep = delta >= 0 ? 1 : 0;
-  return `M ${start.x} ${start.y} A ${GAUGE_R} ${GAUGE_R} 0 ${large} ${sweep} ${end.x} ${end.y}`;
-}
-
-function SalesDial({
-  tone,
-  percent,
-  label,
-}: {
-  tone: SalesPulseTone;
-  percent: number | null;
-  label: string;
-}) {
-  const gauge = salesPulseGauge(percent);
-  const zero = 270;
-  const track = gaugeArc(135, 405);
-  const value = gauge.placed && gauge.angleDeg !== null && gauge.angleDeg !== zero
-    ? gaugeArc(zero, gauge.angleDeg)
-    : '';
-  const tip = gauge.placed && gauge.angleDeg !== null ? gauge.angleDeg - zero : 0;
-  const minus = gaugePoint(135, 54);
-  const plus = gaugePoint(45, 54);
-  return (
-    <div className="relative h-28 w-28 shrink-0">
-      <svg viewBox="0 0 120 120" className="h-full w-full" aria-hidden="true">
-        <path
-          d={track}
-          fill="none"
-          strokeWidth="8"
-          strokeLinecap="round"
-          className={gauge.placed ? 'stroke-slate-200 dark:stroke-slate-700' : 'stroke-slate-300 dark:stroke-slate-600'}
-          strokeDasharray={gauge.placed ? undefined : '3 7'}
-        />
-        {value && (
-          <path d={value} fill="none" strokeWidth="8" strokeLinecap="round" className={PULSE_STROKE[tone]} />
-        )}
-        {gauge.placed && (
-          <g style={{ transform: `rotate(${tip}deg)`, transformOrigin: '60px 60px', transition: 'transform 480ms ease' }}>
-            <line x1="60" y1="60" x2="60" y2="18" strokeWidth="3" strokeLinecap="round" className={PULSE_STROKE[tone]} />
-            <circle cx="60" cy="18" r="4" className={PULSE_FILL[tone]} />
-          </g>
-        )}
-        <circle cx="60" cy="60" r="26" className="fill-white dark:fill-slate-900" />
-        <text x={minus.x} y={minus.y} textAnchor="middle" dominantBaseline="middle" className="fill-slate-400 text-[10px] font-bold">−</text>
-        <text x={plus.x} y={plus.y} textAnchor="middle" dominantBaseline="middle" className="fill-slate-400 text-[10px] font-bold">+</text>
-      </svg>
-      <div className={`pointer-events-none absolute inset-0 flex items-center justify-center text-sm font-black font-mono ${PULSE_STYLE[tone].text}`}>
-        {label}
-      </div>
-    </div>
-  );
-}
-
-function SalesPulseBar({
-  tone,
-  percent,
-  current,
-  previous,
-  currentCount,
-  previousCount,
-  currency,
-  compare,
-  isRtl,
-}: {
-  tone: SalesPulseTone;
-  percent: number | null;
-  current: number;
-  previous: number;
-  currentCount: number;
-  previousCount: number;
-  currency: string;
-  compare: string;
-  isRtl: boolean;
-}) {
-  const [open, setOpen] = useState(false);
-  const style = PULSE_STYLE[tone];
-  const gauge = salesPulseGauge(percent);
-  const figure = percent === null ? '—' : `${percent > 0 ? '+' : ''}${percent}%`;
-  const word = pulseWord(tone, isRtl);
-  const basis = tone === 'idle'
-    ? (isRtl
-      ? 'لا مبيعات بعملة النظام في هذه المدة ولا في المدة المقابلة، لذلك لا تُحسب نسبة ولا يتحرك المؤشر.'
-      : 'No system-currency sales in this period or the matching one, so there is no percent and the needle stays hidden.')
-    : tone === 'new'
-      ? (isRtl
-        ? 'توجد مبيعات الآن ولم توجد مبيعات مقابلة، لذلك لا تُعرض نسبة ولا يتحرك المؤشر.'
-        : 'There are sales now and none in the matching period, so no percent is shown and the needle stays hidden.')
-      : (isRtl
-        ? `${compare}. القرص من \u2066−100٪\u2069 إلى \u2066+100٪\u2069، والصفر في الأعلى. اللون يتبع النسبة، والتراجع من 10٪ فأكثر أحمر.`
-        : `${compare}. The dial runs from −100% to +100%, with zero at the top. Color follows the percent. A drop of 10% or more is red.`);
-  const counts = currentCount + previousCount > 0
-    ? (isRtl
-      ? `${currentCount} عملية بيع · ${previousCount} في المدة المقابلة`
-      : `${currentCount} sales · ${previousCount} in the matching period`)
-    : '';
-  const beyondDial = gauge.placed && percent !== null && gauge.clamped !== null && percent !== gauge.clamped;
-  return (
-    <section className="rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-white/10 p-5" aria-label={isRtl ? 'مؤشر المبيعات' : 'Sales pulse'}>
-      <div className="flex flex-col items-center gap-4 sm:flex-row sm:items-center sm:gap-6">
-        <button
-          type="button"
-          aria-expanded={open}
-          aria-label={isRtl ? `${word}، ${figure}. اضغط للتفاصيل` : `${word}, ${figure}. Press for details`}
-          onClick={() => setOpen((value) => !value)}
-          className="rounded-full focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-indigo-500"
-        >
-          <SalesDial tone={tone} percent={percent} label={figure} />
-        </button>
-        <div className="min-w-0 sm:flex-1 text-center sm:text-start">
-          <div className="text-xs font-bold text-slate-400">{isRtl ? 'مؤشر المبيعات' : 'Sales pulse'}</div>
-          <div className={`text-lg font-black mt-1 ${style.text}`}>{word}</div>
-          <p className="text-xs text-slate-400 mt-2">
-            {open
-              ? basis
-              : (isRtl ? 'اضغط القرص لترى المقارنة.' : 'Press the dial to see the comparison.')}
-          </p>
-          {open && (
-            <div className="mt-3 space-y-1 text-xs text-slate-500">
-              <div className="font-mono">
-                {money(current, currency, isRtl)}
-                {isRtl ? ' الآن · ' : ' now · '}
-                {money(previous, currency, isRtl)}
-                {isRtl ? ' في المدة المقابلة' : ' matching'}
-              </div>
-              {counts && <div>{counts}</div>}
-              {beyondDial && (
-                <div>
-                  {isRtl
-                    ? `النسبة ${figure} خارج حد القرص، لذلك وقف المؤشر عند الطرف.`
-                    : `${figure} is past the dial limit, so the needle rests at the rim.`}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      </div>
-    </section>
-  );
-}
-
 function PulseDelta({ tone, percent, isRtl }: { tone: SalesPulseTone; percent: number | null; isRtl: boolean }) {
   const label = percent === null
     ? pulseWord(tone, isRtl)
-    : `${percent > 0 ? '+' : ''}${percent}%`;
+    : `${percent > 0 ? '+' : ''}${percent}% · ${pulseWord(tone, isRtl)}`;
   return <span className={`text-xs font-bold ${PULSE_STYLE[tone].text}`}>{label}</span>;
+}
+
+function QuickActions({
+  actions,
+  isRtl,
+}: {
+  actions: { id: string; icon: typeof Barcode; title: string; text: string }[];
+  isRtl: boolean;
+}) {
+  if (actions.length === 0) return null;
+  return (
+    <div className="grid grid-cols-2 lg:grid-cols-4 gap-3" aria-label={isRtl ? 'اختصارات' : 'Shortcuts'}>
+      {actions.map((action) => {
+        const Icon = action.icon;
+        const primary = action.id === 'pos';
+        return (
+          <button
+            key={action.id}
+            type="button"
+            onClick={() => openScreen(action.id)}
+            className={`rounded-3xl px-4 py-4 text-start transition-colors ${
+              primary
+                ? 'bg-indigo-600 text-white hover:bg-indigo-700 col-span-2 lg:col-span-1'
+                : 'bg-slate-900 text-white dark:bg-white dark:text-slate-900 hover:bg-indigo-700 dark:hover:bg-indigo-50'
+            }`}
+          >
+            <Icon size={18} />
+            <div className="mt-3 font-black">{action.title}</div>
+            <div className="text-xs opacity-70">{action.text}</div>
+          </button>
+        );
+      })}
+    </div>
+  );
 }
 
 function MoneyLines({ rows, isRtl, pulse }: { rows: MoneyRow[]; isRtl: boolean; pulse?: { tone: SalesPulseTone; percent: number | null } }) {
@@ -319,46 +187,127 @@ function SalesChart({
   locale,
   today,
   isRtl,
+  currentLabel,
+  previousLabel,
 }: {
-  points: { day: number; amount: number }[];
+  points: SalesChartPoint[];
   currency: string;
   locale: string;
   today: number;
   isRtl: boolean;
+  currentLabel: string;
+  previousLabel: string;
 }) {
-  const max = Math.max(...points.map((point) => point.amount), 0);
   const todayStart = startOfLocalDay(today);
   const byWeekday = points.length <= 8;
+  const data = points.map((point) => ({
+    ...point,
+    tick: new Date(point.day).toLocaleDateString(locale, byWeekday
+      ? { weekday: 'short' }
+      : { day: 'numeric', month: 'short' }),
+    full: new Date(point.day).toLocaleDateString(locale, { weekday: 'long', day: 'numeric', month: 'short' }),
+    isToday: point.day === todayStart,
+  }));
+  const periodTotal = roundMoney(points.reduce((sum, point) => sum + point.amount, 0), currency);
+  const hasSales = points.some((point) => point.amount > 0);
+  const hasPrevious = points.some((point) => point.previous > 0);
+
   return (
-    <div className="flex items-end gap-1.5" dir="ltr" role="img" aria-label={currency}>
-      {points.map((point) => {
-        const isToday = point.day === todayStart;
-        const ratio = max > 0 ? point.amount / max : 0;
-        const label = new Date(point.day).toLocaleDateString(locale, byWeekday ? { weekday: 'short' } : { day: 'numeric' });
-        const full = new Date(point.day).toLocaleDateString(locale, { weekday: 'long', day: 'numeric', month: 'short' });
-        const amountLabel = point.amount > 0 ? money(point.amount, currency, isRtl) : (isRtl ? 'لا مبيعات' : 'No sales');
-        return (
-          <div key={point.day} className="flex-1 min-w-0 flex flex-col items-center gap-1.5" title={`${full}: ${amountLabel}`}>
-            <div className="h-24 w-full flex items-end">
-              <div
-                className={`w-full rounded-md ${
-                  point.amount <= 0
-                    ? 'bg-slate-200 dark:bg-slate-700'
-                    : isToday
-                      ? 'bg-indigo-600'
-                      : 'bg-indigo-300 dark:bg-indigo-400/70'
-                }`}
-                style={point.amount > 0 ? { height: `${Math.max(12, ratio * 100)}%` } : { height: '4px' }}
+    <div className="space-y-3" dir="ltr">
+      <div className="h-56 w-full" role="img" aria-label={currentLabel}>
+        <ResponsiveContainer width="100%" height="100%">
+          <ComposedChart data={data} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+            <defs>
+              <linearGradient id="homeSalesFill" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor="#4f46e5" stopOpacity={0.28} />
+                <stop offset="100%" stopColor="#4f46e5" stopOpacity={0} />
+              </linearGradient>
+            </defs>
+            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+            <XAxis
+              dataKey="tick"
+              tickLine={false}
+              axisLine={false}
+              minTickGap={12}
+              tick={{ fill: '#94a3b8', fontSize: 11, fontWeight: 600 }}
+            />
+            <YAxis
+              tickLine={false}
+              axisLine={false}
+              width={48}
+              tick={{ fill: '#94a3b8', fontSize: 10 }}
+              tickFormatter={(value: number) => (value === 0 ? '0' : String(value))}
+            />
+            <Tooltip
+              cursor={{ stroke: '#818cf8', strokeWidth: 1, strokeDasharray: '4 4' }}
+              content={({ active, payload }) => {
+                if (!active || !payload?.length) return null;
+                const row = payload[0]?.payload as typeof data[number] | undefined;
+                if (!row) return null;
+                return (
+                  <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 shadow-lg text-xs space-y-1.5">
+                    <div className="font-bold text-slate-700 dark:text-slate-200">
+                      {row.full}{row.isToday ? (isRtl ? ' · اليوم' : ' · Today') : ''}
+                    </div>
+                    <div className="flex items-center justify-between gap-6 font-mono font-bold text-indigo-700 dark:text-indigo-300">
+                      <span className="font-sans font-semibold text-slate-500">{currentLabel}</span>
+                      <span dir="auto">{row.amount > 0 ? money(row.amount, currency, isRtl) : (isRtl ? 'لا مبيعات' : 'No sales')}</span>
+                    </div>
+                    {hasPrevious && (
+                      <div className="flex items-center justify-between gap-6 font-mono text-slate-500">
+                        <span className="font-sans font-semibold">{previousLabel}</span>
+                        <span dir="auto">{row.previous > 0 ? money(row.previous, currency, isRtl) : (isRtl ? 'لا مبيعات' : 'No sales')}</span>
+                      </div>
+                    )}
+                  </div>
+                );
+              }}
+            />
+            {hasPrevious && (
+              <Line
+                type="monotone"
+                dataKey="previous"
+                name={previousLabel}
+                stroke="#94a3b8"
+                strokeWidth={1.5}
+                strokeDasharray="5 4"
+                dot={false}
+                activeDot={{ r: 3, fill: '#94a3b8' }}
+                isAnimationActive={false}
               />
-            </div>
-            <span className={`w-full truncate text-center text-[10px] leading-none ${
-              isToday ? 'font-black text-indigo-700 dark:text-indigo-300' : 'font-bold text-slate-400'
-            }`}>
-              {label}
+            )}
+            <Area
+              type="monotone"
+              dataKey="amount"
+              name={currentLabel}
+              stroke="#4f46e5"
+              strokeWidth={2.25}
+              fill="url(#homeSalesFill)"
+              activeDot={{ r: 5, fill: '#4f46e5', stroke: '#fff', strokeWidth: 2 }}
+              isAnimationActive={false}
+            />
+          </ComposedChart>
+        </ResponsiveContainer>
+      </div>
+      <div className="flex flex-wrap items-center justify-between gap-2 text-xs" dir={isRtl ? 'rtl' : 'ltr'}>
+        <div className="flex flex-wrap items-center gap-3 text-slate-500">
+          <span className="inline-flex items-center gap-1.5">
+            <span className="h-2 w-2 rounded-full bg-indigo-600" />
+            {currentLabel}
+          </span>
+          {hasPrevious && (
+            <span className="inline-flex items-center gap-1.5">
+              <span className="h-0.5 w-4 border-t-2 border-dashed border-slate-400" />
+              {previousLabel}
             </span>
-          </div>
-        );
-      })}
+          )}
+        </div>
+        <div className="font-mono font-bold text-slate-700 dark:text-slate-200">
+          {hasSales
+            ? money(periodTotal, currency, isRtl)
+            : (isRtl ? 'لا مبيعات بهذه العملة في الرسم.' : 'No sales in this currency for the chart.')}
+        </div>
+      </div>
     </div>
   );
 }
@@ -518,6 +467,33 @@ export default function HomeDesk({ language, settings }: Props) {
     return () => { cancelled = true; };
   }, [user?.uid]);
 
+  const [pendingSales, setPendingSales] = useState<QueuedInvoice[]>([]);
+  useEffect(() => {
+    const refresh = () => {
+      const uid = user?.uid;
+      if (!uid) {
+        setPendingSales([]);
+        return;
+      }
+      const queue = readQueue(uid);
+      const ownerId = workspace?.ownerId;
+      setPendingSales(ownerId ? queue.filter((entry) => belongsToStore(entry, ownerId)) : queue);
+    };
+    refresh();
+    const onQueue = (event: Event) => {
+      const detailUid = (event as CustomEvent<{ uid?: string }>).detail?.uid;
+      if (!detailUid || detailUid === user?.uid) refresh();
+    };
+    window.addEventListener(OFFLINE_QUEUE_EVENT, onQueue);
+    window.addEventListener('storage', refresh);
+    window.addEventListener('online', refresh);
+    return () => {
+      window.removeEventListener(OFFLINE_QUEUE_EVENT, onQueue);
+      window.removeEventListener('storage', refresh);
+      window.removeEventListener('online', refresh);
+    };
+  }, [user?.uid, workspace?.ownerId]);
+
   const { preferredCurrency } = usePreferredCurrency();
   const activeCode = preferredCurrency !== 'DEFAULT' && (POS_CURRENCY_CODES as readonly string[]).includes(preferredCurrency)
     ? preferredCurrency
@@ -542,7 +518,6 @@ export default function HomeDesk({ language, settings }: Props) {
     const creditInSystem = amountInCurrency(credit, storeCurrency, window.start, window.end);
     const saleAside = asideMoney(sales, storeCurrency, window.start, window.end, storeCurrency);
     const incomeAside = asideMoney(income, storeCurrency, window.start, window.end, storeCurrency);
-    const chartStart = range === 'day' ? startOfLocalDay(now) - 6 * DAY_MS : window.start;
     const balances = readVaultBalances(vault || {});
     const balanceRows = (Object.entries(balances) as [Currency, number][])
       .filter(([code, amount]) => amount !== 0 || code === storeCurrency)
@@ -556,7 +531,7 @@ export default function HomeDesk({ language, settings }: Props) {
       creditInSystem,
       saleAside,
       incomeAside,
-      points: dailyTotals(sales, storeCurrency, chartStart, now),
+      points: salesChartSeries(sales, storeCurrency, range, now),
       stock: stockSnapshot(products, settings.lowStockThreshold, now),
       debts: outstandingDebts(customers, storeCurrency),
       activity: recentActivity(transactions, vaultTransactions, stockMovements, storeCurrency),
@@ -564,7 +539,6 @@ export default function HomeDesk({ language, settings }: Props) {
     };
   })();
 
-  const pendingSales = user?.uid ? readQueue(user.uid) : [];
   const pendingKey = pendingSales.map((entry) => entry.invoice.id).join('|');
   const sellers = useMemo<SellerContext>(() => ({
     userId: user?.uid || '',
@@ -638,17 +612,24 @@ export default function HomeDesk({ language, settings }: Props) {
     nowLabel: isRtl ? 'الآن' : 'Now',
     out: isRtl ? 'نافد' : 'Out',
     low: isRtl ? 'تحت الحد' : 'Low',
-    expiring: isRtl ? 'ينتهي خلال 30 يوماً' : 'Expiring in 30 days',
-    stockOk: isRtl ? 'المخزون ضمن الحد، ولا أصناف قاربت انتهاء الصلاحية.' : 'Stock is within limits, and nothing expires within 30 days.',
+    expiring: isRtl ? `ينتهي خلال ${EXPIRY_HORIZON_DAYS} أيام` : `Expiring in ${EXPIRY_HORIZON_DAYS} days`,
+    stockOk: isRtl
+      ? `المخزون ضمن الحد، ولا أصناف تنتهي صلاحيتها خلال ${EXPIRY_HORIZON_DAYS} أيام.`
+      : `Stock is within limits, and nothing expires within ${EXPIRY_HORIZON_DAYS} days.`,
     debts: isRtl ? 'ديون قائمة' : 'Outstanding debts',
     noDebts: isRtl ? 'لا ديون قائمة.' : 'No outstanding debts.',
     customers: isRtl ? 'عملاء' : 'customers',
     activity: isRtl ? 'آخر الحركات' : 'Recent activity',
     noActivity: isRtl ? 'لا حركات بعد.' : 'No activity yet.',
     chart: range === 'day'
-      ? (isRtl ? `مبيعات ${currencyName} خلال 7 أيام` : `${currencyName} sales, last 7 days`)
-      : (isRtl ? `مبيعات ${currencyName} في هذه الفترة` : `${currencyName} sales in this period`),
-    noChart: isRtl ? 'لا مبيعات بهذه العملة في الرسم.' : 'No sales in this currency for the chart.',
+      ? (isRtl ? `نشاط المبيعات · ${currencyName} · آخر 7 أيام` : `Sales activity · ${currencyName} · last 7 days`)
+      : range === 'week'
+        ? (isRtl ? `نشاط المبيعات · ${currencyName} · هذا الأسبوع` : `Sales activity · ${currencyName} · this week`)
+        : (isRtl ? `نشاط المبيعات · ${currencyName} · هذا الشهر` : `Sales activity · ${currencyName} · this month`),
+    chartCurrent: isRtl ? 'هذه الفترة' : 'This period',
+    chartPrevious: range === 'day'
+      ? (isRtl ? 'الـ 7 أيام السابقة' : 'Prior 7 days')
+      : (isRtl ? 'المدة المقابلة' : 'Matching prior period'),
   };
 
   const actions = [
@@ -656,7 +637,7 @@ export default function HomeDesk({ language, settings }: Props) {
     { id: 'inventory-audit', icon: ClipboardCheck, title: isRtl ? 'الجرد' : 'Count', text: isRtl ? 'الجرد والتسوية' : 'Stocktaking' },
     { id: 'customers', icon: Users, title: isRtl ? 'تحصيل' : 'Collect', text: isRtl ? 'ديون العملاء' : 'Customer debts' },
     { id: 'purchases-expenses', icon: ShoppingBag, title: isRtl ? 'شراء' : 'Buy', text: isRtl ? 'مشتريات ومصروف' : 'Purchases and expenses' },
-  ];
+  ].filter((action) => canOpenScreen(action.id));
 
   const activityLabel = (item: DeskActivity) => {
     if (item.kind === 'sale') return isRtl ? 'بيع' : 'Sale';
@@ -706,25 +687,21 @@ export default function HomeDesk({ language, settings }: Props) {
       </div>
 
       {isNewStore && <FirstSteps isRtl={isRtl} />}
+      {!isNewStore && <QuickActions actions={actions} isRtl={isRtl} />}
       {(tasks.length > 0 || !isNewStore) && <TodayTasks tasks={tasks} isRtl={isRtl} />}
-
-      <SalesPulseBar
-        tone={desk.pulse.tone}
-        percent={desk.pulse.percent}
-        current={desk.saleRow.current}
-        previous={desk.saleRow.previous}
-        currentCount={desk.saleCount}
-        previousCount={desk.previousSaleCount}
-        currency={storeCurrency}
-        compare={copy.compare}
-        isRtl={isRtl}
-      />
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <section className="rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-white/10 p-5">
           <div className="text-xs font-bold text-slate-400 mb-3">{copy.sales}</div>
           <MoneyLines rows={[desk.saleRow]} isRtl={isRtl} pulse={desk.pulse} />
           <p className="text-xs text-slate-400 mt-3">{copy.compare}</p>
+          {(desk.saleCount > 0 || desk.previousSaleCount > 0) && (
+            <p className="text-xs text-slate-400 mt-1">
+              {isRtl
+                ? `${desk.saleCount} عملية · ${desk.previousSaleCount} في المدة المقابلة`
+                : `${desk.saleCount} sales · ${desk.previousSaleCount} in the matching period`}
+            </p>
+          )}
           {desk.saleAside.length > 0 && (
             <p className="text-xs text-slate-400 mt-2">
               {isRtl ? 'بعملات أخرى، غير داخلة في المجموع: ' : 'Other currencies, not included: '}
@@ -816,6 +793,21 @@ export default function HomeDesk({ language, settings }: Props) {
       </div>
 
       {!isNewStore && (
+        <section className="rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-white/10 p-5">
+          <div className="text-xs font-bold text-slate-400 mb-3">{copy.chart}</div>
+          <SalesChart
+            points={desk.points}
+            currency={storeCurrency}
+            locale={locale}
+            today={now}
+            isRtl={isRtl}
+            currentLabel={copy.chartCurrent}
+            previousLabel={copy.chartPrevious}
+          />
+        </section>
+      )}
+
+      {!isNewStore && (
         <SalesLogCard
           invoices={transactions}
           range={range}
@@ -826,65 +818,37 @@ export default function HomeDesk({ language, settings }: Props) {
         />
       )}
 
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        {actions.map((action) => {
-          const Icon = action.icon;
-          return (
-            <button
-              key={action.id}
-              type="button"
-              onClick={() => openScreen(action.id)}
-              className="rounded-3xl bg-slate-900 text-white dark:bg-white dark:text-slate-900 px-4 py-4 text-start hover:bg-indigo-700 dark:hover:bg-indigo-50 transition-colors"
-            >
-              <Icon size={18} />
-              <div className="mt-3 font-black">{action.title}</div>
-              <div className="text-xs opacity-70">{action.text}</div>
-            </button>
-          );
-        })}
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
-        <section className="lg:col-span-3 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-white/10 p-5">
-          <div className="text-xs font-bold text-slate-400 mb-3">{copy.chart}</div>
-          <SalesChart points={desk.points} currency={storeCurrency} locale={locale} today={now} isRtl={isRtl} />
-          {desk.points.every((point) => point.amount === 0) && (
-            <p className="text-sm text-slate-500">{copy.noChart}</p>
-          )}
-        </section>
-
-        <section className="lg:col-span-2 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-white/10 p-5">
-          <div className="text-xs font-bold text-slate-400 mb-3">{copy.activity}</div>
-          {desk.activity.length === 0 ? (
-            <p className="text-sm text-slate-500">{copy.noActivity}</p>
-          ) : (
-            <div className="divide-y divide-slate-100 dark:divide-white/5">
-              {desk.activity.map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={() => openScreen(item.screen)}
-                  className="w-full py-2.5 flex items-center justify-between gap-3 text-start"
-                >
-                  <div className="min-w-0">
-                    <div className="text-sm font-bold truncate">{item.title}</div>
-                    <div className="text-xs text-slate-400">
-                      {activityLabel(item)}
-                      {' · '}
-                      {new Date(item.timestamp).toLocaleString(locale, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
-                    </div>
+      <section className="rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-white/10 p-5">
+        <div className="text-xs font-bold text-slate-400 mb-3">{copy.activity}</div>
+        {desk.activity.length === 0 ? (
+          <p className="text-sm text-slate-500">{copy.noActivity}</p>
+        ) : (
+          <div className="divide-y divide-slate-100 dark:divide-white/5">
+            {desk.activity.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => openScreen(item.screen)}
+                className="w-full py-2.5 flex items-center justify-between gap-3 text-start"
+              >
+                <div className="min-w-0">
+                  <div className="text-sm font-bold truncate">{item.title}</div>
+                  <div className="text-xs text-slate-400">
+                    {activityLabel(item)}
+                    {' · '}
+                    {new Date(item.timestamp).toLocaleString(locale, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
                   </div>
-                  <div className="font-mono text-sm font-bold shrink-0">
-                    {item.kind === 'stocktake'
-                      ? `${(item.amount || 0) > 0 ? '+' : ''}${item.amount}`
-                      : money(item.amount || 0, item.currency, isRtl)}
-                  </div>
-                </button>
-              ))}
-            </div>
-          )}
-        </section>
-      </div>
+                </div>
+                <div className="font-mono text-sm font-bold shrink-0">
+                  {item.kind === 'stocktake'
+                    ? `${(item.amount || 0) > 0 ? '+' : ''}${item.amount}`
+                    : money(item.amount || 0, item.currency, isRtl)}
+                </div>
+              </button>
+            ))}
+          </div>
+        )}
+      </section>
     </div>
   );
 }

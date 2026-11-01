@@ -1,5 +1,7 @@
 -- Mostawdaee production setup. Run once in the Supabase SQL editor; safe to run again.
--- Order: this file, then supabase_cheques.sql and supabase_inventory_audit.sql. Never run supabase/archive/*.
+-- Order: this file, then supabase_cheques.sql, supabase_inventory_audit.sql, supabase_einvoicing.sql.
+-- Never run supabase/archive/* (outdated; conflicts with this file).
+-- 0. Creates profiles and user_subscriptions when the project is empty.
 -- 1. Brings profiles and user_subscriptions up to the columns the app and server use.
 -- 2. Replaces their row-level security with owner-only policies.
 -- 3. Stops browsers from granting themselves premium, admin, or a longer trial.
@@ -14,6 +16,27 @@
 --    email does not get a second free trial.
 
 BEGIN;
+
+-- ---------------------------------------------------------------------------
+-- 0. Base tables (empty project). Existing projects keep their shape; columns follow.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.profiles (
+    id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS public.user_subscriptions (
+    id BIGSERIAL PRIMARY KEY,
+    user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE
+);
+
+GRANT SELECT, INSERT, UPDATE ON public.profiles TO authenticated;
+GRANT SELECT, INSERT, UPDATE ON public.user_subscriptions TO authenticated;
+DO $$
+BEGIN
+    IF to_regclass('public.user_subscriptions_id_seq') IS NOT NULL THEN
+        EXECUTE 'GRANT USAGE, SELECT ON SEQUENCE public.user_subscriptions_id_seq TO authenticated';
+    END IF;
+END $$;
 
 -- ---------------------------------------------------------------------------
 -- 1. Columns

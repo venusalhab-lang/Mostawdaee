@@ -337,6 +337,37 @@ export function dailyTotals(
   return points;
 }
 
+export interface SalesChartPoint {
+  day: number;
+  amount: number;
+  /** Same index in the matching prior window (0 when that day had no sales). */
+  previous: number;
+}
+
+/**
+ * System-currency daily sales for the home chart, plus an aligned prior series.
+ * Day view: last 7 local days vs the 7 days before them.
+ * Week/month: current period window vs the matching previous window (same elapsed days).
+ */
+export function salesChartSeries(
+  rows: { currency?: string; amount: number; ts: number }[],
+  currency: string,
+  range: HomeRange,
+  now: number,
+): SalesChartPoint[] {
+  const window = periodWindow(range, now);
+  const chartStart = range === 'day' ? startOfLocalDay(now) - 6 * DAY_MS : window.start;
+  const current = dailyTotals(rows, currency, chartStart, now);
+  const previous = range === 'day'
+    ? dailyTotals(rows, currency, chartStart - current.length * DAY_MS, chartStart - 1)
+    : dailyTotals(rows, currency, window.previousStart, window.previousEnd);
+  return current.map((point, index) => ({
+    day: point.day,
+    amount: point.amount,
+    previous: previous[index]?.amount ?? 0,
+  }));
+}
+
 export function chartCurrency(rows: MoneyRow[], fallbackCurrency: string): string {
   const withSales = rows.find((row) => row.current !== 0);
   return withSales?.currency || fallbackCurrency;
@@ -348,7 +379,8 @@ export interface StockSnapshot {
   expiring: DeskProduct[];
 }
 
-const EXPIRING_WITHIN_DAYS = 30;
+/** Same horizon as today's expiry tasks — one meaning on the home desk. */
+export const EXPIRY_HORIZON_DAYS = 7;
 
 export function stockSnapshot(products: DeskProduct[], globalThreshold?: number | null, now = Date.now()): StockSnapshot {
   const goods = products.filter((product) => product.type !== 'asset');
@@ -359,7 +391,7 @@ export function stockSnapshot(products: DeskProduct[], globalThreshold?: number 
   });
   const expiring = goods.filter((product) => {
     const days = daysUntilExpiry(product.expiryDate, now);
-    return days !== null && days < EXPIRING_WITHIN_DAYS && (Number(product.quantity) || 0) > 0;
+    return days !== null && days <= EXPIRY_HORIZON_DAYS && (Number(product.quantity) || 0) > 0;
   });
   return { out, low, expiring };
 }

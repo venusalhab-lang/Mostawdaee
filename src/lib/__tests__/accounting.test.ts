@@ -96,6 +96,46 @@ describe('buildJournal', () => {
     expect(manualDebts([credit], [debt, pay])).toEqual([]);
   });
 
+  it('clears FX credit suspense in the invoice currency and books AR in the debt currency', () => {
+    const credit = sale({
+      paymentMethod: 'credit', customerId: 'c1', vaultPosted: false,
+      debtAmount: 16.5, debtCurrency: 'JOD',
+    });
+    const debt: CustomerTransaction = {
+      id: 'inv-s1', transactionId: 'inv-s1', customerId: 'c1', type: 'invoice', invoiceId: 's1',
+      amount: 16.5, currency: 'JOD', exchangeRate: 16.5 / 23.2,
+      date: new Date(T0 + DAY).toISOString(), notes: '', remainingBalanceAfter: 16.5,
+    };
+    const j = buildJournal(input({
+      invoices: [credit],
+      customerTransactions: [debt],
+    }));
+    expect(j.entries.every(entryIsBalanced)).toBe(true);
+    expect(bal(j, '1150', 'USD')).toBe(0);
+    expect(bal(j, '1200', 'JOD')).toBe(16500);
+    expect(bal(j, '1150', 'JOD')).toBe(0);
+  });
+
+  it('books a split sale: cash paid now enters the vault, remainder stays in receivables', () => {
+    const split = sale({
+      paymentMethod: 'credit', customerId: 'c1', paidAmount: 10, debtAmount: 13.2, debtCurrency: 'USD', vaultPosted: true,
+    });
+    const debt: CustomerTransaction = {
+      id: 'inv-s1', transactionId: 'inv-s1', customerId: 'c1', type: 'invoice', invoiceId: 's1', amount: 13.2, currency: 'USD',
+      exchangeRate: 1, date: new Date(T0 + DAY).toISOString(), notes: '', remainingBalanceAfter: 13.2,
+    };
+    const j = buildJournal(input({
+      invoices: [split],
+      customerTransactions: [debt],
+      vaultTransactions: [vault({ id: 'vs', type: 'income', category: 'sale', source: 'sale_invoice', refId: 's1', amount: 10 })],
+    }));
+    expect(j.entries.every(entryIsBalanced)).toBe(true);
+    expect(bal(j, '1100')).toBe(1000);
+    expect(bal(j, '1200')).toBe(1320);
+    expect(bal(j, '1150')).toBe(0);
+    expect(bal(j, '4100')).toBe(-2000);
+  });
+
   it('reverses a returned cash sale: revenue, VAT and cost come back out and the refund leaves the vault', () => {
     const ret = sale({
       id: 'r1', invoiceNumber: 'RET-1', type: 'return', returnOf: 's1', date: T0 + 2 * DAY,
@@ -299,6 +339,19 @@ describe('buildJournal', () => {
       invoices: [sale({ items: [{ productId: 'p1', description: 'Tea box', quantity: 2, unitPrice: 50, total: 100, unitCost: 2, costCurrency: 'USD', packSize: 12 }] })],
     }));
     expect(bal(j, '5100')).toBe(4800);
+  });
+
+  it('rounds COGS per line into minor units (avoids float off-by-one)', () => {
+    // 2.675 × 3 = 8.025 → 803 cents, not Math.round(2.675*3*100) = 802.
+    const j = buildJournal(input({
+      invoices: [sale({
+        items: [{ productId: 'p1', description: 'Tea', quantity: 3, unitPrice: 10, total: 30, unitCost: 2.675, costCurrency: 'USD' }],
+        taxAmount: 0,
+        totalAmount: 30,
+      })],
+    }));
+    expect(bal(j, '5100', 'USD')).toBe(803);
+    expect(bal(j, '1300', 'USD')).toBe(-803);
   });
 
   it('posts opening entries and keeps 3-decimal currencies exact', () => {

@@ -3,6 +3,7 @@ import { currencyDecimals, roundMoney } from './exchangeRates';
 import { expenseCategoryOf, type ExpenseCategoryId } from './expenseCategories';
 import { lineUnits } from './packs';
 import { csvCell } from './csv';
+import { salePayment } from './salesPayment';
 
 /**
  * Double-entry books derived from the records the app already keeps (invoices, vault, customer ledger, payroll, stock movements).
@@ -454,12 +455,14 @@ export function buildJournal(input: JournalInput): Journal {
           continue;
         }
         const bucket = costByCurrency.get(costCurrency) || { minorValue: 0, estimate: false };
-        bucket.minorValue += unitCost * units * scale(costCurrency);
+        // Round each line into minor units first — accumulating float then rounding once is off-by-one (e.g. 2.675×3 USD).
+        bucket.minorValue += toMinor(unitCost * units, costCurrency);
         bucket.estimate ||= estimate;
         costByCurrency.set(costCurrency, bucket);
       }
       for (const [costCurrency, { minorValue, estimate }] of costByCurrency) {
-        const cost = Math.round(minorValue);
+        const cost = minorValue;
+        if (!cost) continue;
         if (estimate) issues.estimatedEntries += 1;
         push({ id: `cogs-${inv.id}-${costCurrency}`, date, currency: costCurrency, source: 'cogs', refId: inv.id, memo, estimate,
           parts: [['5100', sign * cost], ['1300', -sign * cost]] });
@@ -486,6 +489,7 @@ export function buildJournal(input: JournalInput): Journal {
   }
 
   const linked = invoiceLinkedDebts(input.invoices, input.customerTransactions);
+  const invoiceById = new Map(input.invoices.map((inv) => [inv.id, inv]));
   for (const t of input.customerTransactions) {
     const currency = t.currency || defaultCurrency;
     const amount = toMinor(num(t.amount), currency);
@@ -494,8 +498,40 @@ export function buildJournal(input: JournalInput): Journal {
     const memo = t.notes || t.transactionId || '';
     if (t.type === 'payment') {
       push({ id: `customer-${t.id}`, date, currency, source: 'customer', refId: t.id, memo, parts: [['1150', amount], ['1200', -amount]] });
+    } else if (linked.has(t.id)) {
+      // Same-currency credit: move owed from 1150 → 1200.
+      // FX credit (invoice currency ≠ debt currency): clear 1150 in the invoice currency for the owed
+      // slice, and book AR in the debt currency against equity bridge 3900 — never mix currencies in one entry.
+      const inv = t.invoiceId ? invoiceById.get(t.invoiceId) : (t.id.startsWith('inv-') ? invoiceById.get(t.id.slice(4)) : undefined);
+      const invoiceCurrency = inv?.currency || currency;
+      if (inv && invoiceCurrency !== currency) {
+        const owed = salePayment(inv).owed;
+        const owedMinor = toMinor(owed, invoiceCurrency);
+        if (owedMinor) {
+          push({
+            id: `customer-${t.id}-clear`,
+            date,
+            currency: invoiceCurrency,
+            source: 'customer',
+            refId: t.id,
+            memo,
+            parts: [['3900', owedMinor], ['1150', -owedMinor]],
+          });
+        }
+        push({
+          id: `customer-${t.id}`,
+          date,
+          currency,
+          source: 'customer',
+          refId: t.id,
+          memo,
+          parts: [['1200', amount], ['3900', -amount]],
+        });
+      } else {
+        push({ id: `customer-${t.id}`, date, currency, source: 'customer', refId: t.id, memo, parts: [['1200', amount], ['1150', -amount]] });
+      }
     } else {
-      const counter: AccountCode = linked.has(t.id) ? '1150' : DEBT_CLASS_ACCOUNT[config.debtClasses[t.id] || 'opening'];
+      const counter: AccountCode = DEBT_CLASS_ACCOUNT[config.debtClasses[t.id] || 'opening'];
       push({ id: `customer-${t.id}`, date, currency, source: 'customer', refId: t.id, memo, parts: [['1200', amount], [counter, -amount]] });
     }
   }
@@ -543,7 +579,7 @@ export function buildJournal(input: JournalInput): Journal {
       issues.unvaluedStockMovements += 1;
       continue;
     }
-    const value = Math.round(unitCost * delta * scale(currency));
+    const value = toMinor(unitCost * delta, currency);
     if (!value) continue;
     if (estimate) issues.estimatedEntries += 1;
     const counter: AccountCode = m.type === 'initial' ? '3900' : '5300';

@@ -48,6 +48,8 @@ describe('invoice document labels', () => {
   it('labels missing payment method as cash', () => {
     expect(paymentMethodLabel(undefined, false)).toBe('Cash');
     expect(paymentMethodLabel('credit', true)).toBe('آجل');
+    expect(paymentMethodLabel('credit', true, 30, 50)).toBe('نقد + آجل');
+    expect(paymentMethodLabel('credit', false, 30, 50)).toBe('Cash + credit');
   });
 });
 
@@ -81,5 +83,25 @@ describe('buildInvoicePrintHtml', () => {
 
   it('omits the discount row when there is none', () => {
     expect(buildInvoicePrintHtml({ ...ctx, invoice: base })).not.toContain('Discount');
+  });
+
+  it('shows split tender settlement and a quiet Mostawdaee promo', () => {
+    const html = buildInvoicePrintHtml({
+      ...ctx,
+      invoice: {
+        ...base,
+        paymentMethod: 'credit',
+        paidAmount: 40,
+        debtAmount: 76,
+        debtCurrency: 'JOD',
+        customerName: 'Abu Ahmad',
+        items: [{ productId: 'p1', description: 'Tea', quantity: 2, unitPrice: 50, total: 100, sku: 'TEA-1' }],
+      },
+    });
+    expect(html).toContain('Cash + credit');
+    expect(html).toContain('Paid now');
+    expect(html).toContain('Balance due');
+    expect(html).toContain('SKU: TEA-1');
+    expect(html).toContain('Mostawdaee — warehouse &amp; POS');
   });
 });

@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { 
-  Cloud, CloudLightning, ShieldCheck, RefreshCw, Download, Upload, 
-  Trash2, Play, CheckCircle2, AlertTriangle, Link, Link2, LogIn, ExternalLink, RefreshCw as Spinner, Lock
+  Cloud, RefreshCw, Upload,
+  Trash2, Play, AlertTriangle, LogIn, RefreshCw as Spinner, Lock
 } from 'lucide-react';
 import { Language } from '../types';
 import { useFirebase } from './FirebaseProvider';
@@ -17,10 +17,11 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { toast } from 'sonner';
 import { sounds } from '../lib/sounds';
-import { GoogleAuthProvider, signInWithPopup, auth, googleProvider, db } from '../services/firebase';
-import { doc, setDoc } from '../lib/supabaseDocs';
-import { restoreVaultBalance, vaultRestoreMessage } from '../lib/vaultRestore';
-import { buildStoreBackup, isStoreBackup, restoreStoreBackup } from '../lib/storeBackup';
+import { DRIVE_CONNECTED_EVENT, startDriveConnect } from '../lib/driveConnect';
+import { db } from '../lib/supabaseDocs';
+import { assertCanRestore, backupDriveName, buildLiveBooks, makeRestoreActions, restoreBlockedMessage } from '../lib/backupIo';
+import { loadChequesForBackup, loadChequesForRestore } from '../lib/chequesStore';
+import { buildStoreBackup, isLegacyTableBackup, isStoreBackup, restoreStoreBackup, type RestoreMode } from '../lib/storeBackup';
 
 interface Props {
   language: Language;
@@ -44,6 +45,7 @@ export default function GoogleDriveBackup({ language }: Props) {
     warehouses, 
     vault,
     vaultTransactions,
+    stockMovements,
     settings,
     saveSettings,
     saveProduct,
@@ -62,6 +64,8 @@ export default function GoogleDriveBackup({ language }: Props) {
   const [isRestoreInProgress, setIsRestoreInProgress] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [selectedBackupForRestore, setSelectedBackupForRestore] = useState<DriveFile | null>(null);
+  const [driveRestoreMode, setDriveRestoreMode] = useState<RestoreMode>('merge');
+  const [driveReplaceAck, setDriveReplaceAck] = useState(false);
   const [selectedBackupForDelete, setSelectedBackupForDelete] = useState<DriveFile | null>(null);
 
   // Helper handling of Google Drive session expiration or errors
@@ -94,7 +98,7 @@ export default function GoogleDriveBackup({ language }: Props) {
       const files = await listBackupFiles();
       setBackups(files);
     } catch (err: any) {
-      handleDriveError(err, isRtl ? "فشل البحث واسترداد قائمة الملفات" : "Failed to list backup files / retrieve list");
+      handleDriveError(err, isRtl ? 'تعذر جلب قائمة النسخ من Drive.' : 'Could not list backups from Drive.');
     } finally {
       setIsLoadingList(false);
     }
@@ -107,23 +111,28 @@ export default function GoogleDriveBackup({ language }: Props) {
     }
   }, [isConnected]);
 
-  // Connect Google Drive Action
+  useEffect(() => {
+    const onConnected = () => setIsConnected(hasDriveAccessToken());
+    window.addEventListener(DRIVE_CONNECTED_EVENT, onConnected);
+    return () => window.removeEventListener(DRIVE_CONNECTED_EVENT, onConnected);
+  }, []);
+
+  // Google answers on a separate page; the token arrives with the session that comes back.
+  const [isConnecting, setIsConnecting] = useState(false);
   const handleConnect = async () => {
     sounds.playClick();
+    if (!user?.uid) {
+      toast.error(isRtl ? "سجّل الدخول بحساب المتجر أولاً لربط Google Drive." : "Sign in to your store account to connect Google Drive.");
+      return;
+    }
+    setIsConnecting(true);
     try {
-      const result = await signInWithPopup(auth, googleProvider);
-      const credential = GoogleAuthProvider.credentialFromResult(result);
-      if (credential?.accessToken) {
-        setDriveAccessToken(credential.accessToken);
-        setIsConnected(true);
-        toast.success(isRtl ? "تم ربط حساب Google Drive بنجاح! 🎉" : "Connected Google Drive successfully! 🎉");
-        loadBackups();
-      } else {
-        throw new Error("Unable to obtain Drive Token");
-      }
+      await startDriveConnect(user.uid);
     } catch (err) {
       console.error(err);
-      toast.error(isRtl ? "فشل الاتصال بـ Google Drive" : "Failed to authenticate with Google Drive");
+      toast.error(isRtl ? "تعذر بدء ربط Google Drive. حاول مرة أخرى." : "Could not start connecting Google Drive. Try again.");
+    } finally {
+      setIsConnecting(false);
     }
   };
 
@@ -134,15 +143,14 @@ export default function GoogleDriveBackup({ language }: Props) {
     
     setIsBackupInProgress(true);
     try {
+      const cheques = await loadChequesForBackup(user?.uid);
       const payload = buildStoreBackup({
         creator: user?.email,
         settings, products, invoices, employees, payrollRecords, customers, customerTransactions, suppliers, supplierTransactions, shifts, orders,
-        vaultTransactions, warehouses, vault,
+        cheques, vaultTransactions, warehouses, vault,
       });
 
-      const dateStr = new Date().toISOString().split('T')[0];
-      const timeStr = new Date().toTimeString().split(' ')[0].replace(/:/g, '-');
-      const filename = `mustawdae_backup_${dateStr}_${timeStr}.json`;
+      const filename = backupDriveName();
       const fileContent = JSON.stringify(payload, null, 2);
 
       await uploadBackupFile(filename, fileContent);
@@ -164,28 +172,33 @@ export default function GoogleDriveBackup({ language }: Props) {
   const handleConfirmRestore = async () => {
     sounds.playClick();
     if (!selectedBackupForRestore || !user?.uid) return;
+    if (driveRestoreMode === 'replace' && !driveReplaceAck) return;
     const uid = user.uid;
     
     setIsRestoreInProgress(true);
     try {
-      toast.info(isRtl ? "جارٍ تحميل وقراءة ملف النسخة..." : "Retrieving cloud backup stream...");
+      toast.info(isRtl ? 'جارٍ تحميل ملف النسخة...' : 'Downloading the backup file...');
       const backupData = await downloadBackupFile(selectedBackupForRestore.id);
 
-      if (!isStoreBackup(backupData)) {
+      if (isLegacyTableBackup(backupData) || !isStoreBackup(backupData)) {
         throw new Error(isRtl ? "هذا الملف ليس نسخة احتياطية من مستودعي." : "This file is not a Mostawdaee backup.");
       }
 
+      assertCanRestore(uid);
       toast.info(isRtl ? "جارٍ استعادة السجلات..." : "Restoring records...");
 
-      await restoreStoreBackup(backupData, {
-        saveSettings, saveWarehouse, saveProduct, saveInvoice, saveEmployee, savePayrollRecord, saveCustomer, saveCustomerTransaction,
-        saveSupplierRecord: (sp) => setDoc(doc(db, 'users', uid, 'suppliers', sp.id), sp),
-        saveSupplierTransaction: (tx) => setDoc(doc(db, 'users', uid, 'supplier_transactions', tx.id), tx),
-        saveShift: (shift) => setDoc(doc(db, 'users', uid, 'shifts', shift.id), shift),
-        saveOrder: (order) => setDoc(doc(db, 'users', uid, 'orders', order.id), order),
-        saveVaultRecord: (tx) => setDoc(doc(db, 'users', uid, 'vault_records', tx.id), tx),
-        restoreVault: (v) => restoreVaultBalance(db, uid, v),
-      }, { invoices, vaultTransactions, customerTransactions, supplierTransactions });
+      const liveCheques = await loadChequesForRestore(uid);
+      await restoreStoreBackup(
+        backupData,
+        makeRestoreActions(db, uid, {
+          saveSettings, saveWarehouse, saveProduct, saveInvoice, saveEmployee, savePayrollRecord, saveCustomer, saveCustomerTransaction,
+        }),
+        buildLiveBooks({
+          invoices, vaultTransactions, customerTransactions, supplierTransactions, stockMovements,
+          cheques: liveCheques, vault, products, customers, suppliers, employees, payrollRecords, warehouses, orders, shifts,
+        }),
+        { mode: driveRestoreMode },
+      );
 
       toast.success(
         isRtl 
@@ -193,8 +206,10 @@ export default function GoogleDriveBackup({ language }: Props) {
           : "Data was restored from the backup."
       );
       setSelectedBackupForRestore(null);
+      setDriveRestoreMode('merge');
+      setDriveReplaceAck(false);
     } catch (err: any) {
-      const kept = vaultRestoreMessage(err, isRtl);
+      const kept = restoreBlockedMessage(err, isRtl);
       if (kept) toast.error(kept);
       else handleDriveError(err, isRtl
         ? 'توقفت الاستعادة قبل اكتمالها. تحقق من الاتصال ثم أعد المحاولة.'
@@ -212,7 +227,7 @@ export default function GoogleDriveBackup({ language }: Props) {
     setIsDeleting(true);
     try {
       await deleteBackupFile(selectedBackupForDelete.id);
-      toast.success(isRtl ? "تم حذف ملف النسخة الاحتياطية بنجاح" : "Cloud backup discarded successfully");
+      toast.success(isRtl ? 'تم حذف ملف النسخة من Drive.' : 'The backup file was deleted from Drive.');
       setBackups(prev => prev.filter(f => f.id !== selectedBackupForDelete.id));
       setSelectedBackupForDelete(null);
     } catch (err) {
@@ -251,15 +266,15 @@ export default function GoogleDriveBackup({ language }: Props) {
       {/* Header Banner */}
       <div className="mb-10 text-center md:text-left">
         <h1 className="text-4xl font-extrabold text-slate-900 dark:text-white tracking-tight flex items-center justify-center md:justify-start gap-4">
-          <div className="w-12 h-12 bg-indigo-600 rounded-2xl flex items-center justify-center text-white shadow-xl shadow-indigo-100 dark:shadow-indigo-900/30 rotate-3">
-            <Cloud size={28} className="animate-pulse" />
+          <div className="w-12 h-12 bg-indigo-600 rounded-2xl flex items-center justify-center text-white">
+            <Cloud size={28} />
           </div>
-          {isRtl ? "مزامنة Google Drive السحابية" : "Google Drive Cloud Synchronizer"}
+          {isRtl ? 'النسخ على Google Drive' : 'Google Drive backups'}
         </h1>
         <p className="text-slate-500 dark:text-gray-400 mt-2 text-lg">
-          {isRtl 
-            ? "احفظ نسخة من بياناتك في Google Drive الخاص بك واستعدها عند الحاجة." 
-            : "Save a copy of your data to your own Google Drive and restore it when needed."}
+          {isRtl
+            ? 'ارفع نسخة من دفاتر متجرك إلى Google Drive في حسابك، واستعدها عند الحاجة.'
+            : 'Upload a copy of your store books to Google Drive in your account, and restore when needed.'}
         </p>
       </div>
 
@@ -269,8 +284,8 @@ export default function GoogleDriveBackup({ language }: Props) {
         <div className="lg:col-span-4 space-y-6">
           <div className="bg-white dark:bg-slate-800 rounded-[2.5rem] border border-slate-200/60 dark:border-slate-700/50 p-6 shadow-2xl space-y-6">
             <h3 className="text-lg font-black text-slate-800 dark:text-white uppercase tracking-wider flex items-center gap-2">
-              <CloudLightning className="text-indigo-600 dark:text-indigo-400" size={20} />
-              {isRtl ? "حالة الاتصال السحابي" : "Cloud Connectivity Status"}
+              <Cloud className="text-indigo-600 dark:text-indigo-400" size={20} />
+              {isRtl ? 'حالة الربط' : 'Connection'}
             </h3>
 
             {/* Glowing Connection Indicator */}
@@ -317,9 +332,10 @@ export default function GoogleDriveBackup({ language }: Props) {
               {!isConnected ? (
                 <button
                   onClick={handleConnect}
-                  className="w-full py-4 bg-indigo-600 hover:bg-indigo-700 text-white rounded-2xl font-black text-xs uppercase tracking-wider transition-all duration-300 flex items-center justify-center gap-2.5 shadow-lg shadow-indigo-100 dark:shadow-none active:scale-95 cursor-pointer"
+                  disabled={isConnecting}
+                  className="w-full py-4 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400 text-white rounded-2xl font-black text-xs uppercase tracking-wider transition-all duration-300 flex items-center justify-center gap-2.5 shadow-lg shadow-indigo-100 dark:shadow-none active:scale-95 cursor-pointer"
                 >
-                  <LogIn size={16} />
+                  {isConnecting ? <Spinner size={16} className="animate-spin" /> : <LogIn size={16} />}
                   {isRtl ? "ربط الحساب بـ Google Drive" : "Connect with Google Drive"}
                 </button>
               ) : (
@@ -334,7 +350,7 @@ export default function GoogleDriveBackup({ language }: Props) {
                     ) : (
                       <Upload size={16} />
                     )}
-                    {isRtl ? "إنشاء نسخة احتياطية جديدة" : "Save Cloud Backup Now"}
+                    {isRtl ? 'رفع نسخة جديدة' : 'Upload a new backup'}
                   </button>
 
                   <button
@@ -342,7 +358,7 @@ export default function GoogleDriveBackup({ language }: Props) {
                     className="w-full py-4 bg-slate-50 dark:bg-slate-700/40 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 border border-slate-200/50 dark:border-slate-700 rounded-2xl font-bold text-xs uppercase tracking-wider transition-all active:scale-95 cursor-pointer flex items-center justify-center gap-2"
                   >
                     <RefreshCw size={14} />
-                    {isRtl ? "تحديث قائمة السحابة" : "Refresh Backups List"}
+                    {isRtl ? 'تحديث القائمة' : 'Refresh list'}
                   </button>
                 </>
               )}
@@ -352,24 +368,24 @@ export default function GoogleDriveBackup({ language }: Props) {
           {/* Quick Metrics */}
           <div className="bg-slate-50 dark:bg-slate-800/40 border border-slate-200/40 dark:border-slate-800 rounded-[2rem] p-6 space-y-4">
             <h4 className="text-xs font-black text-slate-400 dark:text-slate-500 uppercase tracking-widest block leading-none">
-              {isRtl ? "ملخص حجم الجداول النشطة" : "Active Database Metrics"}
+              {isRtl ? 'ملخص الدفاتر الحالية' : 'Current books'}
             </h4>
             <div className="space-y-2 text-xs">
               <div className="flex justify-between items-center py-1">
-                <span className="opacity-60">{isRtl ? "أصناف مخزن المنتجات :" : "Warehouse Products:"}</span>
-                <span className="font-extrabold">{products.length} {isRtl ? "صنف" : "items"}</span>
+                <span className="opacity-60">{isRtl ? 'الأصناف' : 'Products'}</span>
+                <span className="font-extrabold">{products.length}</span>
               </div>
               <div className="flex justify-between items-center py-1">
-                <span className="opacity-60">{isRtl ? "إجمالي الفواتير والقيود :" : "Invoices & Records:"}</span>
-                <span className="font-extrabold">{invoices.length} {isRtl ? "فاتورة" : "bills"}</span>
+                <span className="opacity-60">{isRtl ? 'الفواتير' : 'Invoices'}</span>
+                <span className="font-extrabold">{invoices.length}</span>
               </div>
               <div className="flex justify-between items-center py-1">
-                <span className="opacity-60">{isRtl ? "أعضاء كادر الموظفين :" : "Employees Rostered:"}</span>
-                <span className="font-extrabold">{employees.length} {isRtl ? "موظف" : "staff"}</span>
+                <span className="opacity-60">{isRtl ? 'الموظفون' : 'Employees'}</span>
+                <span className="font-extrabold">{employees.length}</span>
               </div>
               <div className="flex justify-between items-center py-1">
-                <span className="opacity-60">{isRtl ? "قائمة دفاتر العملاء السريعة :" : "Customer Ledgers:"}</span>
-                <span className="font-extrabold">{customers.length} {isRtl ? "حساب" : "clients"}</span>
+                <span className="opacity-60">{isRtl ? 'العملاء' : 'Customers'}</span>
+                <span className="font-extrabold">{customers.length}</span>
               </div>
             </div>
           </div>
@@ -381,15 +397,15 @@ export default function GoogleDriveBackup({ language }: Props) {
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6 pb-4 border-b border-slate-100 dark:border-slate-700">
               <div>
                 <h3 className="text-xl font-extrabold text-slate-900 dark:text-white">
-                  {isRtl ? "النسخ الاحتياطية المتوفرة على السحابة" : "Cloud Backups History"}
+                  {isRtl ? 'النسخ على Drive' : 'Backups on Drive'}
                 </h3>
-                <span className="text-xs text-slate-400 font-bold block mt-1 uppercase tracking-widest font-mono">
-                  📂 {isRtl ? "مسار التخزين الافتراضي" : "Mostawdaee Cloud Storage Directory"}
+                <span className="text-xs text-slate-400 font-bold block mt-1">
+                  {isRtl ? 'ملفات أنشأها مستودعي في حسابك' : 'Files Mostawdaee created in your account'}
                 </span>
               </div>
               
               <div className="px-3 py-1 bg-indigo-50 dark:bg-indigo-950/20 text-[10px] font-black text-indigo-600 dark:text-indigo-400 uppercase rounded-lg">
-                {backups.length} {isRtl ? "ملفات مكتشفة" : "Backups Found"}
+                {backups.length} {isRtl ? 'ملف' : 'files'}
               </div>
             </div>
 
@@ -415,16 +431,16 @@ export default function GoogleDriveBackup({ language }: Props) {
               </div>
             ) : backups.length === 0 ? (
               <div className="flex flex-col items-center justify-center p-12 text-center h-[300px]">
-                <div className="w-16 h-16 bg-slate-50 dark:bg-slate-700/30 rounded-2xl flex items-center justify-center text-slate-300 mb-4">
-                  ☁️
+                <div className="w-16 h-16 bg-slate-50 dark:bg-slate-700/30 rounded-2xl flex items-center justify-center text-slate-400 mb-4">
+                  <Cloud size={32} />
                 </div>
                 <h4 className="text-base font-bold text-slate-800 dark:text-slate-100">
-                  {isRtl ? "لا توجد نسخ احتياطية للتطبيق حتى الآن" : "No Cloud Backups Found"}
+                  {isRtl ? 'لا توجد نسخ بعد' : 'No backups yet'}
                 </h4>
                 <p className="text-xs text-slate-400 dark:text-slate-500 max-w-sm mt-1 leading-relaxed">
-                  {isRtl 
-                    ? "قم بإنشاء نسخة احتياطية جديدة وسيتم إدراجها هنا لتتمكن من استعادتها في أي وقت."
-                    : "Create a new backup checkpoint list to securely seal your data."}
+                  {isRtl
+                    ? 'ارفع نسخة جديدة لتظهر هنا ويمكن استعادتها لاحقاً.'
+                    : 'Upload a new backup so it appears here and can be restored later.'}
                 </p>
               </div>
             ) : (
@@ -442,8 +458,8 @@ export default function GoogleDriveBackup({ language }: Props) {
                         <span className="px-1.5 py-0.5 bg-indigo-50 text-indigo-500 rounded font-mono text-[9px]">JSON</span>
                       </div>
                       <div className="text-[10px] text-slate-400 flex items-center gap-3">
-                        <span>📅 {formatDate(file.createdTime)}</span>
-                        <span>⚖️ {formatSize(file.size)}</span>
+                        <span>{formatDate(file.createdTime)}</span>
+                        <span>{formatSize(file.size)}</span>
                       </div>
                     </div>
 
@@ -455,7 +471,7 @@ export default function GoogleDriveBackup({ language }: Props) {
                         title={isRtl ? "استعادة من هذه النسخة البديلة" : "Apply Restore State"} aria-label={isRtl ? "استعادة من هذه النسخة البديلة" : "Apply Restore State"}
                       >
                         <RefreshCw size={12} />
-                        {isRtl ? "استعادة البيانات" : "Restore Data"}
+                        {isRtl ? 'استعادة' : 'Restore'}
                       </button>
 
                       <button
@@ -497,14 +513,34 @@ export default function GoogleDriveBackup({ language }: Props) {
                 </div>
               </div>
 
-              <div className="p-4 bg-amber-500/5 border border-amber-500/10 rounded-2xl space-y-2 text-xs leading-relaxed text-slate-600 dark:text-slate-300">
+              <div className="p-4 bg-amber-500/5 border border-amber-500/10 rounded-2xl space-y-3 text-xs leading-relaxed text-slate-600 dark:text-slate-300">
                 <p className="font-arabic">
-                  {isRtl 
-                    ? `ستُكتب سجلات هذه النسخة فوق السجلات التي تحمل نفس المعرّف، وتبقى السجلات غير الموجودة فيها كما هي. تُستبدل الإعدادات ورصيد الخزنة بما في النسخة، إلا إذا سُجّلت في الخزنة حركات أحدث منها:`
-                    : `Records in this backup will overwrite records with the same id; records that are not in it stay as they are. Settings and the vault balance are replaced by the backup, unless the vault has newer movements:`}
+                  {driveRestoreMode === 'replace'
+                    ? (isRtl
+                      ? 'الاستبدال يحذف نهائياً كل سجل غير موجود في النسخة بعد كتابتها. الورديات المغلقة والشيكات النهائية خارج النسخة ترفض العملية.'
+                      : 'Replace permanently deletes live rows missing from the backup after writing it. Closed shifts or finalized cheques missing from the backup refuse the restore.')
+                    : (isRtl
+                      ? 'الدمج يكتب فوق نفس المعرّف وتبقى السجلات الزائدة. إذا كانت الخزنة أو نشاط المتجر أحدث تُرفض الاستعادة:'
+                      : 'Merge overwrites matching ids; extra live rows stay. Newer vault or store activity refuses the restore:')}
                 </p>
                 <div className="font-mono bg-slate-100 dark:bg-slate-800 p-2 rounded-lg font-bold select-all overflow-x-auto break-all text-[11px] text-slate-800 dark:text-cyan-400">
                   {selectedBackupForRestore.name}
+                </div>
+                <div className="space-y-2 text-sm font-bold text-slate-700 dark:text-slate-200">
+                  <label className="flex items-start gap-2 cursor-pointer">
+                    <input type="radio" name="drive-restore-mode" checked={driveRestoreMode === 'merge'} onChange={() => { setDriveRestoreMode('merge'); setDriveReplaceAck(false); }} className="mt-1" />
+                    <span>{isRtl ? 'دمج (افتراضي)' : 'Merge (default)'}</span>
+                  </label>
+                  <label className="flex items-start gap-2 cursor-pointer">
+                    <input type="radio" name="drive-restore-mode" checked={driveRestoreMode === 'replace'} onChange={() => setDriveRestoreMode('replace')} className="mt-1" />
+                    <span>{isRtl ? 'استبدال — احذف ما ليس في النسخة' : 'Replace — delete what is not in the backup'}</span>
+                  </label>
+                  {driveRestoreMode === 'replace' && (
+                    <label className="flex items-start gap-2 cursor-pointer text-xs font-semibold text-rose-700 dark:text-rose-300 ms-6">
+                      <input type="checkbox" checked={driveReplaceAck} onChange={(e) => setDriveReplaceAck(e.target.checked)} className="mt-0.5" />
+                      <span>{isRtl ? 'أفهم أن السجلات غير الموجودة في الملف ستُحذف نهائياً.' : 'I understand rows missing from the file will be permanently deleted.'}</span>
+                    </label>
+                  )}
                 </div>
                 <p className="font-arabic font-bold text-amber-600">
                   ⚠️ {isRtl ? "لا يمكن التراجع عن الاستعادة." : "A restore cannot be undone."}
@@ -513,7 +549,7 @@ export default function GoogleDriveBackup({ language }: Props) {
 
               <div className="flex items-center justify-end gap-3 pt-2">
                 <button
-                  onClick={() => setSelectedBackupForRestore(null)}
+                  onClick={() => { setSelectedBackupForRestore(null); setDriveRestoreMode('merge'); setDriveReplaceAck(false); }}
                   disabled={isRestoreInProgress}
                   className="px-5 py-3 text-xs bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 font-bold text-slate-700 dark:text-slate-300 rounded-xl transition active:scale-95 cursor-pointer"
                 >
@@ -521,11 +557,11 @@ export default function GoogleDriveBackup({ language }: Props) {
                 </button>
                 <button
                   onClick={handleConfirmRestore}
-                  disabled={isRestoreInProgress}
-                  className="px-6 py-3 text-xs font-black bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl shadow-md uppercase tracking-wider transition active:scale-95 cursor-pointer flex items-center gap-2"
+                  disabled={isRestoreInProgress || (driveRestoreMode === 'replace' && !driveReplaceAck)}
+                  className="px-6 py-3 text-xs font-black bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-xl shadow-md uppercase tracking-wider transition active:scale-95 cursor-pointer flex items-center gap-2"
                 >
                   {isRestoreInProgress ? <Spinner size={14} className="animate-spin" /> : <Play size={12} />}
-                  {isRtl ? "نعم، استعد نسخة البيانات" : "Proceed System Restore"}
+                  {isRtl ? 'نعم، استعد النسخة' : 'Restore backup'}
                 </button>
               </div>
             </motion.div>
@@ -557,9 +593,9 @@ export default function GoogleDriveBackup({ language }: Props) {
 
               <div className="p-4 bg-rose-500/5 border border-rose-500/10 rounded-2xl space-y-2 text-xs leading-relaxed text-slate-600 dark:text-slate-300">
                 <p className="font-arabic">
-                  {isRtl 
-                    ? `هل أنت متأكد تماماً من رغبتك في مسح ملف النسخة الاحتياطية نهائياً من حساب Google Drive السحابي الخاص بك؟`
-                    : `Are you absolutely sure you want to discard and delete this timestamped backup object from Cloud storage?`}
+                    {isRtl
+                      ? 'سيُحذف هذا الملف من Google Drive ولا يمكن التراجع عن الحذف.'
+                      : 'This file will be deleted from Google Drive. This cannot be undone.'}
                 </p>
                 <div className="font-mono bg-slate-100 dark:bg-slate-800 p-2 rounded-lg font-bold overflow-x-auto break-all text-[11px] text-slate-800 dark:text-rose-400">
                   {selectedBackupForDelete.name}
@@ -580,7 +616,7 @@ export default function GoogleDriveBackup({ language }: Props) {
                   className="px-6 py-3 text-xs font-black bg-rose-600 hover:bg-rose-700 text-white rounded-xl shadow-md uppercase tracking-wider transition active:scale-95 cursor-pointer flex items-center gap-2 disabled:opacity-60 disabled:cursor-wait"
                 >
                   <Trash2 size={12} />
-                  {isRtl ? "نعم، احذف الملف" : "Proceed Discard"}
+                  {isRtl ? 'نعم، احذف الملف' : 'Delete backup'}
                 </button>
               </div>
             </motion.div>

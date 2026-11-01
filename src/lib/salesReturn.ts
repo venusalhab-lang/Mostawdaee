@@ -166,15 +166,44 @@ export interface RefundSplit {
 
 /**
  * How the money goes back, following how the sale was paid.
- * A credit sale lowers the debt first; what the customer already paid is returned in cash.
+ * Credit: lower AR first; cash paid at sale returns from the vault.
+ * Legacy full-آجل (no paidAmount): refundable amount is tracked in debtCurrency via debtAmount.
+ * Split tender: cash share = proportional paidAmount in invoice currency.
  */
 export function splitRefund(original: Invoice, figures: ReturnFigures, currentDebt: number): RefundSplit {
   const currency = original.currency as Currency;
   if (original.paymentMethod === 'credit') {
     const debtCurrency = (original.debtCurrency || currency) as Currency;
-    const owed = figures.debtAmount ?? figures.totalAmount;
-    const debt = roundMoney(Math.min(owed, Math.max(0, currentDebt)), debtCurrency);
-    return { vault: roundMoney(owed - debt, debtCurrency), vaultCurrency: debtCurrency, debt, debtCurrency, external: 0 };
+    const arPortion = figures.debtAmount ?? figures.totalAmount;
+    const debt = roundMoney(Math.min(arPortion, Math.max(0, currentDebt)), debtCurrency);
+    const uncoveredAr = roundMoney(arPortion - debt, debtCurrency);
+    const total = Number(original.totalAmount) || 0;
+    const share = total > 0 ? figures.totalAmount / total : 1;
+    const hasExplicitPaid = original.paidAmount !== undefined && original.paidAmount !== null;
+    if (!hasExplicitPaid) {
+      // Legacy full credit: everything was on AR (possibly FX); uncovered AR comes back as cash in debt currency.
+      return { vault: uncoveredAr, vaultCurrency: debtCurrency, debt, debtCurrency, external: 0 };
+    }
+    const paidAtSale = roundMoney(Math.min(Math.max(Number(original.paidAmount) || 0, 0), total), currency);
+    const paidShare = roundMoney(paidAtSale * share, currency);
+    if (debtCurrency === currency) {
+      return {
+        vault: roundMoney(paidShare + uncoveredAr, currency),
+        vaultCurrency: currency,
+        debt,
+        debtCurrency,
+        external: 0,
+      };
+    }
+    // Split + FX: cash share stays in invoice currency; uncovered AR refunded in debt currency is not mixed into vault.
+    // Uncovered AR in another currency is rare (customer already settled); treat as external so cash drawer stays honest.
+    return {
+      vault: paidShare,
+      vaultCurrency: currency,
+      debt,
+      debtCurrency,
+      external: uncoveredAr > 0 ? uncoveredAr : 0,
+    };
   }
   const nonCash = original.paymentMethod === 'card' || original.paymentMethod === 'wallet';
   if (nonCash && original.vaultPosted !== true) {

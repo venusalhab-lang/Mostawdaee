@@ -80,8 +80,15 @@ describe('planInvoiceVaultEntry', () => {
     expect(planInvoiceVaultEntry({ ...baseInvoice, paymentMethod: 'card' }, { includeNonCash: true })?.type).toBe('income');
   });
 
-  it('credit (آجل) sales never touch the vault', () => {
+  it('full credit (آجل) sales never touch the vault; split credit posts only paidAmount', () => {
     expect(planInvoiceVaultEntry({ ...baseInvoice, paymentMethod: 'credit' })).toBeNull();
+    expect(planInvoiceVaultEntry({ ...baseInvoice, paymentMethod: 'credit', paidAmount: 5 })?.amount).toBe(5);
+  });
+
+  it('refuses zero, negative, or unknown-currency cash posts', () => {
+    expect(planInvoiceVaultEntry({ ...baseInvoice, totalAmount: 0 })).toBeNull();
+    expect(planInvoiceVaultEntry({ ...baseInvoice, totalAmount: -5 })).toBeNull();
+    expect(planInvoiceVaultEntry({ ...baseInvoice, currency: 'EUR' as any })).toBeNull();
   });
 
   it('purchases are expenses in their own currency', () => {

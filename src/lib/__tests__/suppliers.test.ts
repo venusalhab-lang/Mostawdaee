@@ -4,6 +4,7 @@ import {
   checkPurchasePayment,
   findSupplierByName,
   owedBalances,
+  purchaseDeleteRequiresSupplierLedger,
   purchasePayment,
   runningBalances,
   supplierSuggestions,
@@ -44,6 +45,25 @@ describe('checkPurchasePayment', () => {
     expect(checkPurchasePayment('credit', 20, 20.0001, 'JOD', 's1')).toBeNull();
     expect(checkPurchasePayment('credit', 20, 20.001, 'JOD', 's1')).toBe('paid_exceeds_total');
     expect(checkPurchasePayment('credit', 20, 5, 'JOD', 's1')).toBeNull();
+  });
+});
+
+describe('purchaseDeleteRequiresSupplierLedger', () => {
+  it('requires a ledger only when credit AP or return debt would be reversed', () => {
+    expect(purchaseDeleteRequiresSupplierLedger(purchase())).toBe(false);
+    expect(purchaseDeleteRequiresSupplierLedger(purchase({ paymentMethod: 'credit', paidAmount: 23.2, supplierId: 's1' }))).toBe(false);
+    expect(purchaseDeleteRequiresSupplierLedger(purchase({ paymentMethod: 'credit', paidAmount: 10, supplierId: 's1' }))).toBe(true);
+    expect(purchaseDeleteRequiresSupplierLedger(purchase({ paymentMethod: 'credit', paidAmount: 10 }))).toBe(false);
+    expect(purchaseDeleteRequiresSupplierLedger({
+      ...purchase({ type: 'purchase_return', paymentMethod: 'cash' }),
+      supplierId: 's1',
+      refund: { debt: 5, vault: 0, vaultCurrency: 'JOD', external: 0 },
+    })).toBe(true);
+    expect(purchaseDeleteRequiresSupplierLedger({
+      ...purchase({ type: 'purchase_return', paymentMethod: 'cash' }),
+      supplierId: 's1',
+      refund: { debt: 0, vault: 8, vaultCurrency: 'JOD', external: 0 },
+    })).toBe(false);
   });
 });
 

@@ -76,8 +76,9 @@ describe('cost after a purchase return', () => {
     expect(costAfterReturn(tea, 0, 0, 'USD', 'USD')).toBeNull();
   });
 
-  it('never goes below zero when the goods went back above their average cost', () => {
-    expect(costAfterReturn(tea, 5, 100, 'USD', 'USD')).toBe(0);
+  it('keeps the prior unit cost when the return value exceeds carrying cost', () => {
+    // 20 × 3 = 60 carrying; returning 5 at 100 must not wipe the remaining 15 to $0 COGS.
+    expect(costAfterReturn(tea, 5, 100, 'USD', 'USD')).toBe(3);
   });
 });
 

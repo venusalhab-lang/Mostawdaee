@@ -251,6 +251,7 @@ export default function Auth({ language = 'ar', onLanguageToggle = () => {}, onL
         </div>
 
         <button
+          type="button"
           onClick={() => { sounds.playClick(); onLanguageToggle(); }}
           className="flex items-center gap-1.5 px-3 py-1.5 bg-white border border-gray-200 hover:border-gray-300 hover:bg-gray-50 rounded-xl text-xs font-semibold text-gray-600 transition shadow-xs cursor-pointer select-none"
         >
@@ -495,7 +496,8 @@ export default function Auth({ language = 'ar', onLanguageToggle = () => {}, onL
           </button>
         </div>
 
-        {!forgotMode && !recoveryMode && (
+        {/* Guest preview is for local development only — production requires a real Google/account session. */}
+        {!forgotMode && !recoveryMode && process.env.NODE_ENV !== 'production' && (
         <div className="mt-4 w-full flex flex-col items-center gap-1">
           <div className="w-full h-[1px] bg-gray-100 my-1" />
           <button

@@ -108,6 +108,7 @@ export default function ProfitsDashboard({ language = 'en', currency = 'JOD', on
         const entry = aggregates.get(key) || { name, qty: 0, revenue: 0, profit: 0, unknownCost: false };
         const rev = sign * convertAmount(revenue, invCurrency, selectedCurrency, exchangeRates);
         const cst = sign * convertAmount(cost ?? 0, invCurrency, selectedCurrency, exchangeRates);
+        if (!Number.isFinite(rev) || !Number.isFinite(cst)) continue;
         entry.qty = roundQty(entry.qty + sign * lineUnits(item));
         entry.revenue += rev;
         entry.profit += rev - cst;

@@ -14,15 +14,25 @@ export interface DigitalProduct {
   type: 'subscription' | 'consumable';
 }
 
+/**
+ * Google Play subscription SKU (must match Play Console exactly).
+ * The trailing "_100" is the original product id; the billed amount is set in Play Console and
+ * mirrored below for UI fallbacks only — do not rename the SKU or existing subscribers break.
+ */
+export const PLAY_PREMIUM_PRODUCT_ID = 'mostawdaee_premium_100';
+/** Display fallback when Play has not returned a localized price yet. */
+export const PLAY_PREMIUM_FALLBACK_PRICE = '$119';
+export const PLAY_PREMIUM_AMOUNT_USD = 119;
+
 // Configured products as declared in Google Play Console
 export const PLAY_STORE_PRODUCTS: DigitalProduct[] = [
   {
-    id: 'mostawdaee_premium_100',
+    id: PLAY_PREMIUM_PRODUCT_ID,
     name: 'Mostawdaee Premium (Annual)',
     description: '1-Year Unified premium commercial access, auto-backups and mobile dashboard access.',
-    price: '$100.00',
+    price: '$119.00',
     currency: 'USD',
-    amount: 100,
+    amount: PLAY_PREMIUM_AMOUNT_USD,
     type: 'subscription'
   }
 ];

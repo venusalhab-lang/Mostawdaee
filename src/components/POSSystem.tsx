@@ -23,10 +23,21 @@ import {
   Smartphone,
   PauseCircle,
   Package,
-  Clock
+  Clock,
+  User,
+  X,
 } from 'lucide-react';
 import { useFirebase } from './FirebaseProvider';
-import { readUserCache, writeUserCache, migrateLegacyUserCache } from '../lib/userStorage';
+import { migrateLegacyUserCache } from '../lib/userStorage';
+import {
+  type HeldBill,
+  heldBillFitsStock,
+  openHeldBill,
+  parkedHeldBills,
+  readHeldBills,
+  unitsHeldParked,
+  writeHeldBills,
+} from '../lib/heldBills';
 import { Language, Product, Invoice, InvoiceItem, Currency } from '../types';
 import { translations } from '../translations';
 import { motion, AnimatePresence } from 'motion/react';
@@ -37,7 +48,7 @@ import {
   PosCurrency,
   isPosCurrency,
   buildUsdUnitRates,
-  convertMoney,
+  safeConvertMoney,
   roundMoney,
   formatMoney,
   currencyDecimals,
@@ -48,13 +59,17 @@ import {
 import { consumeInvoiceNumber, peekInvoiceNumber } from '../lib/invoiceNumber';
 import { computeInvoiceTotals, resolveVatRate } from '../lib/invoiceTotals';
 import { markUnsavedWork } from '../lib/backNavigation';
+import { playPosBeep } from '../lib/sounds';
 import { getExternalSalesApi } from '../lib/externalSalesApi';
 import { computeStockStatus } from '../lib/stock';
 import { pickForPurchase, pickForSale, productsForCode } from '../lib/productLookup';
 import { formatPackStock, isPackLine, lineAsPack, lineKey, lineQuantityText, lineUnits, productPack, productsForPackCode, unitsInCart } from '../lib/packs';
+import { checkSalePayment } from '../lib/salesPayment';
 import CurrencyPicker from './CurrencyPicker';
 import ShiftPanel from './ShiftPanel';
 import { openShiftOf } from '../lib/shifts';
+import { emptyQuickRegForm, parseQuickRegQuantity } from '../lib/posQuickReg';
+import { resolveProductCategory, resolveProductSku } from '../lib/productForm';
 import ShowMoreBar from './ui/ShowMoreBar';
 import { useProgressiveList } from '../hooks/useProgressiveList';
 
@@ -110,7 +125,7 @@ export default function POSSystem({ language }: POSSystemProps) {
   const t = translations[language];
   const isRtl = language === 'ar';
   
-  const { products, saveInvoice, settings, saveProduct, warehouses, user, can, workspace, shifts } = useFirebase();
+  const { products, saveInvoice, settings, saveProduct, warehouses, user, can, workspace, shifts, customers } = useFirebase();
   const myShift = openShiftOf(shifts, user?.uid);
   const [showShiftPanel, setShowShiftPanel] = useState(false);
   const canManageCatalog = can('manage_catalog');
@@ -137,17 +152,7 @@ export default function POSSystem({ language }: POSSystemProps) {
   
   // Quick Product Registration state variables
   const [showQuickRegModal, setShowQuickRegModal] = useState(false);
-  const [quickRegForm, setQuickRegForm] = useState({
-    sku: '',
-    name: '',
-    category: '',
-    brand: '',
-    quantity: 10,
-    unitCost: 0,
-    sellingPrice: 0,
-    warehouseId: '',
-    lowStockThreshold: 5
-  });
+  const [quickRegForm, setQuickRegForm] = useState(() => emptyQuickRegForm());
 
   // States
   const [posMode, setPosMode] = useState<'sale' | 'purchase'>('sale');
@@ -164,27 +169,30 @@ export default function POSSystem({ language }: POSSystemProps) {
   const [lastScannedProductId, setLastScannedProductId] = useState<string | null>(null);
   const [paymentMethod, setPaymentMethod] = useState<'cash' | 'card' | 'wallet'>('cash');
   const [receivedAmount, setReceivedAmount] = useState<string>('');
-  const [heldBills, setHeldBills] = useState<any[]>([]);
+  const [selectedCustomerId, setSelectedCustomerId] = useState<string>('');
+  const [customerQuery, setCustomerQuery] = useState('');
+  const [heldBills, setHeldBills] = useState<HeldBill[]>([]);
 
   const discountInputRef = useRef<HTMLInputElement>(null);
 
-  const skipHeldPersist = useRef(true);
-
   useEffect(() => {
-    skipHeldPersist.current = true;
     migrateLegacyUserCache(sessionUid);
-    setHeldBills(readUserCache(sessionUid, 'held_bills', []));
+    setHeldBills(readHeldBills(sessionUid));
   }, [sessionUid]);
 
-  useEffect(() => {
-    if (skipHeldPersist.current) {
-      skipHeldPersist.current = false;
-      return;
+  const persistHeld = (next: HeldBill[]): boolean => {
+    if (!writeHeldBills(sessionUid, next)) {
+      toast.error(isRtl
+        ? 'تعذّر حفظ الفواتير المعلّقة على هذا الجهاز. لم يُغيَّر شيء.'
+        : 'Could not save held bills on this device. Nothing was changed.');
+      playBeep('error');
+      return false;
     }
-    writeUserCache(sessionUid, 'held_bills', heldBills);
-  }, [heldBills, sessionUid]);
+    setHeldBills(next);
+    return true;
+  };
 
-  // Handle suspend current bill
+  // Handle suspend current bill — disk write first, then clear the cart (fail-closed).
   const handleSuspendBill = () => {
     if (posMode !== 'sale') return;
     if (scannedItems.length === 0) {
@@ -192,12 +200,13 @@ export default function POSSystem({ language }: POSSystemProps) {
       playBeep('error');
       return;
     }
-    const heldId = crypto.randomUUID();
-    const billNum = `HLD-${heldId.slice(0, 6).toUpperCase()}`;
+    const open = openHeldBill(heldBills);
+    const heldId = open?.id || crypto.randomUUID();
+    const billNum = open?.invoiceNumber || `HLD-${heldId.slice(0, 6).toUpperCase()}`;
     const formattedTime = new Date().toLocaleTimeString(isRtl ? 'ar-EG' : 'en-US', { hour: '2-digit', minute: '2-digit' });
     const itemsCount = scannedItems.reduce((acc, item) => acc + lineUnits(item), 0);
-    
-    const newHeldBill = {
+
+    const newHeldBill: HeldBill = {
       id: heldId,
       invoiceNumber: billNum,
       items: [...scannedItems],
@@ -207,35 +216,57 @@ export default function POSSystem({ language }: POSSystemProps) {
       itemCount: itemsCount,
       totalAmount: grandTotal,
       currency: activeCurrency,
-      mode: 'sale' as const,
+      mode: 'sale',
+      status: 'parked',
     };
-    setHeldBills(prev => [...prev, newHeldBill]);
+    const withoutOpen = heldBills.filter((b) => b.id !== heldId);
+    const next = [...withoutOpen, newHeldBill];
+    if (!persistHeld(next)) return;
+
     setScannedItems([]);
     setDiscount(0);
     setReceivedAmount('');
     playBeep('success_checkout');
     toast.success(
-      isRtl 
-        ? `تم تعليق الفاتورة بنجاح وتحويلها لانتظار الصندوق بالرمز #${billNum}` 
+      isRtl
+        ? `تم تعليق الفاتورة بنجاح وتحويلها لانتظار الصندوق بالرمز #${billNum}`
         : `Bill suspended successfully as #${billNum}`
     );
   };
 
-  // Restore suspended bill
-  const handleRestoreBill = (bill: any) => {
+  // Restore suspended bill — stays on disk as "open" until checkout succeeds.
+  const handleRestoreBill = (bill: HeldBill) => {
     if (posMode !== 'sale' || (bill.mode ?? 'sale') !== 'sale') return;
+    if ((bill.status || 'parked') === 'open') return;
     if (scannedItems.length > 0) {
       if (!window.confirm(isRtl ? 'هناك منتجات في السلة حالياً. هل ترغب في سحب الفاتورة المعلقة واستبدال السلة الحالية بها؟' : 'You have active items. Restore held bill and replace current cart?')) {
         return;
       }
     }
+    const qtyById = Object.fromEntries(products.map((p) => [p.id, Number(p.quantity) || 0]));
+    const stock = heldBillFitsStock(bill, qtyById, (productId) => unitsHeldParked(heldBills, productId, bill.id));
+    if (stock.ok === false) {
+      const name = bill.items.find((i) => i.productId === stock.productId)?.description || stock.productId;
+      toast.error(isRtl
+        ? `لا يمكن استرجاع الفاتورة: المخزون غير كافٍ لـ «${name}» (المتوفر ${stock.available}).`
+        : `Cannot restore: insufficient stock for “${name}” (available ${stock.available}).`);
+      playBeep('error');
+      return;
+    }
+
+    const alreadyOpen = openHeldBill(heldBills);
+    let next = heldBills.map((b) => (b.id === bill.id ? { ...b, status: 'open' as const } : b));
+    if (alreadyOpen && alreadyOpen.id !== bill.id) {
+      next = next.map((b) => (b.id === alreadyOpen.id ? { ...b, status: 'parked' as const } : b));
+    }
+    if (!persistHeld(next)) return;
+
     itemBaseRef.current = {};
     setScannedItems(bill.items);
     setDiscount(bill.discount ?? 0);
     if (isPosCurrency(bill.currency)) {
       setPosCurrency(bill.currency);
     }
-    setHeldBills(prev => prev.filter(b => b.id !== bill.id));
     playBeep('success');
     toast.success(isRtl ? 'تم استرجاع الفاتورة المعلقة بنجاح للواجهة' : 'Suspended bill restored successfully');
   };
@@ -243,26 +274,60 @@ export default function POSSystem({ language }: POSSystemProps) {
   // Discard a held bill
   const handleDiscardHeldBill = (billId: string) => {
     if (window.confirm(isRtl ? 'هل أنت متأكد من رغبتك في حذف وإلغاء هذه الفاتورة المعلقة تماماً؟' : 'Are you sure you want to permanently discard this held bill?')) {
-      setHeldBills(prev => prev.filter(b => b.id !== billId));
+      const discarded = heldBills.find((b) => b.id === billId);
+      const next = heldBills.filter((b) => b.id !== billId);
+      if (!persistHeld(next)) return;
+      if (discarded?.status === 'open') {
+        setScannedItems([]);
+        setDiscount(0);
+        setReceivedAmount('');
+      }
       playBeep('error');
       toast.success(isRtl ? 'تم إلغاء الفاتورة المعلقة وإزالتها من الذاكرة بنجاح' : 'Held bill discarded successfully');
     }
   };
 
+  const finishOpenHeldBill = () => {
+    const open = openHeldBill(heldBills);
+    if (!open) return;
+    const next = heldBills.filter((b) => b.id !== open.id);
+    if (!writeHeldBills(sessionUid, next)) {
+      console.warn('[POS] held bill stayed open after sale; will retry on next action');
+      return;
+    }
+    setHeldBills(next);
+  };
+
   const handleCurrencyChange = (targetCurrency: string, showToast = true) => {
     if (!isPosCurrency(targetCurrency) || targetCurrency === posCurrency) return;
     if (scannedItems.length > 0) {
-      setScannedItems((prev) =>
-        prev.map((item) => {
-          const base = itemBaseRef.current[lineKey(item)];
-          const newPrice = base
-            ? convertMoney(base.amount, base.currency, targetCurrency, usdUnitRates)
-            : convertMoney(item.unitPrice, posCurrency, targetCurrency, usdUnitRates);
-          const qty = Number(item.quantity) || 0;
-          return { ...item, unitPrice: newPrice, total: roundMoney(newPrice * qty, targetCurrency) };
-        })
-      );
-      setDiscount((d) => convertMoney(d, posCurrency, targetCurrency, usdUnitRates));
+      const nextItems: typeof scannedItems = [];
+      for (const item of scannedItems) {
+        const base = itemBaseRef.current[lineKey(item)];
+        const newPrice = safeConvertMoney(
+          base ? base.amount : item.unitPrice,
+          base ? base.currency : posCurrency,
+          targetCurrency,
+          usdUnitRates,
+        );
+        if (newPrice === null) {
+          toast.error(isRtl
+            ? `تعذّر تحويل أسعار السلة إلى ${targetCurrency}. بقيت العملة ${posCurrency}.`
+            : `Could not convert the cart to ${targetCurrency}. Kept ${posCurrency}.`);
+          return;
+        }
+        const qty = Number(item.quantity) || 0;
+        nextItems.push({ ...item, unitPrice: newPrice, total: roundMoney(newPrice * qty, targetCurrency) });
+      }
+      const nextDiscount = safeConvertMoney(discount, posCurrency, targetCurrency, usdUnitRates);
+      if (nextDiscount === null) {
+        toast.error(isRtl
+          ? `تعذّر تحويل الخصم إلى ${targetCurrency}. بقيت العملة ${posCurrency}.`
+          : `Could not convert the discount to ${targetCurrency}. Kept ${posCurrency}.`);
+        return;
+      }
+      setScannedItems(nextItems);
+      setDiscount(nextDiscount);
       setReceivedAmount('');
     }
     setPosCurrency(targetCurrency);
@@ -288,7 +353,6 @@ export default function POSSystem({ language }: POSSystemProps) {
     setScannedItems([]);
     setDiscount(0);
     setReceivedAmount('');
-    playBeep('success');
   };
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showSuccessModal, setShowSuccessModal] = useState(false);
@@ -348,15 +412,24 @@ export default function POSSystem({ language }: POSSystemProps) {
     }
     hadLiveRatesRef.current = true;
     if (scannedItems.length === 0) return;
-    setScannedItems((prev) =>
-      prev.map((item) => {
+    setScannedItems((prev) => {
+      const next: typeof prev = [];
+      for (const item of prev) {
         const base = itemBaseRef.current[lineKey(item)];
-        if (!base) return item;
-        const newPrice = convertMoney(base.amount, base.currency, posCurrency, usdUnitRates);
+        if (!base) {
+          next.push(item);
+          continue;
+        }
+        const newPrice = safeConvertMoney(base.amount, base.currency, posCurrency, usdUnitRates);
+        if (newPrice === null) {
+          next.push(item);
+          continue;
+        }
         const qty = Number(item.quantity) || 0;
-        return { ...item, unitPrice: newPrice, total: roundMoney(newPrice * qty, posCurrency) };
-      })
-    );
+        next.push({ ...item, unitPrice: newPrice, total: roundMoney(newPrice * qty, posCurrency) });
+      }
+      return next;
+    });
   }, [liveRates, posCurrency, usdUnitRates, scannedItems.length]);
 
   // Background offline sales synchronization hook
@@ -486,22 +559,15 @@ export default function POSSystem({ language }: POSSystemProps) {
           return;
         }
         setQuickRegForm({
+          ...emptyQuickRegForm(warehouses?.[0]?.id || ''),
           sku: cleanText,
-          name: '',
-          category: '',
-          brand: '',
-          quantity: 10,
-          unitCost: 0,
-          sellingPrice: 0,
-          warehouseId: warehouses && warehouses.length > 0 ? warehouses[0].id : '',
-          lowStockThreshold: 5
         });
         setBarcodeInput('');
         setShowQuickRegModal(true);
         toast.info(
           isRtl 
-            ? `الباركود "${cleanText}" غير مسجل. يرجى تسجيله للإضافة المستمرة لجرد المستودعات وسلة البيع.` 
-            : `Barcode "${cleanText}" is not registered. Please register it now to add to warehouse stock.`
+            ? `الباركود "${cleanText}" غير مسجل. سجّله الآن وأدخل الكمية الموجودة فعلاً (صفر إن لم يصل بعد).` 
+            : `Barcode "${cleanText}" is not registered. Register it now and enter the quantity actually on hand (zero if not received yet).`
         );
       }
     }
@@ -596,7 +662,6 @@ export default function POSSystem({ language }: POSSystemProps) {
 
   // References
   const scannerInputRef = useRef<HTMLInputElement>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
 
   const focusScanner = () => {
     const active = document.activeElement as HTMLElement | null;
@@ -624,50 +689,7 @@ export default function POSSystem({ language }: POSSystemProps) {
     };
   }, []);
 
-  // Beep sound simulator using Web Audio API for a premium real-life hardware register feel
-  const playBeep = (type: 'success' | 'error' | 'success_checkout') => {
-    try {
-      if (!audioContextRef.current) {
-        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
-      }
-      const ctx = audioContextRef.current;
-      if (ctx.state === 'suspended') {
-        ctx.resume();
-      }
-
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-
-      if (type === 'success') {
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(1200, ctx.currentTime);
-        gain.gain.setValueAtTime(0.1, ctx.currentTime);
-        gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.12);
-        osc.start();
-        osc.stop(ctx.currentTime + 0.12);
-      } else if (type === 'error') {
-        osc.type = 'sawtooth';
-        osc.frequency.setValueAtTime(150, ctx.currentTime);
-        gain.gain.setValueAtTime(0.15, ctx.currentTime);
-        gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.3);
-        osc.start();
-        osc.stop(ctx.currentTime + 0.3);
-      } else if (type === 'success_checkout') {
-        // High-low cheerful cash register chord sound
-        osc.type = 'triangle';
-        osc.frequency.setValueAtTime(800, ctx.currentTime);
-        gain.gain.setValueAtTime(0.12, ctx.currentTime);
-        osc.start();
-        osc.frequency.setValueAtTime(1500, ctx.currentTime + 0.1);
-        gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.25);
-        osc.stop(ctx.currentTime + 0.25);
-      }
-    } catch (e) {
-      console.warn('Audio beeps not supported or blocked by user safety permission policies', e);
-    }
-  };
+  const playBeep = playPosBeep;
 
   // Setup Keyboard shortcut listeners (e.g. F9, F10, Esc)
   useEffect(() => {
@@ -688,6 +710,10 @@ export default function POSSystem({ language }: POSSystemProps) {
         e.preventDefault();
         if (scannedItems.length > 0) {
           if (confirm(isRtl ? 'هل أنت متأكد من إلغاء الفاتورة الحالية بالكامل وتفريغ السلة؟' : 'Are you sure you want to cancel the current invoice and clear the cart?')) {
+            const open = openHeldBill(heldBills);
+            if (open) {
+              persistHeld(heldBills.map((b) => (b.id === open.id ? { ...b, status: 'parked' as const } : b)));
+            }
             setScannedItems([]);
             setDiscount(0);
             setReceivedAmount('');
@@ -716,21 +742,15 @@ export default function POSSystem({ language }: POSSystemProps) {
       } else if (e.key === 'F7') {
         e.preventDefault();
         if (!canManageCatalog) return;
-        setQuickRegForm({
-          sku: '',
-          name: '',
-          category: '',
-          brand: '',
-          quantity: 10,
-          unitCost: 0,
-          sellingPrice: 0,
-          warehouseId: warehouses && warehouses.length > 0 ? warehouses[0].id : '',
-          lowStockThreshold: 5
-        });
+        setQuickRegForm(emptyQuickRegForm(warehouses?.[0]?.id || ''));
         setShowQuickRegModal(true);
       } else if (e.key === 'Escape') {
         if (scannedItems.length > 0) {
           if (confirm(isRtl ? 'هل تريد بالتأكيد إفراغ المعاملة الحالية؟' : 'Are you sure you want to clear current items?')) {
+            const open = openHeldBill(heldBills);
+            if (open) {
+              persistHeld(heldBills.map((b) => (b.id === open.id ? { ...b, status: 'parked' as const } : b)));
+            }
             setScannedItems([]);
             setDiscount(0);
             setReceivedAmount('');
@@ -763,7 +783,7 @@ export default function POSSystem({ language }: POSSystemProps) {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [scannedItems, posMode, discount, warehouses, showCashPaymentModal, barcodeInput]);
+  }, [scannedItems, posMode, discount, warehouses, showCashPaymentModal, barcodeInput, heldBills, isRtl]);
 
   // Handle Scanning Lookup (Now supporting asynchronous external API fallbacks safely)
   const handleBarcodeSubmit = async (e: React.FormEvent) => {
@@ -802,7 +822,6 @@ export default function POSSystem({ language }: POSSystemProps) {
       // Open search lookup helper
       setSearchTerm(query);
       setShowProductLookup(true);
-      playBeep('success');
       return;
     }
 
@@ -825,7 +844,7 @@ export default function POSSystem({ language }: POSSystemProps) {
             sku: externalProduct.barcode || externalProduct.sku || query,
             unitCost: Number(externalProduct.costPrice || externalProduct.price || 0),
             sellingPrice: Number(externalProduct.sellingPrice || externalProduct.price || 0),
-            quantity: Number(externalProduct.stock || externalProduct.quantity || 10),
+            quantity: Number(externalProduct.stock ?? externalProduct.quantity ?? 0),
             category: externalProduct.category || '',
             brand: externalProduct.brand || ''
           };
@@ -833,7 +852,6 @@ export default function POSSystem({ language }: POSSystemProps) {
           addItemToPOS(mappedProduct);
           setBarcodeInput('');
           apiProductFound = true;
-          playBeep('success');
           toast.success(isRtl ? 'تم العثور على المنتج وإضافته بنجاح للائحة عبر الـ API!' : 'Product found and added from API database!');
           return;
         }
@@ -854,22 +872,15 @@ export default function POSSystem({ language }: POSSystemProps) {
     if (!apiProductFound) {
       playBeep('error');
       setQuickRegForm({
+        ...emptyQuickRegForm(warehouses?.[0]?.id || ''),
         sku: query,
-        name: '',
-        category: '',
-        brand: '',
-        quantity: 10,
-        unitCost: 0,
-        sellingPrice: 0,
-        warehouseId: warehouses && warehouses.length > 0 ? warehouses[0].id : '',
-        lowStockThreshold: 5
       });
       setBarcodeInput('');
       setShowQuickRegModal(true);
       toast.info(
         isRtl
-          ? `الرمز "${query}" غير مسجل. يرجى تسجيله فورياً للإضافة التلقائية لسلة الكاشير الكلية.`
-          : `SKU "${query}" is not registered. Please register it now to add to stock.`
+          ? `الرمز "${query}" غير مسجل. سجّله الآن وأدخل الكمية الموجودة فعلاً (صفر إن لم يصل بعد).`
+          : `SKU "${query}" is not registered. Register it now and enter the quantity actually on hand (zero if not received yet).`
       );
     }
   };
@@ -898,13 +909,22 @@ export default function POSSystem({ language }: POSSystemProps) {
 
     // Convert base price using the product's custom currency (or default store currency) to the POS activeCurrency
     const baseCurrency = product.currency || settings?.currency || 'JOD';
-    const finalPrice = Number(convertMoney(targetPrice, baseCurrency, activeCurrency, usdUnitRates)) || 0;
+    const finalPrice = safeConvertMoney(targetPrice, baseCurrency, activeCurrency, usdUnitRates);
+    if (finalPrice === null) {
+      toast.error(isRtl
+        ? `تعذّر تحويل سعر «${product.name}» من ${baseCurrency} إلى ${activeCurrency}. لم يُضف للسلة.`
+        : `Could not convert “${product.name}” from ${baseCurrency} to ${activeCurrency}. Not added.`);
+      return;
+    }
 
-    // Stock is checked in units across every line of this product (a box line and a loose line share it).
+    // Stock is checked in units across every line of this product (a box line and a loose line share it),
+    // after units already parked in other held bills.
     if (posMode === 'sale') {
       const productQty = Number(product.quantity) || 0;
-      if (unitsInCart(scannedItems, product.id) + (pack ? pack.size : 1) > productQty) {
-        insufficientStock(productQty);
+      const reserved = unitsHeldParked(heldBills, product.id);
+      const available = productQty - reserved;
+      if (unitsInCart(scannedItems, product.id) + (pack ? pack.size : 1) > available) {
+        insufficientStock(Math.max(0, available));
         return;
       }
     }
@@ -933,11 +953,7 @@ export default function POSSystem({ language }: POSSystemProps) {
     
     // Set the last scanned product state to trigger UI visual flash confirmation
     setLastScannedProductId(product.id);
-    const audioContext = audioContextRef.current || new (window.AudioContext || (window as any).webkitAudioContext)();
-    if (audioContext.state === 'suspended') {
-      audioContext.resume().catch(() => {});
-    }
-    const timeoutId = setTimeout(() => {
+    setTimeout(() => {
       setLastScannedProductId(null);
     }, 1500);
 
@@ -948,8 +964,13 @@ export default function POSSystem({ language }: POSSystemProps) {
   const fitsStock = (item: InvoiceItem, qty: number) => {
     if (posMode !== 'sale') return true;
     const product = products.find(p => p.id === item.productId);
-    if (!product) return true;
-    const available = Number(product.quantity) || 0;
+    if (!product) {
+      toast.error(isRtl
+        ? `الصنف «${item.description}» لم يعد في المخزون. أزله من السلة.`
+        : `“${item.description}” is no longer in inventory. Remove it from the cart.`);
+      return false;
+    }
+    const available = Math.max(0, (Number(product.quantity) || 0) - unitsHeldParked(heldBills, product.id));
     if (unitsInCart(scannedItems, item.productId, lineKey(item)) + lineUnits({ ...item, quantity: qty }) <= available) return true;
     insufficientStock(available);
     return false;
@@ -972,7 +993,6 @@ export default function POSSystem({ language }: POSSystemProps) {
     const uPrice = Number(updated[idx].unitPrice) || 0;
     updated[idx] = { ...updated[idx], quantity: newQty, total: roundMoney(newQty * uPrice, activeCurrency) };
     setScannedItems(updated);
-    playBeep('success');
   };
 
   const setItemQty = (key: string, val: number) => {
@@ -1012,7 +1032,7 @@ export default function POSSystem({ language }: POSSystemProps) {
       packName: toPack ? lineAsPack(pack).packName : undefined,
     };
     if (posMode === 'sale') {
-      const available = Number(product.quantity) || 0;
+      const available = Math.max(0, (Number(product.quantity) || 0) - unitsHeldParked(heldBills, product.id));
       if (unitsInCart(rest, item.productId) + lineUnits(next) > available) {
         insufficientStock(available);
         return;
@@ -1021,16 +1041,20 @@ export default function POSSystem({ language }: POSSystemProps) {
     const baseCurrency = product.currency || settings?.currency || 'JOD';
     const baseAmount = basePriceFor(product, toPack);
     itemBaseRef.current[nextKey] = { amount: baseAmount, currency: baseCurrency };
-    const unitPrice = Number(convertMoney(baseAmount, baseCurrency, activeCurrency, usdUnitRates)) || 0;
+    const unitPrice = safeConvertMoney(baseAmount, baseCurrency, activeCurrency, usdUnitRates);
+    if (unitPrice === null) {
+      toast.error(isRtl
+        ? `تعذّر تحويل سعر «${product.name}». لم يُغيَّر السطر.`
+        : `Could not convert “${product.name}”. Line unchanged.`);
+      return;
+    }
     const replaced = { ...next, unitPrice, total: roundMoney(qty * unitPrice, activeCurrency) };
     const at = Math.min(idx, rest.length);
     setScannedItems([...rest.slice(0, at), replaced, ...rest.slice(at)]);
-    playBeep('success');
   };
 
   const removeItem = (key: string) => {
     setScannedItems(scannedItems.filter(item => lineKey(item) !== key));
-    playBeep('error');
     toast.success(isRtl ? 'تم حذف الصنف من القائمة' : 'Item removed from bill');
   };
 
@@ -1070,6 +1094,18 @@ export default function POSSystem({ language }: POSSystemProps) {
     });
   };
 
+  const selectedCustomer = useMemo(
+    () => customers.find((c) => c.id === selectedCustomerId) || null,
+    [customers, selectedCustomerId],
+  );
+  const customerMatches = useMemo(() => {
+    const q = customerQuery.trim().toLowerCase();
+    if (!q) return customers.slice(0, 8);
+    return customers
+      .filter((c) => c.name.toLowerCase().includes(q) || (c.phone || '').includes(q))
+      .slice(0, 8);
+  }, [customers, customerQuery]);
+
   // Submit standard invoice
   const handleSubmitProcess = async (cashOverride?: number, methodOverride?: 'cash' | 'card' | 'wallet') => {
     const method = methodOverride || paymentMethod;
@@ -1085,20 +1121,73 @@ export default function POSSystem({ language }: POSSystemProps) {
     try {
       const typedCash = typeof cashOverride === 'number' ? cashOverride : parseFloat(receivedAmount);
       const isCashSale = posMode === 'sale' && method === 'cash';
-      const parsedCash = isCashSale ? (Number.isFinite(typedCash) && typedCash > 0 ? typedCash : grandTotal) : grandTotal;
-      if (isCashSale && parsedCash < grandTotal - 1e-6) {
-        setIsSubmitting(false);
-        playBeep('error');
-        toast.error(isRtl ? 'المبلغ المستلم أقل من إجمالي الفاتورة!' : 'Received amount is less than the invoice total!');
-        return;
+      const parsedCash = isCashSale
+        ? (receivedAmount !== '' || typeof cashOverride === 'number'
+          ? (Number.isFinite(typedCash) ? typedCash : 0)
+          : grandTotal)
+        : grandTotal;
+
+      let saleMethod: 'cash' | 'card' | 'wallet' | 'credit' = posMode === 'purchase' ? 'cash' : method;
+      let paidNow = parsedCash;
+      let changeDue = 0;
+      let debtAmount: number | undefined;
+      let debtCurrency: Currency | undefined;
+      const customer = selectedCustomer;
+
+      if (posMode === 'sale' && isCashSale && parsedCash < grandTotal - 1e-6) {
+        if (!customer) {
+          setIsSubmitting(false);
+          submitLockRef.current = false;
+          playBeep('error');
+          toast.error(isRtl
+            ? 'المبلغ أقل من الإجمالي. اختر عميلاً لتسجيل الباقي ديناً، أو أدخل المبلغ كاملاً.'
+            : 'Amount is less than the total. Select a customer to put the remainder on account, or take full payment.');
+          return;
+        }
+        paidNow = roundMoney(Math.max(0, parsedCash), activeCurrency);
+        const payErr = checkSalePayment('credit', grandTotal, paidNow, activeCurrency as Currency, customer.id);
+        if (payErr) {
+          setIsSubmitting(false);
+          submitLockRef.current = false;
+          playBeep('error');
+          toast.error(isRtl ? 'تعذّر تسجيل الدفع الجزئي.' : 'Could not record the partial payment.');
+          return;
+        }
+        const owed = roundMoney(grandTotal - paidNow, activeCurrency);
+        const custCurrency = (customer.currency || activeCurrency) as Currency;
+        if (custCurrency === activeCurrency) {
+          debtAmount = owed;
+          debtCurrency = custCurrency;
+        } else {
+          const converted = safeConvertMoney(owed, activeCurrency, custCurrency, usdUnitRates);
+          if (converted === null) {
+            setIsSubmitting(false);
+            submitLockRef.current = false;
+            playBeep('error');
+            toast.error(isRtl
+              ? `تعذّر تحويل الدين إلى ${custCurrency}. اجعل الفاتورة بعملة العميل أو حدّث أسعار الصرف.`
+              : `Could not convert the debt to ${custCurrency}. Bill in the customer's currency or refresh rates.`);
+            return;
+          }
+          debtAmount = converted;
+          debtCurrency = custCurrency;
+        }
+        saleMethod = 'credit';
+        changeDue = 0;
+      } else if (isCashSale) {
+        paidNow = parsedCash;
+        changeDue = roundMoney(Math.max(0, parsedCash - grandTotal), activeCurrency);
       }
+
       const generatedNo = peekInvoiceNumber(invoicePrefix, sessionUid, storeId);
-      const changeDue = roundMoney(Math.max(0, parsedCash - grandTotal), activeCurrency);
-      
+
       const officialInvoice: Invoice = {
         id: (draftIdRef.current ||= crypto.randomUUID()),
         invoiceNumber: generatedNo,
-        customerName: posMode === 'sale' ? (isRtl ? 'مبيعات نقاط البيع مباشرة' : 'Direct POS Customer') : undefined,
+        customerName: posMode === 'sale'
+          ? (customer?.name || (isRtl ? 'مبيعات نقطة البيع' : 'POS sale'))
+          : undefined,
+        customerId: posMode === 'sale' && saleMethod === 'credit' ? customer?.id : (posMode === 'sale' && customer ? customer.id : undefined),
         supplierName: posMode === 'purchase' ? (isRtl ? 'مشتريات توريد مباشرة' : 'Direct Supplier') : undefined,
         items: [...scannedItems],
         subtotal,
@@ -1107,12 +1196,17 @@ export default function POSSystem({ language }: POSSystemProps) {
         totalAmount: grandTotal,
         type: posMode,
         date: Date.now(),
-        currency: activeCurrency as any,
+        currency: activeCurrency as Currency,
         discount: appliedDiscount,
-        cashReceived: parsedCash,
-        changeDue: changeDue,
-        // Supply received at the counter is paid from the vault; a card choice left over from a sale must not skip it.
-        paymentMethod: posMode === 'purchase' ? 'cash' : method
+        cashReceived: isCashSale ? paidNow : undefined,
+        changeDue: isCashSale ? changeDue : undefined,
+        // Supply at the counter is always cash from the vault; sale may be cash, card, wallet, or credit/split.
+        paymentMethod: saleMethod,
+        ...(saleMethod === 'credit' ? {
+          paidAmount: paidNow,
+          debtAmount,
+          debtCurrency,
+        } : {}),
       };
 
       // Persist first: any failure here aborts checkout (cart is kept) instead of showing a false success.
@@ -1164,7 +1258,7 @@ export default function POSSystem({ language }: POSSystemProps) {
       }
 
       // Only a sale that was actually saved may open the cash drawer; reprints never do.
-      printThermalReceipt(officialInvoice, isCashSale && Boolean(user));
+      printThermalReceipt(officialInvoice, Boolean(user) && ((isCashSale && paidNow > 0) || (saleMethod === 'credit' && paidNow > 0)));
 
       // Clear State
       setLastInvoiceNumber(officialInvoice.invoiceNumber);
@@ -1175,6 +1269,9 @@ export default function POSSystem({ language }: POSSystemProps) {
       setEnableTax(false);
       setReceivedAmount('');
       setPaymentMethod('cash');
+      setSelectedCustomerId('');
+      setCustomerQuery('');
+      if (posMode === 'sale') finishOpenHeldBill();
       setIsSubmitting(false);
       setShowCashPaymentModal(false);
       setShowSuccessModal(true);
@@ -1232,9 +1329,9 @@ export default function POSSystem({ language }: POSSystemProps) {
           <Clock size={15} />
           {myShift
             ? (isRtl
-              ? `الوردية مفتوحة منذ ${new Date(myShift.openedAt).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })}`
-              : `Shift open since ${new Date(myShift.openedAt).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}`)
-            : (isRtl ? 'الوردية' : 'Shift')}
+              ? `عدّ الدرج منذ ${new Date(myShift.openedAt).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })}`
+              : `Drawer count since ${new Date(myShift.openedAt).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}`)
+            : (isRtl ? 'عدّ الدرج' : 'Drawer count')}
         </button>
         {/* Premium Mode Segment Switcher */}
         <div className="flex items-center bg-slate-100 dark:bg-slate-900/60 p-1 rounded-2xl border border-slate-200/60 dark:border-slate-800/60 w-fit self-start shrink-0 select-none">
@@ -1248,7 +1345,7 @@ export default function POSSystem({ language }: POSSystemProps) {
             }`}
           >
             <ShoppingCart size={15} />
-            <span>{isRtl ? 'وضع البيع المباشر' : 'Direct POS Sales'}</span>
+            <span>{isRtl ? 'نقطة البيع' : 'POS'}</span>
           </button>
           
           {can('back_office') && <button 
@@ -1336,22 +1433,12 @@ export default function POSSystem({ language }: POSSystemProps) {
               <button
                 type="button"
                 onClick={() => {
-                  setQuickRegForm({
-                    sku: '',
-                    name: '',
-                    category: '',
-                    brand: '',
-                    quantity: 10,
-                    unitCost: 0,
-                    sellingPrice: 0,
-                    warehouseId: warehouses && warehouses.length > 0 ? warehouses[0].id : '',
-                    lowStockThreshold: 5
-                  });
+                  setQuickRegForm(emptyQuickRegForm(warehouses?.[0]?.id || ''));
                   setShowQuickRegModal(true);
                 }}
                 className="text-xs font-bold text-emerald-600 dark:text-emerald-400 flex items-center gap-1.5 hover:text-emerald-500 transition cursor-pointer"
               >
-                ✨ {isRtl ? 'تسجيل منتج سريع (F7)' : 'Quick Register (F7)'}
+                {isRtl ? 'تسجيل منتج سريع (F7)' : 'Quick product (F7)'}
               </button>
               </>}
             </div>
@@ -1419,7 +1506,7 @@ export default function POSSystem({ language }: POSSystemProps) {
                   const emoji = getEmojiIcon(product.category, product.name);
                   const rawPrice = posMode === 'sale' ? product.sellingPrice : product.unitCost;
                   const baseCurrency = product.currency || settings?.currency || 'JOD';
-                  const activePrice = Number(convertMoney(rawPrice, baseCurrency, activeCurrency, usdUnitRates)) || 0;
+                  const activePrice = safeConvertMoney(rawPrice, baseCurrency, activeCurrency, usdUnitRates);
 
                   return (
                     <button 
@@ -1438,7 +1525,7 @@ export default function POSSystem({ language }: POSSystemProps) {
                         {isRtl ? 'بالمخزن:' : 'Qty:'} {formatPackStock(product.quantity, product, isRtl) ?? product.quantity}
                       </span>
                       <span className="text-emerald-600 dark:text-emerald-400 font-mono font-bold mt-1 text-xs">
-                        {formatCurrencyValue(activePrice)}
+                        {activePrice === null ? '—' : formatCurrencyValue(activePrice)}
                       </span>
                     </button>
                   );
@@ -1495,7 +1582,10 @@ export default function POSSystem({ language }: POSSystemProps) {
               <span>
                 {activeCurrency === storeCurrency
                   ? (isRtl ? `الأسعار بعملة ${activeCurrency}` : `Prices in ${activeCurrency}`)
-                  : `1 ${storeCurrency} = ${formatMoney(convertMoney(1, storeCurrency, activeCurrency, usdUnitRates), activeCurrency)}`}
+                  : `1 ${storeCurrency} = ${(() => {
+                      const rate = safeConvertMoney(1, storeCurrency, activeCurrency, usdUnitRates);
+                      return rate === null ? '—' : formatMoney(rate, activeCurrency);
+                    })()}`}
                 {' · '}
                 {settings?.useManualExchangeRates
                   ? (isRtl ? 'سعر يدوي' : 'Manual')
@@ -1524,36 +1614,45 @@ export default function POSSystem({ language }: POSSystemProps) {
                     <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
                     <span className="relative inline-flex rounded-full h-2 w-2 bg-amber-500"></span>
                   </span>
-                  ⏳ {isRtl ? 'الفواتير المعلقة بانتظار الصندوق (' : 'Suspended Bills ('}
-                  <span className="text-amber-600 dark:text-amber-400">{heldBills.length}</span>)
+                  {isRtl ? 'الفواتير المعلقة بانتظار الصندوق (' : 'Suspended Bills ('}
+                  <span className="text-amber-600 dark:text-amber-400">{parkedHeldBills(heldBills).length}</span>)
                 </span>
                 <span className="text-[10px] text-slate-400 font-medium font-arabic">
-                  {isRtl ? 'اضغط للاسترجاع السريع' : 'Click to restore'}
+                  {isRtl ? 'محفوظة على هذا الجهاز' : 'Saved on this device'}
                 </span>
               </div>
               
               <div className="grid grid-cols-1 gap-2 max-h-[160px] overflow-y-auto pr-1">
                 {heldBills.map(bill => {
-                  const itemsCount = bill.itemCount ?? bill.items?.reduce((acc: number, item: any) => acc + (Number(item.quantity) || 0), 0) ?? 0;
-                  const billTotal = bill.totalAmount ?? bill.items?.reduce((acc: number, item: any) => acc + (Number(item.total) || 0), 0) ?? 0;
-                  const displayTime = bill.time ?? new Date(bill.date || Date.now()).toLocaleTimeString(isRtl ? 'ar-EG' : 'en-US', { hour: '2-digit', minute: '2-digit' });
+                  const isOpen = (bill.status || 'parked') === 'open';
+                  const itemsCount = bill.itemCount ?? bill.items.reduce((acc, item) => acc + lineUnits(item), 0);
+                  const billTotal = bill.totalAmount ?? bill.items.reduce((acc, item) => acc + (Number(item.total) || 0), 0);
+                  const displayTime = bill.time || new Date(bill.date || Date.now()).toLocaleTimeString(isRtl ? 'ar-EG' : 'en-US', { hour: '2-digit', minute: '2-digit' });
                   const billCurrency = bill.currency || activeCurrency;
                   
                   return (
                     <div 
                       key={bill.id} 
-                      className="group flex flex-col gap-1.5 bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800/65 rounded-xl p-2.5 shadow-xs hover:border-amber-500/50 dark:hover:border-amber-500/30 transition-all font-arabic relative overflow-hidden"
+                      className={`group flex flex-col gap-1.5 bg-white dark:bg-slate-950 border rounded-xl p-2.5 shadow-xs transition-all font-arabic relative overflow-hidden ${
+                        isOpen
+                          ? 'border-emerald-400/50 dark:border-emerald-500/30'
+                          : 'border-slate-200 dark:border-slate-800/65 hover:border-amber-500/50 dark:hover:border-amber-500/30'
+                      }`}
                     >
-                      {/* Left amber strip indication */}
-                      <span className="absolute top-0 bottom-0 left-0 w-1 bg-amber-500 opacity-70 group-hover:opacity-100 transition-opacity" />
+                      <span className={`absolute top-0 bottom-0 left-0 w-1 opacity-70 group-hover:opacity-100 transition-opacity ${isOpen ? 'bg-emerald-500' : 'bg-amber-500'}`} />
                       
                       <div className="flex items-center justify-between gap-2 pl-1.5">
                         <span className="text-xs font-mono font-black text-slate-800 dark:text-slate-200">
                           #{bill.invoiceNumber}
+                          {isOpen && (
+                            <span className="ms-2 text-[10px] font-bold text-emerald-600 dark:text-emerald-400">
+                              {isRtl ? 'في السلة' : 'In cart'}
+                            </span>
+                          )}
                         </span>
                         <div className="flex items-center gap-1.5">
                           <span className="text-[10px] text-slate-400 font-mono flex items-center gap-0.5">
-                            ⏱️ {displayTime}
+                            {displayTime}
                           </span>
                           <button
                             type="button"
@@ -1575,13 +1674,15 @@ export default function POSSystem({ language }: POSSystemProps) {
                         </div>
                       </div>
 
-                      <button
-                        type="button"
-                        onClick={() => handleRestoreBill(bill)}
-                        className="mt-1 w-full flex items-center justify-center gap-1 py-1.5 bg-amber-500/10 hover:bg-amber-600 hover:text-white text-amber-700 dark:text-amber-300 rounded-lg text-[11px] font-bold transition-all border border-amber-500/20 active:scale-[0.98] cursor-pointer"
-                      >
-                        🔄 {isRtl ? 'استرجاع الفاتورة بالكامل' : 'Restore Entire Invoice'}
-                      </button>
+                      {!isOpen && (
+                        <button
+                          type="button"
+                          onClick={() => handleRestoreBill(bill)}
+                          className="mt-1 w-full flex items-center justify-center gap-1 py-1.5 bg-amber-500/10 hover:bg-amber-600 hover:text-white text-amber-700 dark:text-amber-300 rounded-lg text-[11px] font-bold transition-all border border-amber-500/20 active:scale-[0.98] cursor-pointer"
+                        >
+                          {isRtl ? 'استرجاع الفاتورة' : 'Restore bill'}
+                        </button>
+                      )}
                     </div>
                   );
                 })}
@@ -1705,7 +1806,6 @@ export default function POSSystem({ language }: POSSystemProps) {
                     checked={enableTax} 
                     onChange={(e) => {
                       setEnableTax(e.target.checked);
-                      playBeep('success');
                     }}
                     className="w-3.5 h-3.5 rounded border-slate-300 dark:border-white/10 text-indigo-600 focus:ring-indigo-500 cursor-pointer accent-indigo-600"
                   />
@@ -1748,8 +1848,8 @@ export default function POSSystem({ language }: POSSystemProps) {
                     <span className="text-[10px] font-mono text-slate-500 dark:text-slate-400 select-all">
                       {(() => {
                         const alt = activeCurrency === 'USD' ? 'JOD' : 'USD';
-                        const altAmt = convertMoney(grandTotal, activeCurrency, alt, usdUnitRates);
-                        return `≈ ${formatCurrencyValue(altAmt, alt)}`;
+                        const altAmt = safeConvertMoney(grandTotal, activeCurrency, alt, usdUnitRates);
+                        return altAmt === null ? '' : `≈ ${formatCurrencyValue(altAmt, alt)}`;
                       })()}
                     </span>
                   </div>
@@ -1760,8 +1860,60 @@ export default function POSSystem({ language }: POSSystemProps) {
             {/* Direct Sales Advanced Checkout Panel */}
             {posMode === 'sale' && scannedItems.length > 0 && (
               <div className="bg-slate-100/50 dark:bg-black/30 p-2.5 rounded-xl border border-slate-200/50 dark:border-white/5 space-y-2 transition-all">
+                <div className="space-y-1.5">
+                  <span className="text-[10px] font-black text-slate-500 dark:text-slate-400 flex items-center gap-1">
+                    <User size={11} />
+                    {isRtl ? 'العميل (مطلوب للدين):' : 'Customer (required for credit):'}
+                  </span>
+                  {selectedCustomer ? (
+                    <div className="flex items-center justify-between gap-2 rounded-lg border border-emerald-200/60 dark:border-emerald-500/20 bg-emerald-50/80 dark:bg-emerald-500/10 px-2.5 py-1.5">
+                      <div className="min-w-0">
+                        <div className="text-xs font-black text-slate-800 dark:text-slate-100 truncate">{selectedCustomer.name}</div>
+                        <div className="text-[10px] text-slate-500 dark:text-slate-400 font-mono">
+                          {isRtl ? 'دين حالي' : 'Debt'} {formatMoney(Number(selectedCustomer.totalDebt) || 0, selectedCustomer.currency || activeCurrency)}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => { setSelectedCustomerId(''); setCustomerQuery(''); }}
+                        className="p-1 rounded-md text-slate-400 hover:text-slate-700 dark:hover:text-white cursor-pointer"
+                        aria-label={isRtl ? 'إزالة العميل' : 'Clear customer'}
+                      >
+                        <X size={14} />
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="space-y-1">
+                      <input
+                        type="search"
+                        value={customerQuery}
+                        onChange={(e) => setCustomerQuery(e.target.value)}
+                        placeholder={isRtl ? 'ابحث بالاسم أو الهاتف…' : 'Search name or phone…'}
+                        className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-white/10 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 dark:text-white focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                      />
+                      {customerQuery.trim() && (
+                        <div className="max-h-28 overflow-y-auto rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-slate-950">
+                          {customerMatches.length === 0 ? (
+                            <p className="px-2.5 py-2 text-[10px] text-slate-400">{isRtl ? 'لا نتائج' : 'No matches'}</p>
+                          ) : customerMatches.map((c) => (
+                            <button
+                              key={c.id}
+                              type="button"
+                              onClick={() => { setSelectedCustomerId(c.id); setCustomerQuery(''); }}
+                              className="w-full text-start px-2.5 py-1.5 text-xs hover:bg-emerald-50 dark:hover:bg-emerald-500/10 cursor-pointer border-b border-slate-100 dark:border-white/5 last:border-0"
+                            >
+                              <span className="font-bold text-slate-800 dark:text-slate-100">{c.name}</span>
+                              {c.phone ? <span className="text-slate-400 ms-2 font-mono text-[10px]">{c.phone}</span> : null}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+
                 <span className="text-[10px] font-black text-slate-500 dark:text-slate-400 block">
-                  💳 {isRtl ? 'طريقة الدفع:' : 'Payment method:'}
+                  {isRtl ? 'طريقة الدفع:' : 'Payment method:'}
                 </span>
                 
                 {/* Gateway Selector Tabs */}
@@ -1771,7 +1923,6 @@ export default function POSSystem({ language }: POSSystemProps) {
                     onClick={() => {
                       setPaymentMethod('cash');
                       setReceivedAmount('');
-                      playBeep('success');
                     }}
                     className={`py-1.5 text-[10px] font-black rounded-lg border flex flex-col items-center gap-1 transition-all active:scale-95 cursor-pointer ${
                       paymentMethod === 'cash'
@@ -1788,7 +1939,6 @@ export default function POSSystem({ language }: POSSystemProps) {
                     onClick={() => {
                       setPaymentMethod('card');
                       setReceivedAmount(grandTotal.toFixed(currencyDecimals(activeCurrency)));
-                      playBeep('success');
                     }}
                     className={`py-1.5 text-[10px] font-black rounded-lg border flex flex-col items-center gap-1 transition-all active:scale-95 cursor-pointer ${
                       paymentMethod === 'card'
@@ -1805,7 +1955,6 @@ export default function POSSystem({ language }: POSSystemProps) {
                     onClick={() => {
                       setPaymentMethod('wallet');
                       setReceivedAmount(grandTotal.toFixed(currencyDecimals(activeCurrency)));
-                      playBeep('success');
                     }}
                     className={`py-1.5 text-[10px] font-black rounded-lg border flex flex-col items-center gap-1 transition-all active:scale-95 cursor-pointer ${
                       paymentMethod === 'wallet'
@@ -1817,6 +1966,18 @@ export default function POSSystem({ language }: POSSystemProps) {
                     <span>{isRtl ? 'محفظة جوال' : 'Wallet'}</span>
                   </button>
                 </div>
+
+                {(paymentMethod === 'card' || paymentMethod === 'wallet') && (
+                  <p className="text-[10px] font-bold leading-snug text-slate-500 dark:text-slate-400 px-0.5">
+                    {paymentMethod === 'card'
+                      ? (isRtl
+                        ? 'البطاقة تُسجَّل كمبيعات فقط؛ المبلغ لا يدخل الخزنة ولا درج النقد (يُحصَّل عبر الجهاز البنكي).'
+                        : 'Card is recorded as a sale only; it does not enter the vault or cash drawer (settled on the bank terminal).')
+                      : (isRtl
+                        ? 'المحفظة تُسجَّل كمبيعات فقط؛ المبلغ لا يدخل الخزنة ولا درج النقد (يبقى في المحفظة الإلكترونية).'
+                        : 'Wallet is recorded as a sale only; it does not enter the vault or cash drawer (stays in the e-wallet).')}
+                  </p>
+                )}
 
                 {/* Cash Calculator Box */}
                 {paymentMethod === 'cash' && (
@@ -1835,29 +1996,45 @@ export default function POSSystem({ language }: POSSystemProps) {
                       />
                     </div>
 
-                    {/* Auto Return Change Indicator */}
+                    {/* Change / on-account preview */}
+                    {(() => {
+                      const rec = parseFloat(receivedAmount);
+                      const hasRec = receivedAmount !== '' && Number.isFinite(rec);
+                      const over = hasRec && rec >= grandTotal - 1e-6;
+                      const under = hasRec && rec < grandTotal - 1e-6;
+                      const onAccount = under && !!selectedCustomer;
+                      const short = under && !selectedCustomer;
+                      return (
                     <div className={`p-1.5 rounded-lg border text-center transition-colors text-xs font-medium ${
-                      parseFloat(receivedAmount) >= grandTotal - 1e-6
+                      over
                         ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-700 dark:text-emerald-400'
-                        : receivedAmount !== ''
-                          ? 'bg-rose-500/10 border-rose-500/20 text-rose-700 dark:text-rose-400'
-                          : 'bg-slate-100 dark:bg-slate-800/40 border-transparent text-slate-500 dark:text-slate-400'
+                        : onAccount
+                          ? 'bg-amber-500/10 border-amber-500/20 text-amber-800 dark:text-amber-300'
+                          : short
+                            ? 'bg-rose-500/10 border-rose-500/20 text-rose-700 dark:text-rose-400'
+                            : 'bg-slate-100 dark:bg-slate-800/40 border-transparent text-slate-500 dark:text-slate-400'
                     }`}>
                       <div className="text-[9px] font-bold">
-                        {receivedAmount === ''
-                          ? (isRtl ? 'المبلغ المتبقي للعميل:' : 'Change to Return:')
-                          : parseFloat(receivedAmount) >= grandTotal - 1e-6
-                            ? (isRtl ? 'الباقي للعميل (المبلغ المتبقي):' : 'Exact Change to Return:')
-                            : (isRtl ? 'المستلم غير كافٍ لتمرير المعاملة!' : 'Insufficient amount received!')
+                        {!hasRec
+                          ? (isRtl ? 'المبلغ المتبقي للعميل:' : 'Change to return:')
+                          : over
+                            ? (isRtl ? 'الباقي للعميل:' : 'Change to return:')
+                            : onAccount
+                              ? (isRtl ? 'نقد الآن · الباقي ديناً على العميل' : 'Cash now · remainder on account')
+                              : (isRtl ? 'اختر عميلاً لتسجيل الباقي ديناً، أو أكمل المبلغ' : 'Select a customer for the remainder, or take full payment')
                         }
                       </div>
                       <div className="font-mono font-black text-sm mt-0.5">
-                        {receivedAmount !== '' && parseFloat(receivedAmount) >= grandTotal - 1e-6
-                          ? formatCurrencyValue(parseFloat(receivedAmount) - grandTotal)
-                          : formatCurrencyValue(0)
+                        {over
+                          ? formatCurrencyValue(rec - grandTotal)
+                          : onAccount
+                            ? `${formatCurrencyValue(Math.max(0, rec))} + ${formatCurrencyValue(grandTotal - Math.max(0, rec))}`
+                            : formatCurrencyValue(0)
                         }
                       </div>
                     </div>
+                      );
+                    })()}
 
                     {/* Quick money keyboard tags */}
                     <div className="grid grid-cols-4 gap-1 pt-0.5">
@@ -1868,7 +2045,6 @@ export default function POSSystem({ language }: POSSystemProps) {
                           onClick={() => {
                             const cur = parseFloat(receivedAmount) || 0;
                             setReceivedAmount((cur + num).toString());
-                            playBeep('success');
                           }}
                           className="py-1 text-[9px] font-mono font-bold rounded bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-white/10 hover:bg-emerald-50 dark:hover:bg-emerald-500/10 cursor-pointer text-center"
                         >
@@ -1909,12 +2085,11 @@ export default function POSSystem({ language }: POSSystemProps) {
                 type="button"
                 onClick={() => {
                   if (posMode === 'sale' && paymentMethod === 'cash') {
-                    // Check if sufficient cash was entered
-                    const rec = parseFloat(receivedAmount) || 0;
-                    if (rec >= grandTotal - 1e-6) {
+                    const rec = parseFloat(receivedAmount);
+                    const hasRec = receivedAmount !== '' && Number.isFinite(rec);
+                    if (!hasRec || rec >= grandTotal - 1e-6 || selectedCustomerId) {
                       handleSubmitProcess();
                     } else {
-                      // Open the full cash popup helper
                       setShowCashPaymentModal(true);
                     }
                   } else {
@@ -1922,13 +2097,17 @@ export default function POSSystem({ language }: POSSystemProps) {
                   }
                 }}
                 disabled={
-                  isSubmitting || 
-                  scannedItems.length === 0 || 
-                  (posMode === 'sale' && paymentMethod === 'cash' && receivedAmount !== '' && parseFloat(receivedAmount) < grandTotal - 1e-6)
+                  isSubmitting ||
+                  scannedItems.length === 0 ||
+                  (posMode === 'sale' && paymentMethod === 'cash' && receivedAmount !== '' && parseFloat(receivedAmount) < grandTotal - 1e-6 && !selectedCustomerId)
                 }
                 className="py-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-black transition-all flex items-center justify-center gap-1.5 text-xs shadow-lg shadow-emerald-500/20 cursor-pointer disabled:opacity-50"
               >
-                <span>💵 {isRtl ? 'إتمام وطباعة [Enter]' : 'Pay & Print [Enter]'}</span>
+                <span>
+                  {posMode === 'sale' && paymentMethod === 'cash' && selectedCustomerId && receivedAmount !== '' && parseFloat(receivedAmount) < grandTotal - 1e-6
+                    ? (isRtl ? 'نقد + آجل وطباعة' : 'Cash + credit & print')
+                    : (isRtl ? 'إتمام وطباعة [Enter]' : 'Pay & Print [Enter]')}
+                </span>
               </button>
             </div>
 
@@ -1994,7 +2173,15 @@ export default function POSSystem({ language }: POSSystemProps) {
                         <p className="text-[10px] text-slate-400 dark:text-slate-500 font-mono">SKU: {p.sku || p.id} • {isRtl ? 'المتوفر:' : 'Qty:'} {p.quantity}</p>
                       </div>
                       <span className="text-xs font-black text-indigo-600 dark:text-indigo-400 font-mono">
-                        {formatCurrencyValue(Number(convertMoney(posMode === 'sale' ? p.sellingPrice : p.unitCost, p.currency || settings?.currency || 'JOD', activeCurrency, usdUnitRates)) || 0)}
+                        {(() => {
+                          const shown = safeConvertMoney(
+                            posMode === 'sale' ? p.sellingPrice : p.unitCost,
+                            p.currency || settings?.currency || 'JOD',
+                            activeCurrency,
+                            usdUnitRates,
+                          );
+                          return shown === null ? '—' : formatCurrencyValue(shown);
+                        })()}
                       </span>
                     </button>
                   ))
@@ -2183,9 +2370,9 @@ export default function POSSystem({ language }: POSSystemProps) {
             >
               <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
                 <div className="flex items-center gap-2 text-emerald-600 dark:text-emerald-400">
-                  <span className="p-1.5 bg-emerald-500/10 rounded-lg text-lg">✨</span>
+                  <span className="p-1.5 bg-emerald-500/10 rounded-lg text-emerald-600 dark:text-emerald-400 text-xs font-bold">+</span>
                   <h3 className="text-lg font-extrabold tracking-tight">
-                    {isRtl ? 'تسجيل سريع لمنتج غير مدرج' : 'Quick Register New Product'}
+                    {isRtl ? 'تسجيل منتج غير مدرج' : 'Register new product'}
                   </h3>
                 </div>
                 <button
@@ -2210,16 +2397,22 @@ export default function POSSystem({ language }: POSSystemProps) {
                   toast.error(isRtl ? 'حقل سعر البيع مطلوب ويجب أن يكون أكبر من صفر!' : 'Selling price is required and must be greater than zero!');
                   return;
                 }
-                if (Number(quickRegForm.quantity) < 0 || Number(quickRegForm.unitCost) < 0 || Number(quickRegForm.sellingPrice) < 0) {
+                const initialQty = parseQuickRegQuantity(quickRegForm.quantity);
+                if (initialQty === null) {
+                  toast.error(isRtl
+                    ? 'أدخل الكمية الموجودة فعلاً في المخزن (صفر أو أكثر). لا تُخترع كمية افتراضية.'
+                    : 'Enter the quantity actually on hand (zero or more). No default stock is invented.');
+                  return;
+                }
+                if (Number(quickRegForm.unitCost) < 0 || Number(quickRegForm.sellingPrice) < 0) {
                   toast.error(isRtl ? 'لا يمكن إدخال قيم سالبة!' : 'Negative values are not allowed!');
                   return;
                 }
 
                 try {
                   const generatedId = crypto.randomUUID();
-                  const finalSku = quickRegForm.sku.trim() || `SKU-${generatedId.slice(0, 8).toUpperCase()}`;
+                  const finalSku = resolveProductSku(quickRegForm.sku, generatedId);
                   const effectiveThreshold = Number(quickRegForm.lowStockThreshold) || 5;
-                  const initialQty = Number(quickRegForm.quantity) || 0;
 
                   const status = computeStockStatus(initialQty, effectiveThreshold, settings?.lowStockThreshold);
 
@@ -2227,7 +2420,7 @@ export default function POSSystem({ language }: POSSystemProps) {
                     id: generatedId,
                     name: quickRegForm.name.trim(),
                     sku: finalSku,
-                    category: quickRegForm.category.trim() || (isRtl ? 'عام' : 'General'),
+                    category: resolveProductCategory(quickRegForm.category, isRtl),
                     brand: quickRegForm.brand.trim() || '-',
                     quantity: initialQty,
                     unitCost: Number(quickRegForm.unitCost) || 0,
@@ -2240,13 +2433,20 @@ export default function POSSystem({ language }: POSSystemProps) {
                   };
 
                   await saveProduct(newProduct);
-                  addItemToPOS(newProduct);
-                  playBeep('success');
-                  toast.success(
-                    isRtl 
-                      ? `تم تسجيل الصنف الجديد "${newProduct.name}" وحفظه بالمستودع وإضافته للفاتورة الحالية!` 
-                      : `Saved "${newProduct.name}" to inventory and automatically added to current invoice!`
-                  );
+                  if (posMode === 'sale' && initialQty <= 0) {
+                    toast.success(
+                      isRtl
+                        ? `سُجّل «${newProduct.name}» بكمية صفر. لن يُضاف للسلة حتى يتوفر مخزون (توريد أو جرد).`
+                        : `“${newProduct.name}” was saved with zero stock. It will not join the cart until stock is received or counted.`,
+                    );
+                  } else {
+                    addItemToPOS(newProduct);
+                    toast.success(
+                      isRtl
+                        ? `سُجّل «${newProduct.name}» في المخزون وأُضيف للفاتورة.`
+                        : `“${newProduct.name}” was saved to inventory and added to this ticket.`,
+                    );
+                  }
                   setShowQuickRegModal(false);
                   setTimeout(() => {
                     focusScanner();
@@ -2258,8 +2458,8 @@ export default function POSSystem({ language }: POSSystemProps) {
               }} className="space-y-4">
                 <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
                   {isRtl
-                    ? 'هذا الصنف المعرف بالرمز أدناه غير مسجل في مستودعات "مستودعي". يمكنك تعبئة البيانات الأساسية وإضافته فوراً للسلة ولجدول المخازن العام بضغطة زر.'
-                    : 'This product does not exist in Mostawdaee. Record its primary details below to register it and add it instantly to both stock inventory and your current active sale.'}
+                    ? 'الصنف غير مسجّل. أدخل بياناته والكمية الموجودة فعلاً في المخزن. الكمية الافتراضية صفر — لا تُخترع وحدات وهمية.'
+                    : 'This item is not registered. Enter its details and the quantity actually on hand. Opening stock defaults to zero — no phantom units.'}
                 </p>
 
                 {/* SKU / Barcode */}
@@ -2331,18 +2531,27 @@ export default function POSSystem({ language }: POSSystemProps) {
                 <div className="grid grid-cols-2 gap-4">
                   <div>
                     <label className="block text-xs font-black text-slate-600 dark:text-slate-300 mb-1.5">
-                      {isRtl ? 'الكمية الافتتاحية' : 'Opening quantity'}
+                      {isRtl ? 'الكمية الموجودة فعلاً' : 'Quantity on hand'}
                     </label>
                     <input
                       type="number"
-                      step="1"
+                      step="any"
                       min="0"
                       required
-                      value={quickRegForm.quantity}
-                      onChange={(e) => setQuickRegForm({ ...quickRegForm, quantity: Number(e.target.value) })}
-                      placeholder="10"
+                      value={Number.isFinite(quickRegForm.quantity) ? quickRegForm.quantity : ''}
+                      onChange={(e) => {
+                        const raw = e.target.value;
+                        setQuickRegForm({
+                          ...quickRegForm,
+                          quantity: raw.trim() === '' ? Number.NaN : Number(raw),
+                        });
+                      }}
+                      placeholder="0"
                       className="w-full px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 text-sm font-semibold outline-none focus:border-indigo-500"
                     />
+                    <p className="mt-1 text-[10px] font-bold text-slate-400">
+                      {isRtl ? 'اترك صفراً إن لم يصل الصنف بعد؛ لن يُباع بلا مخزون.' : 'Leave zero if not received yet; sales require stock.'}
+                    </p>
                   </div>
 
                   <div>

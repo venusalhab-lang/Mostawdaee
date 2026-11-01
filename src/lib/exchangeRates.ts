@@ -252,8 +252,10 @@ export function convertAmount(
 ): number {
   const value = Number(amount) || 0;
   if (!from || from === to) return value;
-  const fromRate = Number(rates[from]) || 1;
-  const toRate = Number(rates[to]) || 1;
+  const fromRate = Number(rates[from]);
+  const toRate = Number(rates[to]);
+  // Missing or non-positive rates must not silently act as USD (rate = 1).
+  if (!(fromRate > 0) || !(toRate > 0)) return Number.NaN;
   return (value / fromRate) * toRate;
 }
 
@@ -264,5 +266,18 @@ export function convertMoney(
   to: string,
   rates: Record<string, number> = DEFAULT_USD_UNITS
 ): number {
-  return roundMoney(convertAmount(amount, from, to, rates), to);
+  const converted = convertAmount(amount, from, to, rates);
+  if (!Number.isFinite(converted)) return Number.NaN;
+  return roundMoney(converted, to);
+}
+
+/** Finite conversion or null — never coerce a failed FX rate into 0 money. */
+export function safeConvertMoney(
+  amount: number | string,
+  from: string,
+  to: string,
+  rates: Record<string, number> = DEFAULT_USD_UNITS,
+): number | null {
+  const value = convertMoney(amount, from, to, rates);
+  return Number.isFinite(value) ? value : null;
 }

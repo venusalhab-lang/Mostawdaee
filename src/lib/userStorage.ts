@@ -102,6 +102,12 @@ export function writeUserCache(uid: string, key: UserCacheKey | string, value: u
   if (!flushTimer) flushTimer = setTimeout(flushNextPendingWrite, FLUSH_DELAY_MS);
 }
 
+/** Cancels a coalesced write without touching what is already on disk. */
+export function dropPendingUserCache(uid: string, key: UserCacheKey | string): void {
+  if (!uid) return;
+  pendingWrites.delete(userCacheKey(uid, key));
+}
+
 export function removeUserCache(uid: string, key: UserCacheKey | string): void {
   if (typeof window === 'undefined' || !uid) return;
   pendingWrites.delete(userCacheKey(uid, key));
@@ -128,17 +134,25 @@ export function migrateLegacyUserCache(uid: string): void {
   }
 }
 
+/** Device-local work that must survive logout/cache clear until the merchant finishes it. */
+export function isProtectedDeviceKey(storageKey: string, uid: string): boolean {
+  const prefix = `mustawdae:${uid}:`;
+  return storageKey === `${prefix}offline_invoices` || storageKey === `${prefix}held_bills`;
+}
+
 export function clearUserCache(uid: string | null | undefined): void {
   if (typeof window === 'undefined' || !uid) return;
   void clearRows(`${uid}|`);
   const prefix = `mustawdae:${uid}:`;
-  for (const k of Array.from(pendingWrites.keys())) if (k.startsWith(prefix) && k !== `${prefix}offline_invoices`) pendingWrites.delete(k);
+  for (const k of Array.from(pendingWrites.keys())) {
+    if (k.startsWith(prefix) && !isProtectedDeviceKey(k, uid)) pendingWrites.delete(k);
+  }
   try {
     const keys: string[] = [];
     for (let i = 0; i < localStorage.length; i++) {
       const key = localStorage.key(i);
-      // Sales taken offline are kept until they are sent, even across a forced sign-out.
-      if (key && key.startsWith(prefix) && key !== `${prefix}offline_invoices`) keys.push(key);
+      // Offline sales and held carts stay until they are sent / checked out / discarded.
+      if (key && key.startsWith(prefix) && !isProtectedDeviceKey(key, uid)) keys.push(key);
     }
     keys.forEach((key) => localStorage.removeItem(key));
   } catch {

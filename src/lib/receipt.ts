@@ -57,7 +57,8 @@ export function buildTestPageHtml(paper: PaperWidth, isRtl: boolean, printerName
 export function buildReceiptHtml(o: ReceiptInput): string {
   const { invoice: inv, isRtl } = o;
   const L = (ar: string, en: string) => (isRtl ? ar : en);
-  const m = (v: number | undefined) => escapeHtml(o.money(Number(v) || 0, inv.currency));
+  const m = (v: number | undefined, currency?: string) =>
+    escapeHtml(o.money(Number(v) || 0, currency || inv.currency));
   const start = isRtl ? 'right' : 'left';
   const end = isRtl ? 'left' : 'right';
   const width = printableMm(o.paper);
@@ -125,9 +126,11 @@ export function buildReceiptHtml(o: ReceiptInput): string {
   ${Number(inv.discount) > 0 ? row(L('الخصم', 'Discount'), `-${m(inv.discount)}`) : ''}
   ${Number(inv.taxAmount) > 0 ? row(L('الضريبة', 'VAT'), m(inv.taxAmount)) : ''}
   ${row(L('الإجمالي', 'Total'), `${sign}${m(inv.totalAmount)}`, 'total')}
-  ${row(L('طريقة الدفع', 'Payment'), escapeHtml(paymentMethodLabel(inv.paymentMethod, isRtl)))}
-  ${inv.cashReceived !== undefined ? row(L('المستلم', 'Received'), m(inv.cashReceived), 'bold') : ''}
-  ${inv.changeDue !== undefined ? row(L('الباقي', 'Change'), m(inv.changeDue), 'bold') : ''}
+  ${row(L('طريقة الدفع', 'Payment'), escapeHtml(paymentMethodLabel(inv.paymentMethod, isRtl, inv.paidAmount, inv.totalAmount)))}
+  ${inv.paymentMethod === 'credit' && Number(inv.paidAmount) > 0 ? row(L('المدفوع الآن', 'Paid now'), m(inv.paidAmount), 'bold') : ''}
+  ${inv.paymentMethod === 'credit' && Number(inv.debtAmount) > 0 ? row(L('المتبقي آجل', 'On account'), m(inv.debtAmount, inv.debtCurrency || inv.currency), 'bold') : ''}
+  ${inv.cashReceived !== undefined && !(inv.paymentMethod === 'credit' && Number(inv.paidAmount) > 0) ? row(L('المستلم', 'Received'), m(inv.cashReceived), 'bold') : ''}
+  ${inv.changeDue !== undefined && Number(inv.changeDue) > 0 ? row(L('الباقي', 'Change'), m(inv.changeDue), 'bold') : ''}
   <div class="footer">${L('شكراً لزيارتكم', 'Thank you')}</div>
 </body>
 </html>`;

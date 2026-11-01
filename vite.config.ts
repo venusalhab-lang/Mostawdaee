@@ -16,13 +16,9 @@ export default defineConfig(({mode}) => {
           manualChunks(id) {
             if (!id.includes('node_modules')) return;
 
-            if (id.includes('/recharts/')) return 'charts';
-            if (id.includes('/xlsx/')) return 'spreadsheet';
-            if (id.includes('/html5-qrcode/')) return 'barcode';
-            if (id.includes('/firebase/')) return 'firebase';
+            // Only group libraries every screen needs; anything else stays with the lazy screen that imports it.
+            if (/\/node_modules\/(react|react-dom|scheduler)\//.test(id)) return 'react';
             if (id.includes('/@supabase/')) return 'supabase';
-
-            return 'vendor';
           }
         }
       }
@@ -34,6 +30,9 @@ export default defineConfig(({mode}) => {
         registerType: 'autoUpdate',
         includeAssets: ['icon.svg'],
         workbox: {
+          // Skip workbox terser minify — its worker can abort the whole Vite build in CI/sandboxes.
+          mode: 'development',
+          disableDevLogs: true,
           maximumFileSizeToCacheInBytes: 4000000,
           navigateFallback: './index.html',
           navigateFallbackDenylist: [/^\/api/, /^\/auth/],
@@ -82,7 +81,7 @@ export default defineConfig(({mode}) => {
     },
     server: {
       // HMR is disabled in AI Studio via DISABLE_HMR env var.
-      // Do not modifyâfile watching is disabled to prevent flickering during agent edits.
+      // Do not modify — file watching is disabled to prevent flickering during agent edits.
       hmr: process.env.DISABLE_HMR !== 'true',
       // Disable file watching when DISABLE_HMR is true to save CPU during agent edits.
       watch: process.env.DISABLE_HMR === 'true' ? null : {},

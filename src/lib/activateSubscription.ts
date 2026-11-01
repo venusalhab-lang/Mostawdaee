@@ -1,6 +1,6 @@
 import { supabase } from '../supabaseClient';
 import { API_UNREACHABLE_AR, apiUrl, readApiJson } from './apiBase';
-import { restorePurchases, type ProcessedTransaction } from '../services/billing';
+import { PLAY_PREMIUM_PRODUCT_ID, restorePurchases, type ProcessedTransaction } from '../services/billing';
 
 async function sessionToken(): Promise<string> {
   const { data } = await supabase.auth.getSession();
@@ -51,7 +51,7 @@ export async function linkOwnedPurchases(tokens: string[]): Promise<{ linked: nu
   const errors: string[] = [];
   for (const purchaseToken of tokens) {
     try {
-      await activatePaidSubscription({ productId: 'mostawdaee_premium_100', purchaseToken, transactionId: '' });
+      await activatePaidSubscription({ productId: PLAY_PREMIUM_PRODUCT_ID, purchaseToken, transactionId: '' });
       linked += 1;
     } catch (error) {
       errors.push(error instanceof Error ? error.message : String(error));

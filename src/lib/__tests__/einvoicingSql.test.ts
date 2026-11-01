@@ -20,7 +20,7 @@ const record = (invoice: string, status: string) =>
   h.admin(`SELECT public.einvoice_record($1, $2, $3, '011', 109, '<Invoice/>', '{}'::jsonb, 'QR', '1', NULL)`, [OWNER, invoice, status]);
 
 beforeAll(async () => {
-  h = await createSqlHarness([...SQL_FILES, 'supabase_einvoicing.sql']);
+  h = await createSqlHarness(SQL_FILES);
   await h.addUser(OWNER, 'owner@shop.com');
   await h.addUser(OTHER, 'other@shop.com');
   await h.setSubscription(OWNER, 'active', '2099-01-01T00:00:00Z');

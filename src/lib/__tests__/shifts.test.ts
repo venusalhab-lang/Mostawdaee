@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Invoice, Shift } from '../../types';
-import { cashDifference, openShiftOf, shiftInvoices, summarizeShift } from '../shifts';
+import { canOpenShift, cashDifference, openShiftOf, shiftInvoices, summarizeShift } from '../shifts';
 import { buildShiftReportHtml } from '../shiftReport';
 
 const CASHIER = 'u-cashier';
@@ -148,5 +148,31 @@ describe('openShiftOf', () => {
     expect(openShiftOf(list, CASHIER)?.id).toBe('new');
     expect(openShiftOf(list, 'nobody')).toBeNull();
     expect(openShiftOf(list, undefined)).toBeNull();
+  });
+});
+
+describe('canOpenShift', () => {
+  it('blocks a second open shift for the same cashier', () => {
+    const list: Shift[] = [{ ...shift, id: 'open-1' }];
+    expect(canOpenShift(list, CASHIER, 'open-1')).toBe(true);
+    expect(canOpenShift(list, CASHIER, 'open-2')).toBe(false);
+    expect(canOpenShift([{ ...shift, id: 'open-1', status: 'closed' }], CASHIER, 'open-2')).toBe(true);
+    expect(canOpenShift(list, undefined, 'open-2')).toBe(false);
+  });
+});
+
+describe('legacy dual-open window', () => {
+  it('stops an older open shift before the newer one starts so sales are not double-counted', () => {
+    const older = { ...shift, id: 'old', openedAt: 1000 };
+    const newer = { ...shift, id: 'new', openedAt: 5000 };
+    const all = [older, newer];
+    const mid = sale('mid', { date: 3000, totalAmount: 20 });
+    const late = sale('late', { date: 6000, totalAmount: 30 });
+    expect(shiftInvoices(older, [mid, late], 10_000, all).map((i) => i.id)).toEqual(['mid']);
+    expect(shiftInvoices(newer, [mid, late], 10_000, all).map((i) => i.id)).toEqual(['late']);
+    const [oldSum] = summarizeShift(older, [mid, late], 10_000, all);
+    expect(oldSum.cashSales).toBe(20);
+    const [newSum] = summarizeShift(newer, [mid, late], 10_000, all);
+    expect(newSum.cashSales).toBe(30);
   });
 });

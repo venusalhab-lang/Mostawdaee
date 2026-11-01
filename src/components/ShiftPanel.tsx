@@ -70,8 +70,8 @@ export default function ShiftPanel({ isOpen, onClose, language, defaultCurrency 
   const live: ShiftCurrencyTotals[] = useMemo(() => {
     if (!selected) return [];
     if (selected.status === 'closed') return selected.summary || [];
-    return summarizeShift(selected, invoices, now);
-  }, [selected, invoices, now]);
+    return summarizeShift(selected, invoices, now, shifts);
+  }, [selected, invoices, now, shifts]);
 
   const history = useMemo(
     () => shifts.filter((s) => s.id !== selected?.id && (seesStore || s.actorId === uid)).slice(0, HISTORY_LIMIT),
@@ -119,7 +119,7 @@ export default function ShiftPanel({ isOpen, onClose, language, defaultCurrency 
     setBusy(true);
     try {
       await openShift({ id: (openDraftRef.current ||= crypto.randomUUID()), currency, openingFloat: amount, notes: openNotes });
-      toast.success(L('فُتحت الوردية.', 'Shift opened.'));
+      toast.success(L('بدأ عدّ الدرج.', 'Drawer count started.'));
       setFloatInput('');
       setOpenNotes('');
     } catch (error) {
@@ -153,7 +153,7 @@ export default function ShiftPanel({ isOpen, onClose, language, defaultCurrency 
     setBusy(true);
     try {
       const closed = await closeShift({ id: selected.id, counted: values, notes: closeNotes });
-      toast.success(L('أُغلقت الوردية. يمكنك طباعة تقرير الإغلاق.', 'Shift closed. You can print the Z-report.'));
+      toast.success(L('انتهى العدّ. يمكنك طباعة تقرير الإغلاق (Z).', 'Count ended. You can print the Z-report.'));
       setClosedLocal(closed);
       setSelectedId(closed.id);
     } catch (error) {
@@ -208,8 +208,13 @@ export default function ShiftPanel({ isOpen, onClose, language, defaultCurrency 
           <div className="flex items-center gap-2">
             <span className="p-2 rounded-xl bg-slate-100 dark:bg-white/5 text-slate-700 dark:text-slate-200"><Clock size={18} /></span>
             <div>
-              <h2 id="shift-panel-title" className="text-base font-black text-slate-900 dark:text-white">{L('الوردية', 'Shift')}</h2>
-              <p className="text-xs text-slate-500 dark:text-slate-400">{L('رصيد افتتاح، عدّ النقد عند الإغلاق، وتقرير Z.', 'Opening float, closing cash count and Z-report.')}</p>
+              <h2 id="shift-panel-title" className="text-base font-black text-slate-900 dark:text-white">{L('عدّ درج الكاشير', 'Cash drawer count')}</h2>
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                {L(
+                  'ورقة درج اختيارية: رصيد افتتاح وعدّ عند الإغلاق وتقرير Z. لا تحرّك الخزنة ولا تمنع البيع.',
+                  'Optional drawer worksheet: opening float, closing count and Z-report. Does not move the vault or block sales.',
+                )}
+              </p>
             </div>
           </div>
           <button type="button" onClick={onClose} aria-label={L('إغلاق', 'Close')} className="p-2 rounded-xl bg-slate-100 dark:bg-white/5 text-slate-500 hover:text-slate-800 dark:hover:text-white cursor-pointer">
@@ -226,7 +231,13 @@ export default function ShiftPanel({ isOpen, onClose, language, defaultCurrency 
 
           {!selected && (
             <section className="space-y-3">
-              <h3 className="text-sm font-black text-slate-800 dark:text-slate-100 flex items-center gap-2"><Unlock size={16} />{L('فتح وردية جديدة', 'Open a new shift')}</h3>
+              <h3 className="text-sm font-black text-slate-800 dark:text-slate-100 flex items-center gap-2"><Unlock size={16} />{L('بدء عدّ الدرج', 'Start a drawer count')}</h3>
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                {L(
+                  'اختياري للمطابقة مع درج النقد. فرق الإقفال يُسجَّل في التقرير فقط ولا يُرحَّل إلى الخزنة.',
+                  'Optional for matching the cash drawer. Closing variance is recorded on the report only and is not posted to the vault.',
+                )}
+              </p>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <label className="sm:col-span-2 block">
                   <span className="text-xs font-bold text-slate-500 dark:text-slate-400">{L('النقد في الدرج عند البدء (رصيد الافتتاح)', 'Cash in the drawer at start (opening float)')}</span>
@@ -262,7 +273,7 @@ export default function ShiftPanel({ isOpen, onClose, language, defaultCurrency 
                 disabled={busy || !user}
                 className="w-full rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-black py-3 cursor-pointer"
               >
-                {busy ? L('جارٍ الفتح…', 'Opening…') : L('فتح الوردية', 'Open shift')}
+                {busy ? L('جارٍ الفتح…', 'Opening…') : L('بدء العدّ', 'Start count')}
               </button>
             </section>
           )}
@@ -346,8 +357,8 @@ export default function ShiftPanel({ isOpen, onClose, language, defaultCurrency 
 
               <p className="text-xs text-slate-500 dark:text-slate-400">
                 {L(
-                  'النقد المتوقع = رصيد الافتتاح + المبيعات النقدية − المبالغ المردودة نقداً، لمبيعات هذا المستخدم خلال الوردية. البطاقة والمحفظة والآجل لا تدخل الدرج.',
-                  'Expected cash = opening float + cash sales − cash refunds, for this user’s sales during the shift. Card, wallet and credit sales do not go into the drawer.',
+                  'النقد المتوقع = رصيد الافتتاح + المبيعات النقدية − المبالغ المردودة نقداً، لمبيعات هذا المستخدم خلال العدّ. البطاقة والمحفظة والآجل لا تدخل الدرج. الخزنة تبقى المصدر الرسمي للنقد.',
+                  'Expected cash = opening float + cash sales − cash refunds for this user’s sales during the count. Card, wallet and credit do not enter the drawer. The vault remains the official cash ledger.',
                 )}
               </p>
 
@@ -369,9 +380,14 @@ export default function ShiftPanel({ isOpen, onClose, language, defaultCurrency 
                     disabled={busy}
                     className="w-full inline-flex items-center justify-center gap-2 rounded-xl bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white font-black py-3 cursor-pointer"
                   >
-                    <Lock size={16} />{busy ? L('جارٍ الإغلاق…', 'Closing…') : L('إغلاق الوردية واعتماد العدّ', 'Close shift and confirm the count')}
+                    <Lock size={16} />{busy ? L('جارٍ الإغلاق…', 'Closing…') : L('إنهاء العدّ واعتماد الفروقات في التقرير', 'End count and lock the variance on the report')}
                   </button>
-                  <p className="text-xs text-slate-500 dark:text-slate-400">{L('بعد الإغلاق لا يمكن تعديل الوردية أو حذفها.', 'A closed shift cannot be edited or deleted.')}</p>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    {L(
+                      'بعد الإنهاء لا يمكن تعديل هذا العدّ. الفرق لا يُعدَّل في الخزنة تلقائياً.',
+                      'After ending, this count cannot be edited. The variance is not applied to the vault automatically.',
+                    )}
+                  </p>
                 </div>
               )}
             </section>

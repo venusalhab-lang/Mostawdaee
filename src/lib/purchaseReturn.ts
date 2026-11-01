@@ -58,6 +58,9 @@ export function costAfterReturn(
   const cost = Number(product.unitCost ?? product.costPrice) || 0;
   const left = roundQty(onHand - units);
   if (left <= 0 || cost <= 0) return null;
-  const averaged = Math.max(0, onHand * cost - value) / left;
+  const carrying = onHand * cost;
+  // Returning above carrying cost must not invent free stock (WAC → 0) and overstate later profit.
+  if (value > carrying) return Math.round(cost * 10_000) / 10_000;
+  const averaged = (carrying - value) / left;
   return Math.round(averaged * 10_000) / 10_000;
 }

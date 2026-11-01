@@ -34,7 +34,7 @@ import { useFirebase } from './FirebaseProvider';
 import { Search } from 'lucide-react';
 import GlobalSearch from './GlobalSearch';
 import { useDeviceType } from '../hooks/useDeviceType';
-import { sounds } from '../lib/sounds';
+import { appName } from '../lib/brand';
 interface SidebarProps {
   language: Language;
   onLanguageToggle: () => void;
@@ -330,32 +330,28 @@ export default function Sidebar({
         {/* Shimmer reflection outline at the very top */}
         <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-cyan-400/30 to-transparent pointer-events-none" />
 
-        {/* Brand Area with enhanced clarity and ultra-reactivity (متفاعل وواضح ونقي) */}
+        {/* Brand: name gets full row; pin/close sit absolute so they never squeeze Arabic glyphs. */}
         <div 
           onClick={handleLogoToggleLock}
           onMouseEnter={() => setBrandHovered(true)}
           onMouseLeave={() => setBrandHovered(false)}
-          className={`px-5 py-5 flex items-center border-b border-slate-200/40 dark:border-white/5 shrink-0 z-20 cursor-pointer group/header select-none relative transition-all duration-300 hover:bg-slate-100/30 hover:dark:bg-white/5 ${
-            isExpanded ? 'justify-between' : 'justify-center'
+          className={`relative px-4 py-5 flex items-center border-b border-slate-200/40 dark:border-white/5 shrink-0 z-20 cursor-pointer group/header select-none transition-colors duration-300 hover:bg-slate-100/30 hover:dark:bg-white/5 ${
+            isExpanded ? (isRtl ? 'pl-14' : 'pr-14') : 'justify-center'
           }`}
           title={isRtl ? "انقر لقفل أو فتح لوحة تمدد الشريط الجانبي" : "Click to lock or unlock sidebar expansion panel"}
         >
-          <div className="flex items-center gap-3">
+          <div className={`flex items-center gap-2.5 ${isExpanded ? 'min-w-0 flex-1' : ''}`}>
             <div className="relative shrink-0 transition-transform duration-300 group-hover/header:scale-105">
-              
-              {/* Spherical glass-box logo with active neon pulse breathing outline */}
               <div 
                 className={`relative w-[44px] h-[44px] rounded-[14px] bg-slate-100/60 dark:bg-white/5 border border-slate-300 dark:border-white/10 shadow-[0_4px_12px_rgba(0,0,0,0.03)] dark:shadow-[0_0_15px_rgba(255,255,255,0.04)] flex items-center justify-center transition-all duration-500 group-hover/header:rotate-6
                   ${brandHovered ? 'animate-phosphor-breathing dark:border-cyan-400/40 border-cyan-400/30' : ''}`}
               >
                 <Logo 
                   size={28} 
-                  animate3d={true} 
-                  className="shrink-0 text-slate-900 dark:text-cyan-400 font-black" 
+                  animate3d={false} 
+                  className="shrink-0 text-slate-900 dark:text-cyan-400" 
                 />
               </div>
-              
-              {/* Intelligent glowing lock state micro bubble */}
               <span className={`absolute -top-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-white dark:border-[#0c1221] z-30 transition-all duration-300
                 ${isLocked 
                   ? 'bg-cyan-500 dark:bg-cyan-400 shadow-[0_0_12px_rgba(6,182,212,1)] animate-pulse' 
@@ -364,25 +360,18 @@ export default function Sidebar({
               />
             </div>
             
-            <div
-              className={`flex flex-col origin-left overflow-hidden select-none transition-all duration-300 ${
-                isExpanded ? 'opacity-100 max-w-[170px] visible ml-2' : 'opacity-0 max-w-0 invisible overflow-hidden'
-              }`}
-            >
-              {/* Super crisp high-definition text with gradient shifting (الكتابة واضحة ونقية وجميلة) */}
-              <span 
-                className={`font-black text-[20px] tracking-tight leading-none text-slate-950 dark:text-white whitespace-nowrap bg-clip-text bg-gradient-to-r from-slate-950 via-slate-700 to-slate-950 dark:from-white dark:via-cyan-300 dark:to-emerald-100 transition-all duration-500 block ${
-                  brandHovered ? 'gradient-text-shimmer drop-shadow-[0_0_10px_rgba(6,182,212,0.3)] scale-[1.01]' : ''
+            {isExpanded && (
+              <span
+                className={`font-arabic font-extrabold text-[1.2rem] leading-relaxed text-slate-950 dark:text-white whitespace-nowrap tracking-normal [padding-inline:0.12em] ${
+                  brandHovered ? 'opacity-90' : 'opacity-100'
                 }`}
               >
-                {isRtl ? 'مستودعي' : 'Mostawdaee'}
+                {appName(isRtl)}
               </span>
-              
-            </div>
+            )}
           </div>
           
-          {/* Close Sidebar / Pin Button */}
-          <div className="flex items-center gap-1.5 shrink-0 z-50">
+          <div className={`absolute top-1/2 -translate-y-1/2 flex items-center gap-0.5 z-50 ${isRtl ? 'left-3' : 'right-3'}`}>
             {isExpanded && (
               <button 
                 type="button"

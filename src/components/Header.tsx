@@ -3,7 +3,9 @@ import { Coins, Menu, ChevronDown, Check, ShoppingCart } from 'lucide-react';
 import { sounds } from '../lib/sounds';
 import { toast } from 'sonner';
 import Logo from './Logo';
+import NotificationCenter from './NotificationCenter';
 import { useFirebase } from './FirebaseProvider';
+import { OFFLINE_QUEUE_EVENT, belongsToStore, readQueue } from '../lib/offlineQueue';
 
 interface HeaderProps {
   isRtl: boolean;
@@ -17,6 +19,8 @@ interface HeaderProps {
   onOpenSidebar: () => void;
   onChangeScreen?: (screen: string) => void;
   activeScreen?: string;
+  /** Days left on active trial/premium; null skips the subscription notice. */
+  subscriptionDaysRemaining?: number | null;
   style?: React.CSSProperties;
 }
 
@@ -44,12 +48,13 @@ export default function Header({
   onOpenSidebar,
   onChangeScreen,
   activeScreen,
+  subscriptionDaysRemaining = null,
   style
 }: HeaderProps) {
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const hasLongPressedRef = useRef(false);
-  const { canOpenScreen } = useFirebase();
+  const { canOpenScreen, user, workspace } = useFirebase();
   const assistantAllowed = canOpenScreen('ai-assistant');
 
   // Long press on Logo state
@@ -61,6 +66,31 @@ export default function Header({
   // Connection status tracking with navigator.onLine API
   const [isOnline, setIsOnline] = useState(() => typeof navigator !== 'undefined' ? navigator.onLine : true);
   const [isQuotaExceeded, setIsQuotaExceeded] = useState(false);
+  const [pendingOffline, setPendingOffline] = useState(0);
+
+  useEffect(() => {
+    const refreshPending = () => {
+      const uid = user?.uid;
+      if (!uid) {
+        setPendingOffline(0);
+        return;
+      }
+      const ownerId = workspace?.ownerId;
+      const queue = readQueue(uid);
+      setPendingOffline(ownerId ? queue.filter((entry) => belongsToStore(entry, ownerId)).length : queue.length);
+    };
+    refreshPending();
+    const onQueue = (event: Event) => {
+      const detailUid = (event as CustomEvent<{ uid?: string }>).detail?.uid;
+      if (!detailUid || detailUid === user?.uid) refreshPending();
+    };
+    window.addEventListener(OFFLINE_QUEUE_EVENT, onQueue);
+    window.addEventListener('storage', refreshPending);
+    return () => {
+      window.removeEventListener(OFFLINE_QUEUE_EVENT, onQueue);
+      window.removeEventListener('storage', refreshPending);
+    };
+  }, [user?.uid, workspace?.ownerId]);
 
   useEffect(() => {
     const handleOnline = () => {
@@ -78,6 +108,10 @@ export default function Header({
 
     const handleQuotaExceeded = () => {
       setIsQuotaExceeded(true);
+      toast.error(isRtl
+        ? 'امتلأت ذاكرة الجهاز. أفرغ مساحة أو احذف نسخاً قديمة حتى لا تُفقد مبيعات الأوفلاين.'
+        : 'This device is out of storage. Free space or remove old backups so offline sales are not lost.',
+        { id: 'quota-exceeded', duration: 10000 });
     };
 
     window.addEventListener('online', handleOnline);
@@ -216,10 +250,10 @@ export default function Header({
             onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleLogoClick(); } }}
             role={assistantAllowed ? 'button' : undefined}
             tabIndex={assistantAllowed ? 0 : undefined}
-            aria-label={assistantAllowed ? (isRtl ? 'المساعد الذكي' : 'Smart assistant') : undefined}
+            aria-label={assistantAllowed ? (isRtl ? 'المساعد' : 'Assistant') : undefined}
             aria-pressed={assistantAllowed ? activeScreen === 'ai-assistant' : undefined}
             className={`relative w-10 h-10 rounded-[12px] bg-slate-100/60 dark:bg-white/5 border border-slate-300 dark:border-white/10 shadow-[0_4px_12px_rgba(0,0,0,0.03)] dark:shadow-[0_0_15px_rgba(255,255,255,0.04)] flex items-center justify-center transition-all duration-300 shrink-0 select-none overflow-hidden ${assistantAllowed ? 'cursor-pointer' : ''} ${isPressing ? 'scale-90 bg-indigo-50 dark:bg-indigo-950/20' : assistantAllowed ? 'hover:scale-105 active:scale-95' : ''}`}
-            title={assistantAllowed ? (isRtl ? 'المساعد الذكي' : 'Smart assistant') : undefined}
+            title={assistantAllowed ? (isRtl ? 'المساعد' : 'Assistant') : undefined}
           >
             {/* Visual Long-Press Progress Bar Overlay representing fill-up */}
             {isPressing && (
@@ -236,25 +270,37 @@ export default function Header({
             />
           </div>
           <div>
-            <h1 className="text-xs sm:text-sm md:text-base lg:text-lg font-black text-slate-900 dark:text-white tracking-tight leading-tight">
-              <span className="font-arabic">
-                <span className="inline sm:hidden">{isRtl ? 'مستودعي' : 'Mostawdaee'}</span>
-                <span className="hidden sm:inline">{isRtl ? 'نظام مستودعي الذكي' : 'Smart Warehouse System'}</span>
-              </span>
+            <h1 className="text-xs sm:text-sm md:text-base lg:text-lg font-extrabold text-slate-900 dark:text-white tracking-normal leading-relaxed [padding-inline:0.08em]">
+              <span className="font-arabic">{isRtl ? 'مستودعي' : 'Mostawdaee'}</span>
             </h1>
             {/* Visual synchronization status indicator */}
-            <div className={`flex items-center gap-1 mt-0.5 select-none`}>
+            <div className={`flex items-center gap-1 mt-0.5 select-none flex-wrap`}>
               <span className="relative flex h-1.5 w-1.5 shrink-0">
-                {isOnline && (
+                {isOnline && pendingOffline === 0 && (
                   <span className="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 bg-emerald-400"></span>
                 )}
-                <span className={`relative inline-flex rounded-full h-1.5 w-1.5 ${isOnline ? 'bg-emerald-500' : 'bg-rose-600'}`}></span>
+                <span className={`relative inline-flex rounded-full h-1.5 w-1.5 ${
+                  !isOnline ? 'bg-rose-600' : pendingOffline > 0 ? 'bg-amber-500' : 'bg-emerald-500'
+                }`}></span>
               </span>
-              <span className={`text-[9px] font-extrabold tracking-tight ${isOnline ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-500'} font-arabic`}>
-                {isOnline 
-                  ? (isRtl ? 'متصل' : 'Online Sync Active') 
-                  : (isRtl ? 'أوفلاين' : 'Offline Mode')}
+              <span className={`text-[9px] font-extrabold tracking-tight font-arabic ${
+                !isOnline
+                  ? 'text-rose-600 dark:text-rose-500'
+                  : pendingOffline > 0
+                    ? 'text-amber-700 dark:text-amber-400'
+                    : 'text-emerald-600 dark:text-emerald-400'
+              }`}>
+                {!isOnline
+                  ? (isRtl ? 'أوفلاين' : 'Offline')
+                  : pendingOffline > 0
+                    ? (isRtl ? `${pendingOffline} بانتظار الإرسال` : `${pendingOffline} pending`)
+                    : (isRtl ? 'متصل' : 'Online')}
               </span>
+              {isQuotaExceeded && (
+                <span className="text-[9px] font-extrabold text-rose-600 dark:text-rose-400 font-arabic">
+                  {isRtl ? '· الذاكرة ممتلئة' : '· Storage full'}
+                </span>
+              )}
             </div>
           </div>
         </div>
@@ -267,13 +313,19 @@ export default function Header({
           type="button"
           onClick={handleQuickPOSClick}
           className="flex items-center gap-1 sm:gap-2 bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white rounded-full pl-2.5 pr-3 sm:pl-3.5 sm:pr-4 py-1 sm:py-2 transition-all shadow-md shadow-indigo-600/10 hover:shadow-indigo-600/20 cursor-pointer select-none shrink-0 border border-indigo-500/20 text-xs font-black font-arabic"
-          title={isRtl ? 'صندوق البيع السريع الفوري ⚡' : 'Integrated Instant Quick POS ⚡'} aria-label={isRtl ? 'صندوق البيع السريع الفوري ⚡' : 'Integrated Instant Quick POS ⚡'}
+          title={isRtl ? 'بيع' : 'Sell'} aria-label={isRtl ? 'بيع' : 'Sell'}
         >
           <ShoppingCart className="w-3.5 h-3.5 sm:w-4.5 sm:h-4.5 stroke-[2.5]" />
           <span className="hidden sm:inline">
-            {isRtl ? 'بيع سريع' : 'Quick POS'}
+            {isRtl ? 'بيع' : 'Sell'}
           </span>
         </button>
+
+        <NotificationCenter
+          isRtl={isRtl}
+          subscriptionDaysRemaining={subscriptionDaysRemaining}
+          onNavigate={onChangeScreen}
+        />
 
         {/* Control 2: REDESIGNED highly professional floating currency controller */}
         <div className="relative" ref={dropdownRef}>

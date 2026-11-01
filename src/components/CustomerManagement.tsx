@@ -35,6 +35,7 @@ import InteractiveButton from './ui/InteractiveButton';
 import { toast } from 'sonner';
 import { escapeHtml } from '../lib/invoiceDocument';
 import { printHtmlDocument } from '../lib/printHtml';
+import { checkManualArIncrease, MANUAL_AR_REASON_MIN } from '../lib/customerLedger';
 
 interface Props {
   language: Language;
@@ -128,12 +129,12 @@ export default function CustomerManagement({ language, settings }: Props) {
     activeDebts: isRtl ? 'الديون النشطة' : 'Outstanding Debts',
     manageDebt: isRtl ? 'تعديل الحساب' : 'Adjust Ledger',
     payDebt: isRtl ? 'سداد دفعة' : 'Receive Payment',
-    addDebt: isRtl ? 'زيادة مديونية' : 'Add Credit/Debit',
+    addDebt: isRtl ? 'تسوية رصيد يدوية' : 'Manual balance adjustment',
     amount: isRtl ? 'المبلغ المالي' : 'Financial Amount',
     note: isRtl ? 'بيان الحركة (ملاحظات)' : 'Transaction Note / Reference',
     syncVault: isRtl ? 'يُسجَّل المبلغ المستلم في الخزنة كإيداع' : 'The received amount is deposited in the vault',
     sendMessage: isRtl ? 'إرسال إشعار تذكير' : 'Send Reminder Alert',
-    whatsappTitle: isRtl ? 'إرسال رسالة واتساب' : 'Instantly Dispatch WhatsApp Message',
+    whatsappTitle: isRtl ? 'إرسال رسالة واتساب' : 'Send WhatsApp message',
     waHeader: isRtl ? 'اختر قالب الرسالة لإرسالها إلى العميل عبر واتساب' : 'Choose a message template to send to the customer on WhatsApp',
     selectTemplate: isRtl ? 'قالب المراسلة المفضل' : 'Messaging Template Selection',
     reminderTmpl: isRtl ? 'تذكير ودي بالرصيد المستحق' : 'Friendly Debt Outstanding Reminder',
@@ -309,16 +310,15 @@ export default function CustomerManagement({ language, settings }: Props) {
     }
   };
 
-  // Fast debt adjusters (receiving payments or buying on credit)
+  // Payments collect AR; "add" is a manual balance adjustment only (never a fake sale invoice).
   const handleOpenLedger = (customer: Customer, action: 'add' | 'subtract') => {
     setSelectedCustomer(customer);
     setDebtAction(action);
     setDebtAmount(0);
-    setDebtNote(isRtl 
-      ? (action === 'subtract' ? 'دفعة نقدية سداد مديونية عميل' : 'فاتورة بيع بالآجل')
-      : (action === 'subtract' ? 'Customer debt payment settlement' : 'Credit purchase invoice debit adjustment')
-    );
-    setSyncToVault(true);
+    setDebtNote(action === 'subtract'
+      ? (isRtl ? 'دفعة نقدية سداد مديونية عميل' : 'Customer debt payment settlement')
+      : '');
+    setSyncToVault(action === 'subtract');
     setIsPayModalOpen(true);
   };
 
@@ -326,16 +326,22 @@ export default function CustomerManagement({ language, settings }: Props) {
     e.preventDefault();
     if (!selectedCustomer) return;
 
-    // 1. Initial verification of input amount
     const amount = parseFloat(String(debtAmount));
     if (isNaN(amount) || amount <= 0) {
-      toast.warning(isRtl ? 'يرجى إدخال مبلغ سداد صحيح أكبر من الصفر' : 'Please input a valid payment amount greater than 0');
+      toast.warning(isRtl ? 'يرجى إدخال مبلغ صحيح أكبر من الصفر' : 'Please enter a valid amount greater than 0');
       return;
     }
 
     const type = debtAction === 'subtract' ? 'payment' : 'invoice';
+    const notesText = debtNote.trim();
 
-    // 2. Validate that the payment amount is not greater than the current debt
+    if (type === 'invoice' && checkManualArIncrease(notesText)) {
+      toast.error(isRtl
+        ? `اكتب سبب التسوية (${MANUAL_AR_REASON_MIN} أحرف على الأقل). هذه ليست فاتورة بيع ولا تغيّر المخزون.`
+        : `Enter a reason (at least ${MANUAL_AR_REASON_MIN} characters). This is not a sales invoice and does not change stock.`);
+      return;
+    }
+
     if (type === 'payment') {
       const currentDebt = selectedCustomer.totalDebt || 0;
       if (amount > currentDebt) {
@@ -344,36 +350,38 @@ export default function CustomerManagement({ language, settings }: Props) {
       }
     }
 
-    // Set loading indicator to safe guarding
+    if (type === 'invoice') {
+      const current = roundMoney(Number(selectedCustomer.totalDebt) || 0, selectedCustomer.currency);
+      const next = roundMoney(current + amount, selectedCustomer.currency);
+      const confirmMsg = isRtl
+        ? `تسوية يدوية لرصيد «${selectedCustomer.name}»\nالحالي: ${fmtAmount(current, selectedCustomer.currency)}\nبعد الزيادة: ${fmtAmount(next, selectedCustomer.currency)}\nالسبب: ${notesText}\n\nهذه ليست فاتورة بيع ولن تُنشئ حركة مخزون. هل تعتمد؟`
+        : `Manual balance adjustment for “${selectedCustomer.name}”\nCurrent: ${fmtAmount(current, selectedCustomer.currency)}\nAfter increase: ${fmtAmount(next, selectedCustomer.currency)}\nReason: ${notesText}\n\nThis is not a sales invoice and creates no stock movement. Apply?`;
+      if (!window.confirm(confirmMsg)) return;
+    }
+
     setIsActionLoading(true);
 
-    const change = amount;
-    const notesText = debtNote || (debtAction === 'subtract' ? (isRtl ? 'دفعة مسددة' : 'Settle payment') : (isRtl ? 'فاتورة آجل' : 'Credit invoice'));
-
     try {
-      // 3. Run transactional records safely inside try block
       await recordCustomerLedgerTransaction(
         selectedCustomer.id,
-        change,
+        amount,
         type,
-        notesText,
-        syncToVault,
+        type === 'payment' ? (notesText || (isRtl ? 'دفعة مسددة' : 'Settle payment')) : notesText,
+        type === 'payment' && syncToVault,
         (payDraftRef.current ||= crypto.randomUUID()),
       );
 
-      // 4. Update state / close modal after successful execution
       payDraftRef.current = null;
       setIsPayModalOpen(false);
-      toast.success(isRtl ? 'تم سداد الدفعة بنجاح!' : 'Payment processed successfully!');
+      toast.success(type === 'payment'
+        ? (isRtl ? 'تم تسجيل الدفعة.' : 'Payment recorded.')
+        : (isRtl ? 'تم تسجيل تسوية الرصيد في كشف الحساب.' : 'Balance adjustment recorded on the statement.'));
     } catch (err: any) {
-      // 5. Secure handler for any occurred exception to prevent app crashes
-      console.error("خطأ أثناء عملية السداد / المعاملة:", err?.message || err);
-      if (!err?.notified) toast.error(isRtl 
-        ? `عذراً، تعذر إتمام العملية: ${err?.message || 'خطأ غير معروف'}` 
-        : `An error occurred while processing transaction: ${err?.message || 'Unknown error'}`
-      );
+      console.error(err);
+      if (!err?.notified) toast.error(err?.message || (isRtl
+        ? 'تعذّر إتمام العملية.'
+        : 'Could not complete the transaction.'));
     } finally {
-      // Always reset loading indicator
       setIsActionLoading(false);
     }
   };
@@ -920,6 +928,13 @@ export default function CustomerManagement({ language, settings }: Props) {
                     {debtAction === 'subtract' ? t.payDebt : t.addDebt}
                   </h2>
                   <p className="text-[10px] uppercase tracking-widest text-[#00D2FF] font-black">{selectedCustomer.name}</p>
+                  {debtAction === 'add' && (
+                    <p className="text-[11px] font-bold text-amber-700 dark:text-amber-300 mt-1 max-w-sm leading-snug">
+                      {isRtl
+                        ? 'زيادة يدوية لكشف الحساب فقط — ليست فاتورة بيع ولن تمسّ المخزون. للبيع الآجل استخدم نقطة البيع أو الفواتير.'
+                        : 'Statement-only increase — not a sales invoice and does not touch stock. For credit sales use POS or Invoices.'}
+                    </p>
+                  )}
                 </div>
                 <button 
                   onClick={() => setIsPayModalOpen(false)}
@@ -961,16 +976,26 @@ export default function CustomerManagement({ language, settings }: Props) {
                   </div>
                 </div>
 
-                {/* Note / description */}
+                {/* Note / audit reason */}
                 <div className="space-y-1">
                   <label className="text-xs font-black text-gray-400 uppercase tracking-wider">
-                    {t.note}
+                    {debtAction === 'add'
+                      ? (isRtl ? 'سبب التسوية' : 'Adjustment reason')
+                      : t.note}
+                    {debtAction === 'add' && <span className="text-rose-500"> *</span>}
                   </label>
                   <input
                     type="text"
                     value={debtNote}
                     onChange={(e) => setDebtNote(e.target.value)}
-                    placeholder={isRtl ? 'بيان المعاملة بالتفصيل...' : 'Transaction info...'} aria-label={isRtl ? 'بيان المعاملة بالتفصيل...' : 'Transaction info...'}
+                    required={debtAction === 'add'}
+                    minLength={debtAction === 'add' ? MANUAL_AR_REASON_MIN : undefined}
+                    placeholder={debtAction === 'add'
+                      ? (isRtl ? 'مثال: رصيد مرحّل من دفتر قديم / تسوية جرد ديون...' : 'e.g. Opening balance from old books / AR reconciliation...')
+                      : (isRtl ? 'بيان المعاملة بالتفصيل...' : 'Transaction info...')}
+                    aria-label={debtAction === 'add'
+                      ? (isRtl ? 'سبب التسوية' : 'Adjustment reason')
+                      : (isRtl ? 'بيان المعاملة' : 'Transaction notes')}
                     className="w-full h-[48px] px-4 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none dark:text-white"
                   />
                 </div>
@@ -1219,8 +1244,7 @@ export default function CustomerManagement({ language, settings }: Props) {
                         {isRtl ? 'إجمالي الدين المترتب الحالي' : 'Outstanding Debt Balance'}
                       </p>
                       <p className="text-2xl font-black text-[#00D2FF] tracking-tight drop-shadow-[0_0_8px_rgba(0,210,255,0.4)] font-mono">
-                        {selectedLedgerCustomer.totalDebt.toLocaleString(undefined, { minimumFractionDigits: 1 })}{' '}
-                        <span className="text-xs uppercase text-white/80">{selectedLedgerCustomer.currency}</span>
+                        {formatMoney(selectedLedgerCustomer.totalDebt, selectedLedgerCustomer.currency, isRtl ? 'ar' : 'en-US')}
                       </p>
                     </div>
 
@@ -1229,14 +1253,17 @@ export default function CustomerManagement({ language, settings }: Props) {
                         {isRtl ? 'إجمالي الدفعات المسددة' : 'Total Paid Received'}
                       </p>
                       <p className="text-lg font-black text-emerald-400 tracking-tight font-mono">
-                        {formatAmount(
+                        {formatMoney(
                           customerTransactions
-                            .filter(tx => tx.customerId === selectedLedgerCustomer.id && tx.type === 'payment' && !isReturnCredit(tx))
-                            .reduce((acc, current) => acc + current.amount, 0),
+                            .filter(tx =>
+                              tx.customerId === selectedLedgerCustomer.id
+                              && tx.type === 'payment'
+                              && !isReturnCredit(tx)
+                              && (tx.currency || selectedLedgerCustomer.currency) === selectedLedgerCustomer.currency)
+                            .reduce((acc, current) => acc + (Number(current.amount) || 0), 0),
                           selectedLedgerCustomer.currency,
-                          'en-US'
-                        )}{' '}
-                        <span className="text-[10px] text-white/50">{selectedLedgerCustomer.currency}</span>
+                          isRtl ? 'ar' : 'en-US',
+                        )}
                       </p>
                     </div>
 
@@ -1245,14 +1272,16 @@ export default function CustomerManagement({ language, settings }: Props) {
                         {isRtl ? 'إجمالي المبيعات بالآجل' : 'Total Invoices Sum'}
                       </p>
                       <p className="text-lg font-black text-amber-400 tracking-tight font-mono">
-                        {formatAmount(
+                        {formatMoney(
                           customerTransactions
-                            .filter(tx => tx.customerId === selectedLedgerCustomer.id && tx.type === 'invoice')
-                            .reduce((acc, current) => acc + current.amount, 0),
+                            .filter(tx =>
+                              tx.customerId === selectedLedgerCustomer.id
+                              && tx.type === 'invoice'
+                              && (tx.currency || selectedLedgerCustomer.currency) === selectedLedgerCustomer.currency)
+                            .reduce((acc, current) => acc + (Number(current.amount) || 0), 0),
                           selectedLedgerCustomer.currency,
-                          'en-US'
-                        )}{' '}
-                        <span className="text-[10px] text-white/50">{selectedLedgerCustomer.currency}</span>
+                          isRtl ? 'ar' : 'en-US',
+                        )}
                       </p>
                     </div>
                   </div>

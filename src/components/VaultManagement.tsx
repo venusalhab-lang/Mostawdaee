@@ -108,7 +108,6 @@ export default function VaultManagement({ language, settings }: Props) {
 
   const expenseCategories = [
     { id: 'general', label: isRtl ? 'مصروف عام' : 'General Expense' },
-    { id: 'salary', label: isRtl ? 'رواتب الكادر' : 'Salary' },
     { id: 'rent', label: isRtl ? 'إيجار' : 'Rent' },
     { id: 'utilities', label: isRtl ? 'كهرباء ومياه واشتراكات' : 'Utilities' },
     { id: 'transport', label: isRtl ? 'نقل ولوجستيك داخلي' : 'Transport' },
@@ -157,7 +156,7 @@ export default function VaultManagement({ language, settings }: Props) {
 
     vaultTransactions.forEach(tx => {
       // Must match active currency and have processed today
-      if (tx.timestamp >= todayTimestamp && tx.currency === activeCurrency) {
+      if (tx.timestamp >= todayTimestamp && (tx.currency || 'JOD') === activeCurrency) {
         if (tx.type === 'income') {
           inc += tx.amount;
         } else if (tx.type === 'expense') {
@@ -234,20 +233,30 @@ export default function VaultManagement({ language, settings }: Props) {
       }
     }
 
+    if (modalType === 'recalibrate') {
+      const reason = description.trim();
+      if (reason.length < 3) {
+        toast.error(isRtl
+          ? 'اكتب سبب التسوية (3 أحرف على الأقل)؛ يُحفظ في سجل التدقيق.'
+          : 'Enter a reason for the adjustment (at least 3 characters); it is kept in the audit record.');
+        return;
+      }
+      const diff = roundForCurrency(numAmount - cleanBalance, activeCurrency);
+      const confirmMsg = isRtl
+        ? `تسوية ${activeCurrency}\nالحالي: ${formatCurrency(cleanBalance)}\nالجديد: ${formatCurrency(numAmount)}\nالفرق: ${formatCurrency(diff)}\nالسبب: ${reason}\n\nهل تعتمد التسوية؟`
+        : `Adjust ${activeCurrency}\nCurrent: ${formatCurrency(cleanBalance)}\nNew: ${formatCurrency(numAmount)}\nDifference: ${formatCurrency(diff)}\nReason: ${reason}\n\nApply this adjustment?`;
+      if (!window.confirm(confirmMsg)) return;
+    }
+
     if (isSubmitting) return;
     setIsSubmitting(true);
     try {
       if (modalType === 'recalibrate') {
-        await recalibrateVault(
-          numAmount,
-          activeCurrency,
-          description || (isRtl ? 'تسوية يدوية للرصيد' : 'Manual balance adjustment')
-        );
+        await recalibrateVault(numAmount, activeCurrency, description.trim());
       } else {
         let mappedCategory: VaultTransaction['category'] = 'other';
         if (category === 'sale') mappedCategory = 'sale';
         else if (category === 'purchase') mappedCategory = 'purchase';
-        else if (category === 'salary') mappedCategory = 'salary';
         else if (category === 'general') mappedCategory = 'manual';
 
         // Retrieve specific subcategory label for clearer description
@@ -260,7 +269,7 @@ export default function VaultManagement({ language, settings }: Props) {
           id: (entryDraftRef.current ||= crypto.randomUUID()),
           type: modalType,
           category: mappedCategory,
-          source: modalType === 'expense' && category === 'salary' ? 'payroll' : (modalType === 'expense' && category !== 'general' ? 'expense' : 'manual'),
+          source: modalType === 'expense' && category !== 'general' ? 'expense' : 'manual',
           amount: numAmount,
           currency: activeCurrency,
           description: finalDescription
@@ -269,7 +278,7 @@ export default function VaultManagement({ language, settings }: Props) {
 
       triggerCelebration();
       sounds.playSuccess();
-      toast.success(isRtl ? 'تم تحديث الرصيد وتسجيل العملية بنجاح!' : 'Vault protocol executed successfully!');
+      toast.success(isRtl ? 'تم تسجيل العملية وتحديث الرصيد.' : 'Transaction saved and balance updated.');
       
       entryDraftRef.current = null;
       setIsModalOpen(false);
@@ -366,7 +375,7 @@ export default function VaultManagement({ language, settings }: Props) {
         <div className="space-y-1">
           <h1 className="text-3xl font-bold text-slate-900 dark:text-white flex items-center gap-3 tracking-tight">
             <Shield className="text-cyan-600 dark:text-[#00E5FF] drop-shadow-[0_0_15px_rgba(0,229,255,0.4)]" size={32} />
-            <span className="heading-soft">{isRtl ? 'الخزنة والمالية المركزية' : 'Corporate Treasury & Liquidity'}</span>
+            <span className="heading-soft">{isRtl ? 'الخزنة' : 'Cash vault'}</span>
           </h1>
           <p className="text-sm text-slate-500 dark:text-slate-400">
             {isRtl ? 'رصيد الخزنة وحركات الإيداع والسحب.' : 'Vault balance, deposits and withdrawals.'}
@@ -409,7 +418,7 @@ export default function VaultManagement({ language, settings }: Props) {
         <div className="flex items-center gap-2">
           <Wallet className="text-cyan-600 dark:text-[#00E5FF] w-4 h-4" />
           <span className="text-xs font-bold text-slate-700 dark:text-slate-300">
-            {isRtl ? 'العملة المعروضة حالياً باللوحة ويتم التعامل بها:' : 'Active presentation and transaction currency:'}
+            {isRtl ? 'عملة العرض والمعاملات:' : 'Display and transaction currency:'}
           </span>
         </div>
         
@@ -521,8 +530,8 @@ export default function VaultManagement({ language, settings }: Props) {
               <Filter size={18} />
             </div>
             <div>
-              <h3 className="text-base font-bold text-slate-900 dark:text-white">{isRtl ? 'تصفية سجل الحركات المالية' : 'Filter Ledger Transactions'}</h3>
-              <p className="text-xs text-slate-500 dark:text-slate-400">{isRtl ? 'اختر معايير التصفية والبيانات للتقصي والبحث عن الحركات والتواريخ.' : 'Adjust search terms, movement dates and ledger categories precisely.'}</p>
+              <h3 className="text-base font-bold text-slate-900 dark:text-white">{isRtl ? 'تصفية الحركات' : 'Filter movements'}</h3>
+              <p className="text-xs text-slate-500 dark:text-slate-400">{isRtl ? 'ابحث بالتاريخ أو النوع أو الوصف.' : 'Filter by date, type, or description.'}</p>
             </div>
           </div>
           
@@ -658,10 +667,10 @@ export default function VaultManagement({ language, settings }: Props) {
         <div className="p-6 border-b border-slate-100 dark:border-white/[0.04] bg-slate-50/60 dark:bg-white/[0.01] flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3">
             <History className="text-cyan-600 dark:text-[#00E5FF]" size={20} />
-            <h2 className="text-lg font-bold text-slate-900 dark:text-white font-sans">{isRtl ? 'سجل العمليات المالية المركزية' : 'Sanctuary Master Ledger'}</h2>
+            <h2 className="text-lg font-bold text-slate-900 dark:text-white font-sans">{isRtl ? 'سجل حركات الخزنة' : 'Vault movements'}</h2>
           </div>
           <span className="live-badge bg-cyan-100 text-cyan-800 dark:bg-cyan-500/10 dark:text-cyan-400 border border-cyan-200 dark:border-cyan-500/20 px-2.5 py-1 rounded text-[10px] font-bold">
-            {isRtl ? 'تحديث تلقائي لحظي' : 'Real-time syncing enabled'}
+            {isRtl ? 'يتحدّث مع السحابة' : 'Synced with the cloud'}
           </span>
         </div>
 
@@ -841,7 +850,7 @@ export default function VaultManagement({ language, settings }: Props) {
                   <div className="col-span-2 space-y-2">
                     <label className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider">
                       {modalType === 'recalibrate' 
-                        ? (isRtl ? 'رصيد الخزنة الفعلي الجديد' : 'New Physical Vault Balance')
+                        ? (isRtl ? 'رصيد الخزنة الفعلي الجديد' : 'New counted vault balance')
                         : (isRtl ? 'مبلغ العملية المالي' : 'Transaction Value')}
                     </label>
                     <div className="relative">
@@ -876,19 +885,35 @@ export default function VaultManagement({ language, settings }: Props) {
                   <label className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider">
                     {modalType === 'recalibrate'
                       ? (isRtl ? 'سبب التسوية وتفاصيل الجرد' : 'Reason / count details')
-                      : (isRtl ? 'البيان / تفاصيل وملاحظات الحركة' : 'Memorandum / Details')}
+                      : (isRtl ? 'البيان / تفاصيل وملاحظات الحركة' : 'Description / notes')}
                   </label>
                   <textarea 
                     value={description}
                     onChange={(e) => setDescription(e.target.value)}
                     rows={3}
+                    required={modalType === 'recalibrate'}
+                    minLength={modalType === 'recalibrate' ? 3 : undefined}
                     placeholder={modalType === 'recalibrate'
-                      ? (isRtl ? 'مثال: تسوية النقدية مطابقة جرد نهاية الشهر الأول...' : 'e.g. Month-end safe audit compensation...')
+                      ? (isRtl ? 'مثال: تسوية النقدية مطابقة جرد نهاية الشهر...' : 'e.g. Month-end cash count adjustment...')
                       : (isRtl ? 'اكتب بياناً مفصلاً على هذه المعاملة (مثال: دفعة مبيعات الفاتورة #113)...' : 'Write memo details here...')} aria-label={modalType === 'recalibrate'
-                      ? (isRtl ? 'مثال: تسوية النقدية مطابقة جرد نهاية الشهر الأول...' : 'e.g. Month-end safe audit compensation...')
-                      : (isRtl ? 'اكتب بياناً مفصلاً على هذه المعاملة (مثال: دفعة مبيعات الفاتورة #113)...' : 'Write memo details here...')}
+                      ? (isRtl ? 'سبب التسوية' : 'Adjustment reason')
+                      : (isRtl ? 'بيان الحركة' : 'Transaction notes')}
                     className="w-full px-4 py-3.5 bg-slate-50 dark:bg-black/45 border border-slate-200 dark:border-white/10 rounded-2xl text-xs font-medium text-slate-900 dark:text-white focus:ring-1 focus:ring-cyan-500 outline-none transition-all resize-none"
                   />
+                  {modalType === 'recalibrate' && (() => {
+                    const typed = String(amount).trim();
+                    const parsed = typed === '' ? NaN : Number(typed);
+                    if (!Number.isFinite(parsed) || parsed < 0) return null;
+                    const next = roundForCurrency(parsed, activeCurrency);
+                    const diff = roundForCurrency(next - activeBalance, activeCurrency);
+                    return (
+                      <div className="rounded-xl border border-cyan-200/60 dark:border-cyan-500/20 bg-cyan-50/80 dark:bg-cyan-500/10 px-3 py-2 text-[11px] font-bold text-slate-700 dark:text-slate-200 space-y-0.5">
+                        <div className="flex justify-between gap-2"><span>{isRtl ? 'الحالي' : 'Current'}</span><span className="font-mono" dir="ltr">{formatCurrency(activeBalance)}</span></div>
+                        <div className="flex justify-between gap-2"><span>{isRtl ? 'الجديد' : 'New'}</span><span className="font-mono" dir="ltr">{formatCurrency(next)}</span></div>
+                        <div className="flex justify-between gap-2"><span>{isRtl ? 'الفرق' : 'Difference'}</span><span className="font-mono" dir="ltr">{formatCurrency(diff)}</span></div>
+                      </div>
+                    );
+                  })()}
                 </div>
 
                 {/* Confirm Action Button */}

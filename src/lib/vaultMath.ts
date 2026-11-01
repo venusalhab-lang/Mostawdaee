@@ -1,6 +1,7 @@
 import type { Currency, Invoice, VaultTransaction } from '../types';
 import { roundMoney } from './exchangeRates';
 import { purchasePayment } from './suppliers';
+import { salePayment } from './salesPayment';
 
 /**
  * Single source of truth for vault (الخزنة) arithmetic.
@@ -119,17 +120,21 @@ export function planInvoiceVaultEntry(invoice: Invoice, opts: { includeNonCash?:
       refId: invoice.id,
     };
   }
-  if (invoice.type === 'sale' && invoice.paymentMethod === 'credit') return null;
   const nonCash = invoice.paymentMethod === 'card' || invoice.paymentMethod === 'wallet';
   if (nonCash && !opts.includeNonCash) return null;
 
-  const currency = (invoice.currency || 'JOD') as Currency;
+  const currencyRaw = invoice.currency || 'JOD';
+  if (!VAULT_CURRENCIES.includes(currencyRaw as Currency)) return null;
+  const currency = currencyRaw as Currency;
   const ref = invoice.invoiceNumber || invoice.id;
   const isSale = invoice.type === 'sale';
   const method = invoice.paymentMethod && invoice.paymentMethod !== 'cash' ? ` [${invoice.paymentMethod}]` : '';
-  // A credit purchase takes from the vault only what was paid when the goods came in.
-  const amount = isSale ? Number(invoice.totalAmount) || 0 : purchasePayment(invoice).paid;
-  if (!isSale && invoice.paymentMethod === 'credit' && amount <= 0) return null;
+  // Credit sale/purchase: vault moves only the paid-now slice; full-آجل paid=0 → no vault row.
+  const amount = isSale
+    ? (invoice.paymentMethod === 'credit' ? salePayment(invoice).paid : Number(invoice.totalAmount))
+    : purchasePayment(invoice).paid;
+  // Refuse zero/negative cash posts: a negative "income" would bypass expense cover checks.
+  if (!Number.isFinite(amount) || amount <= 0) return null;
 
   return {
     type: isSale ? 'income' : 'expense',

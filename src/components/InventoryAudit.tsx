@@ -4,8 +4,7 @@ import { toast } from 'sonner';
 import type { AppSettings, InventoryAudit, InventoryAuditLine, Language, Product } from '../types';
 import { useFirebase } from './FirebaseProvider';
 import BarcodeScannerScanner from './ui/BarcodeScannerScanner';
-import { formatMoney, roundMoney } from '../lib/exchangeRates';
-import { computeStockStatus } from '../lib/stock';
+import { formatMoney } from '../lib/exchangeRates';
 import { productsForCode } from '../lib/productLookup';
 import { formatPackStock, productPack, productsForPackCode, splitPacks } from '../lib/packs';
 import {
@@ -14,10 +13,12 @@ import {
   countBarcode,
   newAuditNumber,
   planAuditApply,
+  refreshExpectedFromBook,
+  stocktakeCloseAccepted,
   stocktakeMovement,
 } from '../lib/inventoryAudit';
 import {
-  completeAuditCloud,
+  completeAuditCloudWithRetry,
   deleteAuditDraft,
   loadAuditArchive,
   markLocalCompleted,
@@ -48,7 +49,7 @@ function productCost(product: Product): number {
 
 export default function InventoryAudit({ language, settings }: Props) {
   const isRtl = language === 'ar';
-  const { products, warehouses, saveProduct, user } = useFirebase();
+  const { products, warehouses, applyStocktake, user } = useFirebase();
   const userId = user?.uid || 'guest';
   const [tab, setTab] = useState<'count' | 'archive'>('count');
   const [audit, setAudit] = useState<InventoryAudit>(() => freshAudit(userId));
@@ -99,7 +100,7 @@ export default function InventoryAudit({ language, settings }: Props) {
         return {
           ...line,
           difference,
-          varianceValue: roundMoney(auditVarianceValue(difference, line.unitCost), line.currency || settings.currency),
+          varianceValue: auditVarianceValue(difference, line.unitCost, line.currency || settings.currency),
           movement: stocktakeMovement(difference),
         };
       }),
@@ -196,6 +197,16 @@ export default function InventoryAudit({ language, settings }: Props) {
     return true;
   };
 
+  const bookMap = () => Object.fromEntries(catalog.map((product) => [product.id, Number(product.quantity) || 0]));
+
+  const refreshBookQuantities = () => {
+    if (!lines.length) return;
+    const next = refreshExpectedFromBook(lines, bookMap());
+    setLines(next);
+    setConfirmApply(false);
+    toast.success(isRtl ? 'حُدّثت الكميات المسجّلة من المخزون الحالي.' : 'Book quantities refreshed from current stock.');
+  };
+
   const persist = async () => {
     const stamped = lines.map((line) => ({
       ...line,
@@ -234,14 +245,15 @@ export default function InventoryAudit({ language, settings }: Props) {
       setConfirmApply(false);
       return;
     }
-    const book = Object.fromEntries(catalog.map((product) => [product.id, Number(product.quantity) || 0]));
-    const plan = planAuditApply(lines, book);
+    const plan = planAuditApply(lines, bookMap());
     if (!plan.ok) {
       const blocked = plan.lines.find((line) => line.block);
       const name = blocked?.productName || '';
       toast.error(
         blocked?.block === 'STOCK_CHANGED'
-          ? (isRtl ? `كمية «${name}» تغيّرت بعد بدء الجرد. حدّث السطر قبل الاعتماد.` : `Quantity for “${name}” changed after the count started. Refresh that line before applying.`)
+          ? (isRtl
+            ? `كمية «${name}» تغيّرت بعد بدء الجرد. اضغط «تحديث المسجّل» ثم أعد الاعتماد.`
+            : `Quantity for “${name}” changed after the count started. Tap “Refresh book” then apply again.`)
           : (isRtl ? `الكمية أو التكلفة غير صالحة للصنف «${name}».` : `Quantity or cost is invalid for “${name}”.`),
       );
       setConfirmApply(false);
@@ -249,6 +261,7 @@ export default function InventoryAudit({ language, settings }: Props) {
     }
 
     setBusy(true);
+    let stockCommitted = false;
     try {
       const draftCloud = await persist();
       if (!draftCloud.cloud && draftCloud.reason === 'failed') {
@@ -265,40 +278,78 @@ export default function InventoryAudit({ language, settings }: Props) {
         return;
       }
 
-      // From the first stock change on, this count must never be resumed or applied again, even if closing it on the server fails.
-      markLocalCompleted(userId, audit.id);
-      for (const line of plan.lines) {
-        if (line.action !== 'update' || !line.movement) continue;
-        const product = catalog.find((item) => item.id === line.productId)!;
-        await saveProduct(
-          {
-            ...product,
-            quantity: line.actualQty,
-            status: computeStockStatus(line.actualQty, product.lowStockThreshold, settings.lowStockThreshold),
-          },
-          { reason: `${line.movement} ${audit.auditNumber}` },
-        );
+      const stockLines = plan.lines
+        .filter((line) => line.action === 'update' && line.movement)
+        .map((line) => ({
+          productId: line.productId,
+          productName: line.productName,
+          expectedQty: line.expectedQty,
+          actualQty: line.actualQty,
+          movementLabel: `${line.movement} ${audit.auditNumber}`,
+        }));
+
+      // One transaction: every counted line commits together, or none do.
+      if (stockLines.length) {
+        await applyStocktake({ auditNumber: audit.auditNumber, lines: stockLines });
+        stockCommitted = true;
       }
 
-      const cloud = await completeAuditCloud(audit.id);
-      if (!cloud.cloud && cloud.reason === 'failed') {
+      const cloud = await completeAuditCloudWithRetry(audit.id);
+      if (!stocktakeCloseAccepted(cloud)) {
+        // Stock may already be written; seal locally so this device cannot apply the same counts twice,
+        // and surface a hard error (never a success toast).
+        const sealed = markLocalCompleted(userId, audit.id);
+        setArchive(await loadAuditArchive(userId));
+        setOpenReportId(audit.id);
+        setTab('archive');
+        setConfirmApply(false);
+        setLines([]);
+        setAudit(freshAudit(userId));
         toast.error(isRtl
-          ? 'تحدّث المخزون، لكن تعذّر إغلاق الجرد على الخادم. أُغلق على هذا الجهاز فلن يُطبَّق مرة ثانية.'
-          : 'Stock was updated, but the stocktake could not be closed on the server. It is closed on this device so it cannot be applied twice.');
+          ? (sealed
+            ? 'تحدّث المخزون، لكن تعذّر إغلاق الجرد على الخادم بعد عدة محاولات. أُغلق على هذا الجهاز. تحقق من الاتصال وأعد فتح السجل إن لزم.'
+            : 'تحدّث المخزون وتعذّر إغلاق الجرد على الخادم، وامتنع الجهاز عن حفظ الختم محلياً (الذاكرة ممتلئة؟). لا تُعد تطبيق نفس العدّ قبل المراجعة.')
+          : (sealed
+            ? 'Stock was updated, but closing the stocktake on the server failed after retries. It is sealed on this device. Check the connection and reopen the archive if needed.'
+            : 'Stock was updated and the server close failed; this device could not seal the count locally (storage full?). Do not re-apply the same count before review.'));
+        return;
       }
-      setArchive(await loadAuditArchive(userId));
-      if (cloud.cloud || cloud.reason !== 'failed') {
+
+      const sealed = markLocalCompleted(userId, audit.id);
+      if (!sealed) {
+        toast.error(isRtl
+          ? 'اعتُمد المخزون، لكن تعذّر ختم الجرد على هذا الجهاز (الذاكرة ممتلئة؟). راجع السجل قبل أي إعادة تطبيق.'
+          : 'Stock was applied, but this device could not seal the stocktake (storage full?). Review the archive before any re-apply.');
+      } else {
         toast.success(isRtl ? 'اعتُمد الجرد وحُدّث المخزون' : 'Stocktake applied and stock was updated');
       }
+      setArchive(await loadAuditArchive(userId));
       setOpenReportId(audit.id);
       setTab('archive');
       setConfirmApply(false);
       setLines([]);
       setAudit(freshAudit(userId));
-    } catch {
-      toast.error(isRtl
-        ? 'توقف الاعتماد قبل إنهاء كل الأصناف. راجع المخزون وسجل الجرد قبل المتابعة.'
-        : 'Apply stopped before every product was updated. Check stock and the count history before continuing.');
+    } catch (err: any) {
+      if (stockCommitted) {
+        const sealed = markLocalCompleted(userId, audit.id);
+        toast.error(isRtl
+          ? (sealed
+            ? 'تحدّث المخزون ثم حدث خطأ أثناء الإغلاق. أُغلق الجرد على هذا الجهاز لتجنّب التكرار.'
+            : 'تحدّث المخزون ثم فشل الإغلاق، وامتنع الجهاز عن حفظ الختم. لا تُعد تطبيق نفس العدّ قبل المراجعة.')
+          : (sealed
+            ? 'Stock was updated, then closing failed. The stocktake is sealed on this device to avoid a double apply.'
+            : 'Stock was updated, then closing failed, and this device could not seal the count. Do not re-apply before review.'));
+      } else if (err?.code === 'stock-changed') {
+        toast.error(err.message || (isRtl
+          ? 'تغيّر المخزون بعد بدء الجرد؛ لم يُعتمد أي تعديل. حدّث المسجّل ثم أعد المحاولة.'
+          : 'Stock changed after the count started; nothing was applied. Refresh the book and try again.'));
+      } else if (err?.code === 'product-missing') {
+        toast.error(err.message || (isRtl ? 'صنف في الجرد لم يعد موجوداً؛ لم يُعتمد أي تعديل.' : 'A counted product is gone; nothing was applied.'));
+      } else if (!err?.notified) {
+        toast.error(isRtl
+          ? 'تعذّر اعتماد الجرد؛ لم يتغيّر المخزون. يمكنك إعادة المحاولة بأمان.'
+          : 'Could not apply the stocktake; stock was not changed. You can safely retry.');
+      }
     } finally {
       setBusy(false);
     }
@@ -585,6 +636,15 @@ export default function InventoryAudit({ language, settings }: Props) {
             <div className="flex flex-wrap gap-2">
               <button
                 type="button"
+                disabled={busy || lines.length === 0}
+                onClick={refreshBookQuantities}
+                className="rounded-xl border border-slate-200 dark:border-white/10 px-4 py-3 text-sm font-bold disabled:opacity-50"
+                title={isRtl ? 'مزامنة عمود المسجّل مع كميات المخزون الحالية' : 'Sync the book column with current stock quantities'}
+              >
+                {isRtl ? 'تحديث المسجّل' : 'Refresh book'}
+              </button>
+              <button
+                type="button"
                 disabled={busy}
                 onClick={saveDraft}
                 className="rounded-xl border border-slate-200 dark:border-white/10 px-4 py-3 text-sm font-bold disabled:opacity-50"
@@ -667,7 +727,7 @@ export default function InventoryAudit({ language, settings }: Props) {
                                 <td className="py-2 text-end font-mono">{line.actualQty}</td>
                                 <td className={`py-2 text-end font-mono font-bold ${tone}`}>{difference > 0 ? `+${difference}` : difference}</td>
                                 <td className={`py-2 text-end font-mono ${tone}`}>
-                                  {formatMoney(auditVarianceValue(difference, line.unitCost), line.currency || settings.currency, isRtl ? 'ar' : 'en-US')}
+                                  {formatMoney(auditVarianceValue(difference, line.unitCost, line.currency || settings.currency), line.currency || settings.currency, isRtl ? 'ar' : 'en-US')}
                                 </td>
                               </tr>
                             );

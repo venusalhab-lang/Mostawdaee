@@ -1,5 +1,5 @@
 -- Cheques register. Run once in the Supabase SQL editor; safe to run again.
--- Run after supabase_production_setup.sql (writes require public.has_access()).
+-- Run after supabase_production_setup.sql (needs public.has_access / workspace_*).
 -- Each store sees only its own cheques; owners and managers work on them, cashiers do not. Status changes follow the same rules as src/lib/cheques.ts.
 
 BEGIN;

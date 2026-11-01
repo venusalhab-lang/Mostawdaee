@@ -100,7 +100,7 @@ function blankForm(type: ChequeType, currency: Currency, businessName: string, h
 export default function ChequesManagement({ language, settings }: Props) {
   const isRtl = language === 'ar';
   const locale = isRtl ? 'ar' : 'en-US';
-  const { user, customers, invoices, recordCustomerLedgerTransaction } = useFirebase();
+  const { user, customers, invoices, recordCustomerLedgerTransaction, deleteCustomerLedgerTransaction } = useFirebase();
   const userId = user?.uid || 'guest';
   const defaultCurrency: Currency = isPosCurrency(settings.currency) ? settings.currency : 'ILS';
 
@@ -173,6 +173,7 @@ export default function ChequesManagement({ language, settings }: Props) {
       invalid: ['بيانات الشيك غير صالحة.', 'The cheque details are not valid.'],
       invalid_transition: ['تغيّرت حالة هذا الشيك أو لا يمكن نقله إلى هذه الحالة. حدّث القائمة.', 'This cheque changed or cannot move to that status. Refresh the list.'],
       not_found: ['لم يعد هذا الشيك موجوداً.', 'This cheque no longer exists.'],
+      storage_full: ['ذاكرة الجهاز ممتلئة؛ لم يُحفظ سجل الشيكات على هذا الجهاز.', 'This device is out of storage; the cheque register was not saved here.'],
       failed: ['تعذّر الاتصال بالخادم. لم يُحفظ التغيير.', 'Could not reach the server. Nothing was saved.'],
     };
     const [ar, en] = messages[code] || messages.failed;
@@ -334,28 +335,40 @@ export default function ChequesManagement({ language, settings }: Props) {
           ? appendNote(cheque.notes, `${isRtl ? 'سبب الرجوع' : 'Bounce reason'} (${today}): ${bounceReason.trim()}`)
           : cheque.notes;
         const payment = next === 'cashed' && bookPayment ? paymentFor(cheque) : null;
-        const updated = await changeChequeStatus(userId, cheque, next, endorsedTo, notes);
+        // Book AR first so a failed ledger write cannot leave a cashed cheque with an open debt.
+        // If status change fails after AR, reverse the ledger (and vault if linked) before surfacing the error.
+        const paymentDraftId = payment?.customer && payment.plan?.ok ? `chq-${cheque.id}` : null;
+        if (payment?.customer && payment.plan?.ok && paymentDraftId) {
+          await recordCustomerLedgerTransaction(
+            payment.customer.id,
+            cheque.amount,
+            'payment',
+            isRtl ? `تحصيل شيك رقم ${cheque.chequeNumber} - ${cheque.bankName}` : `Cheque ${cheque.chequeNumber} cashed - ${cheque.bankName}`,
+            paymentToVault,
+            paymentDraftId,
+          );
+        }
+        let updated: Cheque;
+        try {
+          updated = await changeChequeStatus(userId, cheque, next, endorsedTo, notes);
+        } catch (statusError) {
+          if (paymentDraftId) {
+            try {
+              await deleteCustomerLedgerTransaction(`TX_${paymentDraftId}`, { reverseVault: paymentToVault });
+            } catch {
+              toast.error(isRtl
+                ? 'سُجّلت دفعة على حساب الزبون ثم فشل تحديث حالة الشيك وتعذّر التراجع تلقائياً. راجع العملاء والشيكات يدوياً.'
+                : 'A customer payment was booked, then the cheque status failed and automatic rollback failed. Review Customers and Cheques manually.',
+                { duration: 12000 });
+            }
+          }
+          throw statusError;
+        }
         setCheques((current) => current.map((row) => (row.id === updated.id ? updated : row)));
         if (payment?.customer && payment.plan?.ok) {
-          try {
-            await recordCustomerLedgerTransaction(
-              payment.customer.id,
-              cheque.amount,
-              'payment',
-              isRtl ? `تحصيل شيك رقم ${cheque.chequeNumber} - ${cheque.bankName}` : `Cheque ${cheque.chequeNumber} cashed - ${cheque.bankName}`,
-              paymentToVault,
-              `chq-${cheque.id}`,
-            );
-            toast.success(isRtl
-              ? `تحصّل الشيك ${cheque.chequeNumber} ونقص دين ${payment.customer.name} إلى ${formatMoney(payment.plan.debtAfter, cheque.currency, locale)}`
-              : `Cheque ${cheque.chequeNumber} cashed; ${payment.customer.name} now owes ${formatMoney(payment.plan.debtAfter, cheque.currency, locale)}`);
-          } catch (error) {
-            const reason = error instanceof Error ? error.message : '';
-            toast.error(isRtl
-              ? `تحصّل الشيك، لكن لم تُسجَّل الدفعة على حساب الزبون. سجّلها من شاشة العملاء.${reason ? ` (${reason})` : ''}`
-              : `The cheque is cashed, but the payment was not booked on the customer account. Record it from Customers.${reason ? ` (${reason})` : ''}`,
-              { duration: 10000 });
-          }
+          toast.success(isRtl
+            ? `تحصّل الشيك ${cheque.chequeNumber} ونقص دين ${payment.customer.name} إلى ${formatMoney(payment.plan.debtAfter, cheque.currency, locale)}`
+            : `Cheque ${cheque.chequeNumber} cashed; ${payment.customer.name} now owes ${formatMoney(payment.plan.debtAfter, cheque.currency, locale)}`);
         } else {
           toast.success(isRtl ? `الشيك ${updated.chequeNumber}: ${statusLabel(updated.status)}` : `Cheque ${updated.chequeNumber}: ${statusLabel(updated.status)}`);
         }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  BACKUP_APP, backupCounts, buildStoreBackup, isLegacyTableBackup, isStoreBackup, newerLiveActivity, restoreStoreBackup, stockCsv,
+  BACKUP_APP, assertReplaceAllowed, assertVaultRestoreAllowed, backupCounts, buildStoreBackup, isLegacyTableBackup, isStoreBackup, newerLiveActivity, orphanIds, restoreStoreBackup, stockCsv,
   type RestoreActions,
 } from '../storeBackup';
 
@@ -9,6 +9,12 @@ const noLive = { invoices: [], vaultTransactions: [], customerTransactions: [] }
 const product = (over: Record<string, unknown> = {}) => ({
   id: 'p1', name: 'Rice "5kg"', category: 'Food', warehouseId: 'w1', quantity: 4, sellingPrice: 12.5,
   currency: 'USD', dateAdded: '2026-01-02T10:00:00.000Z', ...over,
+}) as any;
+
+const bak = (over: Record<string, unknown> = {}) => ({
+  app: BACKUP_APP as typeof BACKUP_APP,
+  timestamp: 1_000,
+  ...over,
 }) as any;
 
 describe('store backup', () => {
@@ -28,8 +34,10 @@ describe('store backup', () => {
     expect(isStoreBackup(legacy)).toBe(false);
     expect(isStoreBackup({ hello: 1 })).toBe(false);
     expect(isStoreBackup(null)).toBe(false);
-    expect(isStoreBackup({ app: BACKUP_APP })).toBe(true);
-    expect(isStoreBackup({ products: [] })).toBe(true);
+    expect(isStoreBackup({ app: BACKUP_APP })).toBe(false);
+    expect(isStoreBackup({ products: [] })).toBe(false);
+    expect(isStoreBackup({ app: 'Other', timestamp: 1 })).toBe(false);
+    expect(isStoreBackup({ app: BACKUP_APP, timestamp: Date.now() })).toBe(true);
   });
 
   it('restores through the app save paths, vault movements before the balance', async () => {
@@ -40,9 +48,9 @@ describe('store backup', () => {
       saveInvoice: rec('invoice'), saveEmployee: rec('employee'), savePayrollRecord: rec('payroll'),
       saveCustomer: rec('customer'), saveCustomerTransaction: rec('customerTx'),
       saveSupplierRecord: rec('supplier'), saveSupplierTransaction: rec('supplierTx'), saveShift: rec('shift'), saveOrder: rec('order'),
-      saveVaultRecord: rec('vaultRecord'), restoreVault: rec('vault'),
+      saveCheque: rec('cheque'), saveVaultRecord: rec('vaultRecord'), restoreVault: rec('vault'),
     };
-    await restoreStoreBackup({
+    await restoreStoreBackup(bak({
       settings: { storeName: 'S' } as any,
       warehouses: [{ id: 'w1' }] as any,
       products: [product()],
@@ -55,12 +63,13 @@ describe('store backup', () => {
       supplierTransactions: [{ id: 'st1' }] as any,
       shifts: [{ id: 'sh1' }] as any,
       orders: [{ id: 'po1' }] as any,
+      cheques: [{ id: 'ch1' }] as any,
       vaultTransactions: [{ id: 'v1' }, { amount: 3 }] as any,
       vault: { currentBalance: 10, lastUpdated: 5 },
-    }, actions, noLive);
+    }), actions, noLive);
     expect(calls).toEqual([
       'settings', 'warehouse', 'product', 'invoice', 'employee', 'payroll', 'customer', 'customerTx', 'supplier', 'supplierTx',
-      'shift', 'order', 'vaultRecord', 'vault',
+      'shift', 'order', 'cheque', 'vaultRecord', 'vault',
     ]);
   });
 
@@ -71,10 +80,10 @@ describe('store backup', () => {
       saveSettings: rec('settings'), saveWarehouse: rec('warehouse'), saveProduct: rec('product'),
       saveInvoice: rec('invoice'), saveEmployee: rec('employee'), savePayrollRecord: rec('payroll'),
       saveCustomer: rec('customer'), saveCustomerTransaction: rec('customerTx'), saveShift: rec('shift'), saveOrder: rec('order'),
-      saveVaultRecord: rec('vaultRecord'), restoreVault: rec('vault'),
+      saveCheque: rec('cheque'), saveVaultRecord: rec('vaultRecord'), restoreVault: rec('vault'),
     } as RestoreActions;
     const live = { invoices: [{ date: 2_000 }], vaultTransactions: [], customerTransactions: [] };
-    await expect(restoreStoreBackup({ timestamp: 1_000, products: [product()] }, actions, live))
+    await expect(restoreStoreBackup(bak({ timestamp: 1_000, products: [product()] }), actions, live))
       .rejects.toMatchObject({ code: 'backup-older', newer: 2_000 });
     expect(calls).toEqual([]);
   });
@@ -85,6 +94,11 @@ describe('store backup', () => {
     expect(newerLiveActivity(Date.parse('2026-10-01'), { invoices: [], vaultTransactions: [], customerTransactions: [{ date: '2026-10-05T10:00:00Z' }] })).toBe(Date.parse('2026-10-05T10:00:00Z'));
     expect(newerLiveActivity(undefined, { invoices: [{ date: 1 }], vaultTransactions: [], customerTransactions: [] })).toBe(1);
     expect(newerLiveActivity(5_000, { invoices: [], vaultTransactions: [], customerTransactions: [], supplierTransactions: [{ date: 7_000 }] })).toBe(7_000);
+    expect(newerLiveActivity(5_000, { invoices: [], vaultTransactions: [], customerTransactions: [], stockMovements: [{ timestamp: 8_000 }] })).toBe(8_000);
+    expect(newerLiveActivity(5_000, { invoices: [], vaultTransactions: [], customerTransactions: [], stockMovements: [{ timestamp: 4_000 }] })).toBeNull();
+    expect(newerLiveActivity(5_000, { invoices: [], vaultTransactions: [], customerTransactions: [], cheques: [{ createdAt: '1970-01-01T00:00:09.000Z', statusChangedAt: null }] })).toBe(9_000);
+    expect(newerLiveActivity(5_000, { invoices: [], vaultTransactions: [], customerTransactions: [], vault: { lastUpdated: 9_500 } })).toBe(9_500);
+    expect(newerLiveActivity(5_000, { invoices: [], vaultTransactions: [], customerTransactions: [], vault: { lastUpdated: 4_000 } })).toBeNull();
   });
 
   it('keeps going past a salary that is already paid in the live books', async () => {
@@ -96,10 +110,10 @@ describe('store backup', () => {
       savePayrollRecord: async () => { throw Object.assign(new Error('Payroll already paid'), { code: 'payroll-already-paid' }); },
       saveCustomer: rec('customer'), saveCustomerTransaction: rec('customerTx'),
       saveSupplierRecord: rec('supplier'), saveSupplierTransaction: rec('supplierTx'), saveShift: rec('shift'), saveOrder: rec('order'),
-      saveVaultRecord: rec('vaultRecord'), restoreVault: rec('vault'),
+      saveCheque: rec('cheque'), saveVaultRecord: rec('vaultRecord'), restoreVault: rec('vault'),
     } as RestoreActions;
     const live = { invoices: [], vaultTransactions: [], customerTransactions: [] };
-    await restoreStoreBackup({ timestamp: 1_000, payrollRecords: [{ id: 'p1' } as any], customers: [{ id: 'c1' } as any] }, actions, live);
+    await restoreStoreBackup(bak({ payrollRecords: [{ id: 'p1' } as any], customers: [{ id: 'c1' } as any] }), actions, live);
     expect(calls).toContain('customer');
   });
 
@@ -112,14 +126,34 @@ describe('store backup', () => {
       saveCustomer: rec('customer'), saveCustomerTransaction: rec('customerTx'),
       saveSupplierRecord: rec('supplier'), saveSupplierTransaction: rec('supplierTx'),
       saveOrder: rec('order'),
+      saveCheque: rec('cheque'),
       saveShift: async (shift: { id: string }) => {
         if (shift.id === 'closed') throw Object.assign(new Error('This shift is closed'), { code: 'shift-closed' });
         calls.push(`shift:${shift.id}`);
       },
       saveVaultRecord: rec('vaultRecord'), restoreVault: rec('vault'),
     } as RestoreActions;
-    await restoreStoreBackup({ shifts: [{ id: 'closed' }, { id: 'open' }] as any, vaultTransactions: [{ id: 'v1' }] as any }, actions, noLive);
+    await restoreStoreBackup(bak({ shifts: [{ id: 'closed' }, { id: 'open' }] as any, vaultTransactions: [{ id: 'v1' }] as any }), actions, noLive);
     expect(calls).toEqual(['shift:open', 'vaultRecord']);
+  });
+
+  it('keeps a finalized cheque the backup cannot reach and goes on', async () => {
+    const calls: string[] = [];
+    const rec = (name: string) => async (..._args: unknown[]) => { calls.push(name); };
+    const actions = {
+      saveSettings: rec('settings'), saveWarehouse: rec('warehouse'), saveProduct: rec('product'),
+      saveInvoice: rec('invoice'), saveEmployee: rec('employee'), savePayrollRecord: rec('payroll'),
+      saveCustomer: rec('customer'), saveCustomerTransaction: rec('customerTx'),
+      saveSupplierRecord: rec('supplier'), saveSupplierTransaction: rec('supplierTx'),
+      saveShift: rec('shift'), saveOrder: rec('order'),
+      saveCheque: async (cheque: { id: string }) => {
+        if (cheque.id === 'final') throw Object.assign(new Error('already final'), { code: 'cheque-already-final' });
+        calls.push(`cheque:${cheque.id}`);
+      },
+      saveVaultRecord: rec('vaultRecord'), restoreVault: rec('vault'),
+    } as RestoreActions;
+    await restoreStoreBackup(bak({ cheques: [{ id: 'final' }, { id: 'ok' }] as any, vaultTransactions: [{ id: 'v1' }] as any }), actions, noLive);
+    expect(calls).toEqual(['cheque:ok', 'vaultRecord']);
   });
 
   it('stops on any other shift failure', async () => {
@@ -128,26 +162,49 @@ describe('store backup', () => {
       saveSettings: ok, saveWarehouse: ok, saveProduct: ok, saveInvoice: ok, saveEmployee: ok, savePayrollRecord: ok,
       saveCustomer: ok, saveCustomerTransaction: ok, saveSupplierRecord: ok, saveSupplierTransaction: ok,
       saveShift: async () => { throw Object.assign(new Error('role not allowed'), { code: 'permission-denied' }); }, saveOrder: ok,
-      saveVaultRecord: ok, restoreVault: ok,
+      saveCheque: ok, saveVaultRecord: ok, restoreVault: ok,
     } as RestoreActions;
-    await expect(restoreStoreBackup({ shifts: [{ id: 's' }] as any }, actions, noLive)).rejects.toMatchObject({ code: 'permission-denied' });
+    await expect(restoreStoreBackup(bak({ shifts: [{ id: 's' }] as any }), actions, noLive)).rejects.toMatchObject({ code: 'permission-denied' });
   });
 
-  it('carries shifts in the backup', () => {
-    const b = buildStoreBackup({ creator: 'x', settings: null, products: [], shifts: [{ id: 'sh1' }] } as any, 1);
+  it('carries shifts and cheques in the backup', () => {
+    const b = buildStoreBackup({ creator: 'x', settings: null, products: [], shifts: [{ id: 'sh1' }], cheques: [{ id: 'ch1' }] } as any, 1);
     expect(b.shifts).toHaveLength(1);
+    expect(b.cheques).toHaveLength(1);
+    expect(backupCounts(b).cheques).toBe(1);
     expect(buildStoreBackup({ creator: 'x', settings: null, products: [] } as any, 1).shifts).toEqual([]);
+    expect(buildStoreBackup({ creator: 'x', settings: null, products: [] } as any, 1).cheques).toEqual([]);
   });
 
-  it('stops at the first failure so a refused vault is reported', async () => {
+  it('refuses a newer live vault before writing stock or invoices', async () => {
+    const calls: string[] = [];
+    const rec = (name: string) => async (..._args: unknown[]) => { calls.push(name); };
     const actions = {
-      saveSettings: async () => {}, saveWarehouse: async () => {}, saveProduct: async () => {},
-      saveInvoice: async () => {}, saveEmployee: async () => {}, savePayrollRecord: async () => {},
-      saveCustomer: async () => {}, saveCustomerTransaction: async () => {}, saveVaultRecord: async () => {},
-      saveSupplierRecord: async () => {}, saveSupplierTransaction: async () => {}, saveShift: async () => {}, saveOrder: async () => {},
-      restoreVault: async () => { throw Object.assign(new Error('vault is newer'), { code: 'vault-newer' }); },
+      saveSettings: rec('settings'), saveWarehouse: rec('warehouse'), saveProduct: rec('product'),
+      saveInvoice: rec('invoice'), saveEmployee: rec('employee'), savePayrollRecord: rec('payroll'),
+      saveCustomer: rec('customer'), saveCustomerTransaction: rec('customerTx'),
+      saveSupplierRecord: rec('supplier'), saveSupplierTransaction: rec('supplierTx'), saveShift: rec('shift'), saveOrder: rec('order'),
+      saveCheque: rec('cheque'), saveVaultRecord: rec('vaultRecord'), restoreVault: rec('vault'),
     } as RestoreActions;
-    await expect(restoreStoreBackup({ vault: { currentBalance: 0, lastUpdated: 1 } as any }, actions, noLive)).rejects.toMatchObject({ code: 'vault-newer' });
+    await expect(restoreStoreBackup(
+      bak({
+        timestamp: 10_000,
+        products: [product()],
+        invoices: [{ id: 'i1', date: 1 }] as any,
+        vault: { currentBalance: 0, lastUpdated: 1_000 } as any,
+      }),
+      actions,
+      { ...noLive, vault: { lastUpdated: 9_000 } },
+    )).rejects.toMatchObject({ code: 'vault-newer', newer: 9_000 });
+    expect(calls).toEqual([]);
+  });
+
+  it('assertVaultRestoreAllowed matches the database vault gate', () => {
+    expect(() => assertVaultRestoreAllowed({ lastUpdated: 5 }, { lastUpdated: 4 })).not.toThrow();
+    expect(() => assertVaultRestoreAllowed({ lastUpdated: 5 }, { lastUpdated: 5 })).not.toThrow();
+    expect(() => assertVaultRestoreAllowed({ lastUpdated: 5 }, { lastUpdated: 6 })).toThrowError(/vault is newer/);
+    expect(() => assertVaultRestoreAllowed({ lastUpdated: 0 }, { lastUpdated: 1 })).toThrowError(/vault is newer/);
+    expect(() => assertVaultRestoreAllowed(null, { lastUpdated: 9 })).not.toThrow();
   });
 
   it('writes a stock sheet with each price in its own currency', () => {
@@ -162,5 +219,65 @@ describe('store backup', () => {
     expect(lines[0]).toContain('"Currency"');
     expect(lines[1]).toBe('"p1","Rice ""5kg""","Food","Main",4,12.5,"USD","2026-01-02"');
     expect(lines[2]).toBe('"p2","Oil","Food","",4,12.5,"JOD",');
+  });
+
+  it('lists orphan ids for replace mode', () => {
+    expect(orphanIds([{ id: 'a' }, { id: 'b' }], [{ id: 'a' }])).toEqual(['b']);
+    expect(orphanIds([{ id: 'a' }], [{ id: 'a' }, { id: 'b' }])).toEqual([]);
+  });
+
+  it('refuses replace before writes when a closed shift would be orphaned', async () => {
+    const calls: string[] = [];
+    const rec = (name: string) => async (..._args: unknown[]) => { calls.push(name); };
+    const actions = {
+      saveSettings: rec('settings'), saveWarehouse: rec('warehouse'), saveProduct: rec('product'),
+      saveInvoice: rec('invoice'), saveEmployee: rec('employee'), savePayrollRecord: rec('payroll'),
+      saveCustomer: rec('customer'), saveCustomerTransaction: rec('customerTx'),
+      saveSupplierRecord: rec('supplier'), saveSupplierTransaction: rec('supplierTx'), saveShift: rec('shift'), saveOrder: rec('order'),
+      saveCheque: rec('cheque'), saveVaultRecord: rec('vaultRecord'), restoreVault: rec('vault'),
+      deleteBookDoc: rec('delete'),
+    } as RestoreActions;
+    await expect(restoreStoreBackup(
+      bak({ timestamp: 10_000, products: [product()] }),
+      actions,
+      { ...noLive, shifts: [{ id: 'closed-1', status: 'closed' }] },
+      { mode: 'replace' },
+    )).rejects.toMatchObject({ code: 'replace-undeletable', kind: 'shift' });
+    expect(calls).toEqual([]);
+  });
+
+  it('replace deletes live products absent from the backup after upserts', async () => {
+    const deleted: string[] = [];
+    const calls: string[] = [];
+    const rec = (name: string) => async (..._args: unknown[]) => { calls.push(name); };
+    const actions: RestoreActions = {
+      saveSettings: rec('settings'), saveWarehouse: rec('warehouse'), saveProduct: rec('product'),
+      saveInvoice: rec('invoice'), saveEmployee: rec('employee'), savePayrollRecord: rec('payroll'),
+      saveCustomer: rec('customer'), saveCustomerTransaction: rec('customerTx'),
+      saveSupplierRecord: rec('supplier'), saveSupplierTransaction: rec('supplierTx'), saveShift: rec('shift'), saveOrder: rec('order'),
+      saveCheque: rec('cheque'), saveVaultRecord: rec('vaultRecord'), restoreVault: rec('vault'),
+      deleteBookDoc: async (collection, id) => { deleted.push(`${collection}:${id}`); },
+      deletePendingCheque: async () => {},
+    };
+    await restoreStoreBackup(
+      bak({ timestamp: 10_000, products: [product({ id: 'keep' })] }),
+      actions,
+      { ...noLive, products: [{ id: 'keep' }, { id: 'orphan' }] },
+      { mode: 'replace' },
+    );
+    expect(calls).toContain('product');
+    expect(deleted).toContain('inventory:orphan');
+    expect(deleted).not.toContain('inventory:keep');
+  });
+
+  it('assertReplaceAllowed allows orphans that are still pending cheques', () => {
+    expect(() => assertReplaceAllowed(
+      bak({ cheques: [] }),
+      { ...noLive, chequeRows: [{ id: 'c1', status: 'pending' }] },
+    )).not.toThrow();
+    expect(() => assertReplaceAllowed(
+      bak({ cheques: [] }),
+      { ...noLive, chequeRows: [{ id: 'c1', status: 'cashed' }] },
+    )).toThrowError(/finalized cheque/i);
   });
 });

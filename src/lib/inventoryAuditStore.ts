@@ -29,8 +29,14 @@ export function readLocalAudits(userId: string): StoredInventoryAudit[] {
   }
 }
 
-export function writeLocalAudits(userId: string, audits: StoredInventoryAudit[]) {
-  localStorage.setItem(storageKey(userId), JSON.stringify(audits));
+/** Returns false when storage is full/blocked — callers must not assume the seal stuck. */
+export function writeLocalAudits(userId: string, audits: StoredInventoryAudit[]): boolean {
+  try {
+    localStorage.setItem(storageKey(userId), JSON.stringify(audits));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function upsertLocalAudit(userId: string, stored: StoredInventoryAudit) {
@@ -205,6 +211,26 @@ export async function completeAuditCloud(auditId: string): Promise<CloudSaveResu
   return { cloud: true, missingProducts: missing };
 }
 
+/**
+ * Closes the stocktake on the server after stock was written.
+ * Retries transient failures so a brief outage does not leave the draft open.
+ */
+export async function completeAuditCloudWithRetry(
+  auditId: string,
+  attempts = 3,
+  pauseMs = 400,
+): Promise<CloudSaveResult> {
+  let last: CloudSaveResult = { cloud: false, reason: 'failed' };
+  for (let i = 0; i < Math.max(1, attempts); i++) {
+    last = await completeAuditCloud(auditId);
+    if (last.cloud || last.reason !== 'failed') return last;
+    if (i < attempts - 1 && pauseMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, pauseMs));
+    }
+  }
+  return last;
+}
+
 export async function deleteAuditDraft(userId: string, auditId: string): Promise<CloudSaveResult> {
   const next = readLocalAudits(userId).filter((row) => row.audit.id !== auditId);
   writeLocalAudits(userId, next);
@@ -219,9 +245,10 @@ export async function deleteAuditDraft(userId: string, auditId: string): Promise
   return { cloud: true };
 }
 
-export function markLocalCompleted(userId: string, auditId: string) {
+/** Seals a stocktake on this device after stock was committed. Returns false if localStorage refused the write. */
+export function markLocalCompleted(userId: string, auditId: string): boolean {
   const next = readLocalAudits(userId).map((row) =>
     row.audit.id === auditId ? { ...row, audit: { ...row.audit, status: 'completed' as const } } : row,
   );
-  writeLocalAudits(userId, next);
+  return writeLocalAudits(userId, next);
 }

@@ -1,6 +1,6 @@
 import { roundMoney } from './exchangeRates';
 import { daysUntilExpiry, isLowStock } from './stock';
-import { startOfLocalDay } from './homeDesk';
+import { EXPIRY_HORIZON_DAYS, startOfLocalDay } from './homeDesk';
 
 // What the merchant should act on today, built only from the store's own records.
 // Money stays per currency: tasks carry one total per currency, never a mixed sum.
@@ -8,7 +8,7 @@ import { startOfLocalDay } from './homeDesk';
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 export const CHEQUE_HORIZON_DAYS = 7;
-export const EXPIRY_HORIZON_DAYS = 7;
+export { EXPIRY_HORIZON_DAYS };
 export const STALE_DEBT_DAYS = 30;
 
 export type TaskSeverity = 'urgent' | 'soon';
