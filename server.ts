@@ -1785,7 +1785,8 @@ async function startServer() {
     });
   });
 
-  // Vite middleware for development
+  // Vite middleware for development. On Vercel the CDN serves `dist/`; this process is API-only.
+  const onVercel = !!process.env.VERCEL;
   if (!isProduction) {
     console.log("Starting in development mode with Vite middleware...");
     const { createServer: createViteServer } = await import("vite");
@@ -1819,7 +1820,7 @@ async function startServer() {
         next(e);
       }
     });
-  } else {
+  } else if (!onVercel) {
     const distPath = path.join(process.cwd(), 'dist');
     console.log(`Starting in production mode. Serving static files from: ${distPath}`);
     
@@ -1877,6 +1878,9 @@ async function startServer() {
     });
   });
 
+  // Vercel serverless: export the Express app; do not bind a port.
+  if (onVercel) return app;
+
   const server = app.listen(Number(PORT), "0.0.0.0", () => {
     console.log(`Server running on port ${PORT}`);
   });
@@ -1887,10 +1891,16 @@ async function startServer() {
     }
     throw err;
   });
+  return app;
 }
 
 process.on("unhandledRejection", (reason) => {
   console.error("[Server] Unhandled promise rejection:", reason);
 });
 
-startServer();
+const booted = startServer();
+export default booted;
+
+if (!process.env.VERCEL) {
+  void booted;
+}

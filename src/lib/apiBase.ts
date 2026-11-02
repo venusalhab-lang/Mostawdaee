@@ -1,3 +1,8 @@
+/**
+ * API origin for fetch().
+ * - Local Express / same-origin Vercel rewrite: empty → `/api/...`
+ * - Phone builds / split hosts: `VITE_API_BASE_URL` (e.g. https://app.mostawdaee.com)
+ */
 export function getApiBase(): string {
   const fromEnv = String((import.meta as any).env?.VITE_API_BASE_URL || '').replace(/\/$/, '');
   if (fromEnv) return fromEnv;
