@@ -3,8 +3,12 @@
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
   "framework": "vite",
+  "rewrites": [
+    { "source": "/api", "destination": "/api" },
+    { "source": "/api/:path*", "destination": "/api?__p=:path*" }
+  ],
   "functions": {
-    "api/[...path].ts": {
+    "api/index.ts": {
       "maxDuration": 60,
       "includeFiles": "server-dist/**"
     }
