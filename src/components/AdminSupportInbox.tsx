@@ -97,6 +97,15 @@ export default function AdminSupportInbox({ isRtl }: { isRtl: boolean }) {
             </div>
             <div className="flex items-center gap-2 text-[10px] font-bold">
               <span className="text-slate-400">{when(t.updated_at, isRtl)}</span>
+              <span className={`px-2 py-0.5 rounded-full border ${
+                t.store_subscription === 'active'
+                  ? 'bg-emerald-50 text-emerald-700 border-emerald-100'
+                  : t.store_subscription === 'trial'
+                    ? 'bg-sky-50 text-sky-700 border-sky-100'
+                    : t.store_subscription === 'expired'
+                      ? 'bg-rose-50 text-rose-700 border-rose-100'
+                      : 'bg-slate-50 text-slate-500 border-slate-200'
+              }`}>{subscriptionLabel(t.store_subscription, isRtl)}</span>
               <span className={`px-2 py-0.5 rounded-full border ${statusTone[t.status]}`}>{staffStatusLabel(t.status, isRtl)}</span>
             </div>
           </button>

@@ -79,6 +79,8 @@ export default function App() {
     workspace,
     isStoreOwner,
     canOpenScreen,
+    platformRole,
+    platformRoleReady,
   } = useFirebase();
   const recoveringPassword = usePasswordRecovery();
 
@@ -618,7 +620,23 @@ export default function App() {
     return loginScreen;
   }
 
-  if (hasRealSession && !isAdmin && !subscriptionLoading && isExpired) {
+  // Platform staff must reach the Mostawdaee console even when their personal store trial/paid window ended.
+  // Wait for the role check before locking so ops/support are not flashed the expired screen.
+  if (hasRealSession && !subscriptionLoading && isExpired && !isAdmin) {
+    if (!platformRoleReady) {
+      return (
+        <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center p-4 text-white font-sans">
+          <div className="relative w-16 h-16 mb-6">
+            <div className="absolute inset-0 rounded-2xl border-4 border-indigo-500/10" />
+            <div className="absolute inset-0 rounded-2xl border-4 border-t-indigo-500 animate-spin" />
+          </div>
+          <p className="text-sm font-bold text-slate-300 tracking-wide animate-pulse">
+            {isRtl ? 'جارٍ التحقق من صلاحيات الفريق...' : 'Checking team access...'}
+          </p>
+        </div>
+      );
+    }
+    if (!platformRole) {
     return (
       <AuthContext.Provider value={authContextValue}>
         <SubscriptionExpired
@@ -648,6 +666,7 @@ export default function App() {
         />
       </AuthContext.Provider>
     );
+    }
   }
 
   // First-run setup for a new store owner (empty books, never completed).

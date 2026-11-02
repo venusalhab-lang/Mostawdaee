@@ -19,8 +19,19 @@ type Tab = 'subscribers' | 'tickets' | 'staff' | 'audit';
 
 export default function AdminDashboard({ language }: Props) {
   const isRtl = language === 'ar';
-  const { user, platformRole } = useFirebase();
+  const { user, platformRole, platformRoleReady } = useFirebase();
   const [tab, setTab] = useState<Tab>('subscribers');
+
+  if (!platformRoleReady) {
+    return (
+      <div className="min-h-[60vh] flex items-center justify-center p-6" dir={isRtl ? 'rtl' : 'ltr'}>
+        <div className="text-center space-y-3">
+          <RefreshCw className="h-6 w-6 text-indigo-600 animate-spin mx-auto" />
+          <p className="text-xs font-bold text-slate-500">{isRtl ? 'جارٍ التحقق من صلاحيات الفريق...' : 'Checking team access...'}</p>
+        </div>
+      </div>
+    );
+  }
 
   if (!platformRole) {
     return (
@@ -31,6 +42,11 @@ export default function AdminDashboard({ language }: Props) {
           </div>
           <h3 className="text-lg font-bold text-slate-900">{isRtl ? 'هذه اللوحة لفريق مستودعي' : 'This console is for the Mostawdaee team'}</h3>
           <p className="text-xs text-slate-500">{user?.email}</p>
+          <p className="text-[11px] text-slate-400 leading-relaxed">
+            {isRtl
+              ? 'إن كنت عضواً في الفريق وتظهر هذه الرسالة، أكّد بريدك أو اطلب من المؤسس تفعيل عضويتك، وتأكد أن الخادم يعمل بمفتاح الخدمة.'
+              : 'If you are on the team and see this, confirm your email or ask the founder to activate you, and ensure the server has the service role key.'}
+          </p>
         </div>
       </div>
     );
