@@ -167,6 +167,8 @@ interface FirebaseContextType {
   canOpenScreen: (screen: string) => boolean;
   /** Role in the founder's platform team, whatever store the account works in; null for merchants. */
   platformRole: PlatformRole | null;
+  /** False until the platform-role check for the signed-in user has settled. */
+  platformRoleReady: boolean;
 }
 
 // Display preferences a member keeps on this device; the store profile itself belongs to the owner.
@@ -758,6 +760,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [workspace, setWorkspace] = useState<Workspace | null>(currentWorkspace());
   const [platformRole, setPlatformRole] = useState<{ uid: string; role: PlatformRole | null } | null>(null);
+  const [platformRoleReady, setPlatformRoleReady] = useState(false);
   const latestSettingsRef = useRef<AppSettings | null>(null);
   latestSettingsRef.current = settings;
   const [products, setProducts] = useState<Product[]>([]);
@@ -3610,13 +3613,23 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const activeWorkspace = user && workspace?.userId === user.uid ? workspace : null;
   const storeRole = activeWorkspace?.role ?? 'owner';
   const activePlatformRole = user && platformRole?.uid === user.uid ? platformRole.role : null;
+  const activePlatformRoleReady = !user || user.isAnonymous
+    ? true
+    : !!(platformRoleReady && platformRole?.uid === user.uid);
 
   useEffect(() => {
-    if (!user || user.isAnonymous) return;
+    if (!user || user.isAnonymous) {
+      setPlatformRole(null);
+      setPlatformRoleReady(true);
+      return;
+    }
     let cancelled = false;
     const uid = user.uid;
+    setPlatformRoleReady(false);
     void fetchPlatformRole(user as any).then((role) => {
-      if (!cancelled) setPlatformRole({ uid, role });
+      if (cancelled) return;
+      setPlatformRole({ uid, role });
+      setPlatformRoleReady(true);
     });
     return () => { cancelled = true; };
   }, [user?.uid, (user as any)?.email_confirmed_at]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -3686,10 +3699,11 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         ? !!activePlatformRole
         : roleCanOpenScreen(storeRole, screen),
       platformRole: activePlatformRole,
+      platformRoleReady: activePlatformRoleReady,
 }), [
     user, loading, settings, products, invoices, employees, payrollRecords, customers,
     customerTransactions, suppliers, supplierTransactions, shifts, orders, vaultTransactions, stockMovements, warehouses, vault, auditLogs, activeWorkspace,
-    activePlatformRole,
+    activePlatformRole, activePlatformRoleReady,
   ]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (

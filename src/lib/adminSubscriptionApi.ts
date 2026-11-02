@@ -102,8 +102,15 @@ export async function fetchPlatformRole(user: { email?: string | null; email_con
   if (!user.email_confirmed_at) return null;
   try {
     const { data, error } = await supabase.rpc('platform_role');
-    if (error) return null;
-    return isPlatformRole(data) ? data : null;
+    if (!error) return isPlatformRole(data) ? data : null;
+    // RPC unavailable — ask the server (service role) before treating the account as a merchant.
+    console.warn('[platformRole] rpc failed, trying /api/admin/me', error.message);
+  } catch (err) {
+    console.warn('[platformRole] rpc threw, trying /api/admin/me', err);
+  }
+  try {
+    const body = await adminRequest('/api/admin/me') as { role?: string };
+    return isPlatformRole(body?.role) ? body.role : null;
   } catch {
     return null;
   }
