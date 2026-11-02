@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { planAuditApply, refreshExpectedFromBook, stocktakeCloseAccepted } from '../inventoryAudit';
+import {
+  planAuditApply,
+  refreshExpectedFromBook,
+  stocktakeClaimAllowsStock,
+  stocktakeClaimedOnServer,
+  stocktakeCloseAccepted,
+} from '../inventoryAudit';
 import type { InventoryAuditLine } from '../../types';
 
 const line = (over: Partial<InventoryAuditLine> = {}): InventoryAuditLine => ({
@@ -59,5 +65,13 @@ describe('stocktake close acceptance', () => {
     expect(stocktakeCloseAccepted({ cloud: false, reason: 'no_session' })).toBe(true);
     expect(stocktakeCloseAccepted({ cloud: false, reason: 'schema_missing' })).toBe(true);
     expect(stocktakeCloseAccepted({ cloud: false, reason: 'failed' })).toBe(false);
+  });
+
+  it('allows stock only after a successful claim or offline/schema gap', () => {
+    expect(stocktakeClaimAllowsStock({ cloud: true })).toBe(true);
+    expect(stocktakeClaimAllowsStock({ cloud: false, reason: 'no_session' })).toBe(true);
+    expect(stocktakeClaimAllowsStock({ cloud: false, reason: 'failed' })).toBe(false);
+    expect(stocktakeClaimedOnServer({ cloud: true })).toBe(true);
+    expect(stocktakeClaimedOnServer({ cloud: false, reason: 'no_session' })).toBe(false);
   });
 });

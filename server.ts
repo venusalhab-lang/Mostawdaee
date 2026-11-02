@@ -43,6 +43,11 @@ import {
   joFotaraRequestBody,
   readJoFotaraResponse,
 } from "./src/lib/jofotara";
+import {
+  encodeZatcaTlv,
+  formatZatcaAmount,
+  isZatcaVatNumber,
+} from "./src/lib/zatcaTlv";
 import { openSecret, parseSecretKey, sealSecret } from "./src/lib/secretBox";
 import type { Invoice } from "./src/types";
 
@@ -1288,13 +1293,55 @@ async function startServer() {
   });
 
   // ---------------------------------------------------------------------------
-  // National e-invoicing (Jordan JoFotara). Credentials stay on the server, sealed with
-  // EINVOICE_ENCRYPTION_KEY; the server builds the file from the stored invoice, never from the client.
+  // National e-invoicing: Jordan JoFotara + Saudi ZATCA Phase 1 (TLV QR).
+  // JoFotara credentials stay sealed with EINVOICE_ENCRYPTION_KEY; ZATCA Phase 1 stores
+  // public seller identity only. The server always builds from the stored invoice.
   // ---------------------------------------------------------------------------
   const einvoiceKey = () => parseSecretKey(process.env.EINVOICE_ENCRYPTION_KEY);
   const tableMissing = (error: any) => error?.code === "42P01" || error?.code === "PGRST205";
   const refuse = (res: any, refusal: AssistantRefusal) =>
     res.status(refusal.status).json({ code: refusal.code, message: refusal.message });
+
+  async function readEinvoiceConfig(ownerId: string, role: string) {
+    const service = getSupabaseServiceClient();
+    if (!service) return { available: false as const, configured: false as const, role, provider: null as null };
+    const { data, error } = await service
+      .from("einvoice_settings")
+      .select("provider, tin, seller_name, income_source, family, zero_rate_category, client_id, cr_number, updated_at")
+      .eq("owner_id", ownerId)
+      .maybeSingle();
+    if (error) {
+      if (tableMissing(error)) return { available: false as const, configured: false as const, role, provider: null as null };
+      return { error: "read_failed" as const };
+    }
+    const provider = data?.provider === "zatca" || data?.provider === "jofotara" ? data.provider : null;
+    // ZATCA Phase 1 needs the table + service role only; JoFotara also needs the encryption key to link.
+    const available = true;
+    const settings = data && role !== "cashier"
+      ? {
+          provider: provider || "jofotara",
+          tin: data.tin,
+          sellerName: data.seller_name,
+          incomeSource: data.income_source || "",
+          family: data.family || "income",
+          zeroRateCategory: data.zero_rate_category,
+          crNumber: data.cr_number || "",
+          clientIdHint: data.client_id ? `••••${String(data.client_id).slice(-4)}` : "",
+          updatedAt: data.updated_at,
+        }
+      : undefined;
+    return { available, configured: !!data, role, provider, settings };
+  }
+
+  app.get("/api/einvoice", async (req, res) => {
+    const authUser = await getRequestUser(req);
+    if (!authUser) return res.status(401).json({ code: "sign_in_required", message: "Sign in first" });
+    const access = await checkStoreAccess(authUser, ["owner", "manager", "cashier"], false);
+    if ("refusal" in access) return refuse(res, access.refusal);
+    const cfg = await readEinvoiceConfig(access.ownerId, access.role);
+    if ("error" in cfg) return res.status(503).json({ code: "einvoice_unavailable", message: "Could not read the e-invoicing settings" });
+    return res.json(cfg);
+  });
 
   app.get("/api/einvoice/jofotara", async (req, res) => {
     const authUser = await getRequestUser(req);
@@ -1302,28 +1349,14 @@ async function startServer() {
     const access = await checkStoreAccess(authUser, ["owner", "manager", "cashier"], false);
     if ("refusal" in access) return refuse(res, access.refusal);
     const service = getSupabaseServiceClient();
-    if (!service || !einvoiceKey()) return res.json({ available: false, configured: false, role: access.role });
-    const { data, error } = await service
-      .from("einvoice_settings")
-      .select("tin, seller_name, income_source, family, zero_rate_category, client_id, updated_at")
-      .eq("owner_id", access.ownerId)
-      .maybeSingle();
-    if (error) {
-      if (tableMissing(error)) return res.json({ available: false, configured: false, role: access.role });
-      return res.status(503).json({ code: "einvoice_unavailable", message: "Could not read the e-invoicing settings" });
+    if (!service || !einvoiceKey()) return res.json({ available: false, configured: false, role: access.role, provider: null });
+    const cfg = await readEinvoiceConfig(access.ownerId, access.role);
+    if ("error" in cfg) return res.status(503).json({ code: "einvoice_unavailable", message: "Could not read the e-invoicing settings" });
+    // Legacy clients expect JoFotara-shaped settings only when that provider is linked.
+    if (cfg.configured && cfg.provider && cfg.provider !== "jofotara") {
+      return res.json({ available: true, configured: false, role: access.role, provider: cfg.provider });
     }
-    const settings = data && access.role !== "cashier"
-      ? {
-          tin: data.tin,
-          sellerName: data.seller_name,
-          incomeSource: data.income_source,
-          family: data.family,
-          zeroRateCategory: data.zero_rate_category,
-          clientIdHint: `••••${String(data.client_id).slice(-4)}`,
-          updatedAt: data.updated_at,
-        }
-      : undefined;
-    return res.json({ available: true, configured: !!data, role: access.role, settings });
+    return res.json(cfg);
   });
 
   app.post("/api/einvoice/jofotara/settings", async (req, res) => {
@@ -1558,6 +1591,197 @@ async function startServer() {
       icv,
       uuid,
       saved: !recorded.error,
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // ZATCA Phase 1 — Saudi simplified tax QR (TLV). No CSID / clearance yet.
+  // ---------------------------------------------------------------------------
+  app.post("/api/einvoice/zatca/settings", async (req, res) => {
+    const authUser = await getRequestUser(req);
+    if (!authUser) return res.status(401).json({ code: "sign_in_required", message: "Sign in first" });
+    if (!rateLimit(`einv-zatca-settings:${authUser.id}`, 10, 60_000)) {
+      return res.status(429).json({ code: "rate_limited", message: "Too many requests, please wait a minute" });
+    }
+    const access = await checkStoreAccess(authUser, ["owner"], true);
+    if ("refusal" in access) return refuse(res, access.refusal);
+    const service = getSupabaseServiceClient();
+    if (!service) return res.status(503).json({ code: "einvoice_unavailable", message: "E-invoicing is not configured on this server" });
+
+    const text = (value: unknown, max: number) => (typeof value === "string" ? value.trim().slice(0, max) : "");
+    const body = req.body || {};
+    const tin = text(body.tin, 20).replace(/\D/g, "");
+    const sellerName = text(body.sellerName, 200);
+    const crNumber = text(body.crNumber, 20).replace(/\D/g, "");
+    const fields: string[] = [];
+    if (!isZatcaVatNumber(tin)) fields.push("tin");
+    if (!sellerName) fields.push("sellerName");
+    if (crNumber && !/^\d{5,20}$/.test(crNumber)) fields.push("crNumber");
+    if (fields.length) return res.status(400).json({ code: "invalid_settings", message: "Some fields are invalid", fields });
+
+    const { error } = await service.from("einvoice_settings").upsert({
+      owner_id: access.ownerId,
+      provider: "zatca",
+      tin,
+      seller_name: sellerName,
+      cr_number: crNumber || null,
+      income_source: null,
+      family: null,
+      zero_rate_category: null,
+      client_id: null,
+      secret_sealed: null,
+      provider_config: {},
+      updated_by: authUser.id,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: "owner_id" });
+    if (error) {
+      console.error("[e-invoice zatca settings]", error.message);
+      return res.status(503).json({ code: "einvoice_unavailable", message: "Could not save the e-invoicing settings" });
+    }
+    return res.json({ ok: true });
+  });
+
+  app.post("/api/einvoice/zatca/disconnect", async (req, res) => {
+    const authUser = await getRequestUser(req);
+    if (!authUser) return res.status(401).json({ code: "sign_in_required", message: "Sign in first" });
+    const access = await checkStoreAccess(authUser, ["owner"], false);
+    if ("refusal" in access) return refuse(res, access.refusal);
+    const service = getSupabaseServiceClient();
+    if (!service) return res.status(503).json({ code: "einvoice_unavailable", message: "E-invoicing is not configured on this server" });
+    const { error } = await service.from("einvoice_settings").delete().eq("owner_id", access.ownerId).eq("provider", "zatca");
+    if (error) return res.status(503).json({ code: "einvoice_unavailable", message: "Could not remove the e-invoicing settings" });
+    return res.json({ ok: true });
+  });
+
+  app.post("/api/einvoice/zatca/qr", async (req, res) => {
+    const authUser = await getRequestUser(req);
+    if (!authUser) return res.status(401).json({ code: "sign_in_required", message: "Sign in first" });
+    if (!rateLimit(`einv-zatca-qr:${authUser.id}`, 30, 60_000)) {
+      return res.status(429).json({ code: "rate_limited", message: "Too many requests, please wait a minute" });
+    }
+    const access = await checkStoreAccess(authUser, ["owner", "manager"], true);
+    if ("refusal" in access) return refuse(res, access.refusal);
+    const service = getSupabaseServiceClient();
+    if (!service) return res.status(503).json({ code: "einvoice_unavailable", message: "E-invoicing is not configured on this server" });
+    const invoiceId = typeof req.body?.invoiceId === "string" ? req.body.invoiceId.trim().slice(0, 200) : "";
+    if (!invoiceId) return res.status(400).json({ code: "invoice_required", message: "invoiceId is required" });
+
+    const { data: config, error: configError } = await service
+      .from("einvoice_settings")
+      .select("provider, tin, seller_name")
+      .eq("owner_id", access.ownerId)
+      .maybeSingle();
+    if (configError && !tableMissing(configError)) {
+      return res.status(503).json({ code: "einvoice_unavailable", message: "Could not read the e-invoicing settings" });
+    }
+    if (!config || config.provider !== "zatca") {
+      return res.status(409).json({ code: "not_configured", message: "Link the store to ZATCA Phase 1 in Settings first" });
+    }
+
+    const { data: stored, error: invoiceError } = await service
+      .from("merchant_documents")
+      .select("data")
+      .eq("user_id", access.ownerId)
+      .eq("collection", "invoices")
+      .eq("doc_id", invoiceId)
+      .maybeSingle();
+    if (invoiceError) return res.status(503).json({ code: "einvoice_unavailable", message: "Could not read the invoice" });
+    if (!stored?.data) return res.status(404).json({ code: "invoice_not_found", message: "Invoice not found (sync it first)" });
+    const invoice = stored.data as Invoice;
+
+    if (invoice.type !== "sale" && invoice.type !== "return") {
+      return res.status(422).json({ code: "invoice_invalid", message: "Only sales and sales returns can get a ZATCA QR" });
+    }
+    if (invoice.currency !== "SAR") {
+      return res.status(422).json({
+        code: "currency_not_sar",
+        message: "ZATCA Phase 1 only accepts invoices in Saudi riyals (SAR)",
+      });
+    }
+
+    const total = formatZatcaAmount(Number(invoice.totalAmount));
+    const vat = formatZatcaAmount(Number(invoice.taxAmount) || 0);
+    if (!total || !vat) {
+      return res.status(422).json({ code: "invoice_invalid", message: "Invoice totals are invalid" });
+    }
+    const issued = Number(invoice.date);
+    const timestamp = Number.isFinite(issued) && issued > 0
+      ? new Date(issued).toISOString().replace(/\.\d{3}Z$/, "Z")
+      : new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+
+    const encoded = encodeZatcaTlv({
+      sellerName: config.seller_name,
+      vatNumber: config.tin,
+      timestamp,
+      invoiceTotal: total,
+      vatTotal: vat,
+    });
+    if (encoded.ok === false) {
+      return res.status(422).json({ code: "invoice_invalid", message: "Could not build the tax QR", issues: encoded.issues });
+    }
+
+    const claim = await service.rpc("einvoice_claim", {
+      p_owner: access.ownerId,
+      p_invoice: invoiceId,
+      p_number: invoice.invoiceNumber,
+      p_kind: invoice.type === "return" ? "credit" : "invoice",
+      p_actor: authUser.id,
+    });
+    if (claim.error) {
+      const text = claim.error.message || "";
+      if (text.includes("EINVOICE_ALREADY_ACCEPTED")) {
+        // Idempotent: return the stored QR when already recorded.
+        const { data: existing } = await service
+          .from("einvoice_submissions")
+          .select("qr, uuid, icv, einv_num, status")
+          .eq("owner_id", access.ownerId)
+          .eq("invoice_id", invoiceId)
+          .maybeSingle();
+        if (existing?.status === "accepted" && existing.qr) {
+          return res.json({
+            outcome: "accepted",
+            qr: existing.qr,
+            einvNum: existing.einv_num || "",
+            messages: [],
+            icv: Number(existing.icv) || 0,
+            uuid: existing.uuid,
+            saved: true,
+          });
+        }
+        return res.status(409).json({ code: "already_accepted", message: "This invoice already has a tax QR" });
+      }
+      if (text.includes("EINVOICE_IN_PROGRESS")) return res.status(409).json({ code: "in_progress", message: "This invoice is being processed right now" });
+      console.error("[e-invoice zatca claim]", text);
+      return res.status(503).json({ code: "einvoice_unavailable", message: "Could not reserve the invoice counter" });
+    }
+    const reserved = Array.isArray(claim.data) ? claim.data[0] : claim.data;
+    const uuid = String(reserved?.claim_uuid || "");
+    const icv = Number(reserved?.claim_icv);
+
+    const recorded = await service.rpc("einvoice_record", {
+      p_owner: access.ownerId,
+      p_invoice: invoiceId,
+      p_status: "accepted",
+      p_type_code: "zatca_phase1",
+      p_payable: Number(invoice.totalAmount),
+      p_xml: null,
+      p_response: { phase: 1, provider: "zatca", timestamp, total, vat },
+      p_qr: encoded.qr,
+      p_einv_num: invoice.invoiceNumber,
+      p_error: "",
+    });
+    if (recorded.error) {
+      console.error("[e-invoice zatca record]", recorded.error.message);
+      return res.status(503).json({ code: "einvoice_unavailable", message: "Could not save the tax QR" });
+    }
+    return res.json({
+      outcome: "accepted",
+      qr: encoded.qr,
+      einvNum: invoice.invoiceNumber,
+      messages: [],
+      icv,
+      uuid,
+      saved: true,
     });
   });
 

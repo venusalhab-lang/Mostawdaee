@@ -212,8 +212,8 @@ export async function completeAuditCloud(auditId: string): Promise<CloudSaveResu
 }
 
 /**
- * Closes the stocktake on the server after stock was written.
- * Retries transient failures so a brief outage does not leave the draft open.
+ * Claims/closes the stocktake on the server before stock is written.
+ * Retries transient failures so a brief outage does not leave the draft open for a second device.
  */
 export async function completeAuditCloudWithRetry(
   auditId: string,

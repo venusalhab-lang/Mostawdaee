@@ -56,6 +56,7 @@ import {
   readCachedLiveRates,
   readCachedLiveRatesTimestamp,
 } from '../lib/exchangeRates';
+import { planPosCreditDebt } from '../lib/posDebtFx';
 import { consumeInvoiceNumber, peekInvoiceNumber } from '../lib/invoiceNumber';
 import { computeInvoiceTotals, resolveVatRate } from '../lib/invoiceTotals';
 import { markUnsavedWork } from '../lib/backNavigation';
@@ -72,6 +73,7 @@ import { emptyQuickRegForm, parseQuickRegQuantity } from '../lib/posQuickReg';
 import { resolveProductCategory, resolveProductSku } from '../lib/productForm';
 import ShowMoreBar from './ui/ShowMoreBar';
 import { useProgressiveList } from '../hooks/useProgressiveList';
+import { productVisualEmoji, productVisualTone } from '../lib/productVisual';
 
 interface POSSystemProps {
   language: Language;
@@ -121,9 +123,34 @@ function escapeHtml(v: unknown): string {
   return String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] as string));
 }
 
+/** Phone / tablet: soft keyboard should not own the POS. Desktop keeps wedge-scanner focus. */
+function useTouchPosLayout(): boolean {
+  const [touch, setTouch] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    return window.matchMedia('(pointer: coarse)').matches || window.matchMedia('(max-width: 1023px)').matches;
+  });
+  useEffect(() => {
+    const coarse = window.matchMedia('(pointer: coarse)');
+    const narrow = window.matchMedia('(max-width: 1023px)');
+    const sync = () => setTouch(coarse.matches || narrow.matches);
+    sync();
+    coarse.addEventListener('change', sync);
+    narrow.addEventListener('change', sync);
+    return () => {
+      coarse.removeEventListener('change', sync);
+      narrow.removeEventListener('change', sync);
+    };
+  }, []);
+  return touch;
+}
+
 export default function POSSystem({ language }: POSSystemProps) {
   const t = translations[language];
   const isRtl = language === 'ar';
+  const touchPos = useTouchPosLayout();
+  /** Bluetooth / HID wedge on a phone: user opts in so the barcode field keeps focus. */
+  const [wedgeScannerMode, setWedgeScannerMode] = useState(false);
+  const stickyScannerFocus = !touchPos || wedgeScannerMode;
   
   const { products, saveInvoice, settings, saveProduct, warehouses, user, can, workspace, shifts, customers } = useFirebase();
   const myShift = openShiftOf(shifts, user?.uid);
@@ -229,8 +256,9 @@ export default function POSSystem({ language }: POSSystemProps) {
     playBeep('success_checkout');
     toast.success(
       isRtl
-        ? `تم تعليق الفاتورة بنجاح وتحويلها لانتظار الصندوق بالرمز #${billNum}`
-        : `Bill suspended successfully as #${billNum}`
+        ? `عُلّقت الفاتورة #${billNum} على هذا الجهاز فقط — لا تحجز المخزون على الأجهزة الأخرى`
+        : `Bill #${billNum} held on this device only — it does not reserve stock on other devices`,
+      { duration: 5500 },
     );
   };
 
@@ -343,16 +371,28 @@ export default function POSSystem({ language }: POSSystemProps) {
   const [discount, setDiscount] = useState<number>(0);
   const [enableTax, setEnableTax] = useState<boolean>(false);
 
+  /** Park an open hold before emptying the cart so reserved stock is not lost. */
+  const parkOpenHeldOrAbort = (): boolean => {
+    const open = openHeldBill(heldBills);
+    if (!open) return true;
+    return persistHeld(heldBills.map((b) => (b.id === open.id ? { ...b, status: 'parked' as const } : b)));
+  };
+
+  const clearCartState = () => {
+    itemBaseRef.current = {};
+    setScannedItems([]);
+    setDiscount(0);
+    setReceivedAmount('');
+  };
+
   const switchMode = (mode: 'sale' | 'purchase') => {
     if (mode === posMode) return;
     if (scannedItems.length > 0 && !window.confirm(isRtl
       ? 'سيتم تفريغ السلة الحالية عند تغيير الوضع. هل تريد المتابعة؟'
       : 'Switching mode clears the current cart. Continue?')) return;
-    itemBaseRef.current = {};
+    if (!parkOpenHeldOrAbort()) return;
     setPosMode(mode);
-    setScannedItems([]);
-    setDiscount(0);
-    setReceivedAmount('');
+    clearCartState();
   };
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showSuccessModal, setShowSuccessModal] = useState(false);
@@ -664,15 +704,21 @@ export default function POSSystem({ language }: POSSystemProps) {
   const scannerInputRef = useRef<HTMLInputElement>(null);
 
   const focusScanner = () => {
+    if (!stickyScannerFocus) return;
     const active = document.activeElement as HTMLElement | null;
     const tag = active?.tagName;
     if (active && active !== scannerInputRef.current && (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT')) return;
     scannerInputRef.current?.focus({ preventScroll: true });
   };
 
-  // Return to the barcode field only after a click has already run.
-  // Refocusing on blur (during mousedown) cancels the button the user pressed.
+  // Desktop / wedge mode: return to the barcode field after a click has already run.
+  // On touch POS this is off by default so the soft keyboard does not cover the cart.
   useEffect(() => {
+    if (!stickyScannerFocus) {
+      const active = document.activeElement;
+      if (active === scannerInputRef.current) scannerInputRef.current?.blur();
+      return;
+    }
     const timer = window.setTimeout(() => focusScanner(), 0);
 
     const handleDocumentClick = (e: MouseEvent) => {
@@ -687,7 +733,7 @@ export default function POSSystem({ language }: POSSystemProps) {
       document.removeEventListener('click', handleDocumentClick);
       window.clearTimeout(timer);
     };
-  }, []);
+  }, [stickyScannerFocus]);
 
   const playBeep = playPosBeep;
 
@@ -710,13 +756,8 @@ export default function POSSystem({ language }: POSSystemProps) {
         e.preventDefault();
         if (scannedItems.length > 0) {
           if (confirm(isRtl ? 'هل أنت متأكد من إلغاء الفاتورة الحالية بالكامل وتفريغ السلة؟' : 'Are you sure you want to cancel the current invoice and clear the cart?')) {
-            const open = openHeldBill(heldBills);
-            if (open) {
-              persistHeld(heldBills.map((b) => (b.id === open.id ? { ...b, status: 'parked' as const } : b)));
-            }
-            setScannedItems([]);
-            setDiscount(0);
-            setReceivedAmount('');
+            if (!parkOpenHeldOrAbort()) return;
+            clearCartState();
             playBeep('error');
             toast.success(isRtl ? 'تم إلغاء الفاتورة بالكامل وتفريغ السلة بنجاح' : 'Invoice canceled and cart cleared successfully');
           }
@@ -747,15 +788,10 @@ export default function POSSystem({ language }: POSSystemProps) {
       } else if (e.key === 'Escape') {
         if (scannedItems.length > 0) {
           if (confirm(isRtl ? 'هل تريد بالتأكيد إفراغ المعاملة الحالية؟' : 'Are you sure you want to clear current items?')) {
-            const open = openHeldBill(heldBills);
-            if (open) {
-              persistHeld(heldBills.map((b) => (b.id === open.id ? { ...b, status: 'parked' as const } : b)));
-            }
-            setScannedItems([]);
-            setDiscount(0);
-            setReceivedAmount('');
+            if (!parkOpenHeldOrAbort()) return;
+            clearCartState();
             playBeep('error');
-            toast.success(isRtl ? 'تم إفراغ السلة بنجاح' : 'Cart cleared successfuly');
+            toast.success(isRtl ? 'تم إفراغ السلة بنجاح' : 'Cart cleared successfully');
           }
         }
       } else {
@@ -1155,23 +1191,26 @@ export default function POSSystem({ language }: POSSystemProps) {
         }
         const owed = roundMoney(grandTotal - paidNow, activeCurrency);
         const custCurrency = (customer.currency || activeCurrency) as Currency;
-        if (custCurrency === activeCurrency) {
-          debtAmount = owed;
-          debtCurrency = custCurrency;
-        } else {
-          const converted = safeConvertMoney(owed, activeCurrency, custCurrency, usdUnitRates);
-          if (converted === null) {
-            setIsSubmitting(false);
-            submitLockRef.current = false;
-            playBeep('error');
-            toast.error(isRtl
-              ? `تعذّر تحويل الدين إلى ${custCurrency}. اجعل الفاتورة بعملة العميل أو حدّث أسعار الصرف.`
-              : `Could not convert the debt to ${custCurrency}. Bill in the customer's currency or refresh rates.`);
-            return;
-          }
-          debtAmount = converted;
-          debtCurrency = custCurrency;
+        const debtPlan = planPosCreditDebt({
+          owed,
+          billCurrency: activeCurrency as Currency,
+          customerCurrency: custCurrency,
+          settings,
+          liveRates,
+          liveAt: readCachedLiveRatesTimestamp(),
+          usdUnitRates,
+        });
+        if (!debtPlan.ok) {
+          setIsSubmitting(false);
+          submitLockRef.current = false;
+          playBeep('error');
+          toast.error(isRtl
+            ? `لا يوجد سعر صرف موثوق من ${activeCurrency} إلى ${custCurrency} لتسجيل الدين. حدّث الأسعار أو أدخل أسعارك من الإعدادات، أو اجعل الفاتورة بعملة العميل.`
+            : `No trusted ${activeCurrency} → ${custCurrency} rate to record this debt. Refresh rates, set manual rates in Settings, or bill in the customer's currency.`);
+          return;
         }
+        debtAmount = debtPlan.debtAmount;
+        debtCurrency = debtPlan.debtCurrency;
         saleMethod = 'credit';
         changeDue = 0;
       } else if (isCashSale) {
@@ -1210,21 +1249,22 @@ export default function POSSystem({ language }: POSSystemProps) {
       };
 
       // Persist first: any failure here aborts checkout (cart is kept) instead of showing a false success.
-      if (user) {
-        officialInvoice.invoiceNumber = await saveInvoice(officialInvoice);
-        consumeInvoiceNumber(invoicePrefix, sessionUid, storeId);
-        draftIdRef.current = null;
-      } else {
+      if (!user) {
         toast.warning(
           isRtl
-            ? 'وضع المعاينة (ضيف): تمت العملية للتجربة فقط ولم تُحفظ الفاتورة ولم يتغيّر المخزون. سجّل الدخول للحفظ الفعلي.'
-            : 'Guest preview: this sale was NOT saved and stock was not changed. Sign in to record real sales.',
+            ? 'وضع المعاينة (ضيف): لا تُحفظ الفاتورة ولا يتغيّر المخزون. سجّل الدخول لإتمام البيع.'
+            : 'Guest preview: the sale is not saved and stock is unchanged. Sign in to complete a real sale.',
           { duration: 6000 }
         );
+        setIsSubmitting(false);
+        return;
       }
+      officialInvoice.invoiceNumber = await saveInvoice(officialInvoice);
+      consumeInvoiceNumber(invoicePrefix, sessionUid, storeId);
+      draftIdRef.current = null;
 
       // Optional mirror to a third-party API (only when VITE_EXTERNAL_SALES_API is configured).
-      if (externalApi && user && posMode === 'sale') {
+      if (externalApi && posMode === 'sale') {
         const invoiceData = {
           id: Date.now(),
           items: scannedItems.map((item) => ({
@@ -1258,16 +1298,14 @@ export default function POSSystem({ language }: POSSystemProps) {
       }
 
       // Only a sale that was actually saved may open the cash drawer; reprints never do.
-      printThermalReceipt(officialInvoice, Boolean(user) && ((isCashSale && paidNow > 0) || (saleMethod === 'credit' && paidNow > 0)));
+      printThermalReceipt(officialInvoice, (isCashSale && paidNow > 0) || (saleMethod === 'credit' && paidNow > 0));
 
       // Clear State
       setLastInvoiceNumber(officialInvoice.invoiceNumber);
       setInvoiceTick((t) => t + 1);
       setLastCompletedInvoice(officialInvoice);
-      setScannedItems([]);
-      setDiscount(0);
+      clearCartState();
       setEnableTax(false);
-      setReceivedAmount('');
       setPaymentMethod('cash');
       setSelectedCustomerId('');
       setCustomerQuery('');
@@ -1280,7 +1318,12 @@ export default function POSSystem({ language }: POSSystemProps) {
       console.error(error);
       setIsSubmitting(false);
       playBeep('error');
-      if (!error?.notified && !String(error?.message || '').startsWith('Insufficient stock')) {
+      const vaultShort = /INSUFFICIENT_VAULT_FUNDS|insufficient.?vault|vault/i.test(String(error?.code || error?.message || ''));
+      if (vaultShort) {
+        toast.error(isRtl
+          ? 'رصيد الخزنة غير كافٍ لهذه المشتريات؛ لم تُحفظ الفاتورة وبقيت السلة.'
+          : 'Vault balance is insufficient for this purchase; nothing was saved and the cart was kept.');
+      } else if (!error?.notified && !String(error?.message || '').startsWith('Insufficient stock')) {
         toast.error(isRtl ? 'تعذّر حفظ الفاتورة؛ لم تُسجَّل العملية وبقيت السلة كما هي.' : 'Could not save the invoice; nothing was recorded and the cart was kept.');
       }
     } finally {
@@ -1381,7 +1424,9 @@ export default function POSSystem({ language }: POSSystemProps) {
                 onChange={(e) => setBarcodeInput(e.target.value)}
                 placeholder={isRtl ? "امسح الباركود أو اكتب الرمز" : "Scan a barcode or type the SKU"} aria-label={isRtl ? "امسح الباركود أو اكتب رمز الصنف" : "Scan a barcode or type the SKU"} 
                 className="w-full bg-white dark:bg-white/[0.03] border-2 border-emerald-500/50 focus:border-emerald-500 rounded-xl ps-5 pe-5 xl:pe-32 py-4 text-emerald-600 dark:text-emerald-400 font-arabic tabular-nums text-base font-bold placeholder:font-medium placeholder:text-slate-400 shadow-sm outline-none transition-colors truncate"
-                autoFocus
+                autoFocus={stickyScannerFocus}
+                inputMode={touchPos && !wedgeScannerMode ? 'search' : undefined}
+                enterKeyHint="done"
               />
               <div className="pointer-events-none absolute end-4 top-1/2 -translate-y-1/2 text-emerald-600 dark:text-emerald-400 font-bold hidden xl:flex items-center gap-2 text-xs whitespace-nowrap">
                 <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
@@ -1405,15 +1450,43 @@ export default function POSSystem({ language }: POSSystemProps) {
 
           {/* 2. Quick camera & manual inventory helper lookup buttons */}
           <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-50 dark:bg-white/[0.02] p-3 rounded-xl border border-slate-200/50 dark:border-white/5">
-            <button 
-              type="button"
-              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
-                isCameraScanning ? 'bg-cyan-500 text-white' : 'bg-white dark:bg-white/5 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-white/10'
-              }`}
-              onClick={() => setIsCameraScanning(true)}
-            >
-              📊 {isRtl ? "تفعيل مسح الكاميرا" : "Scan via Device Camera"}
-            </button>
+            <div className="flex flex-wrap items-center gap-2">
+              <button 
+                type="button"
+                className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                  isCameraScanning ? 'bg-cyan-500 text-white' : 'bg-white dark:bg-white/5 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-white/10'
+                }`}
+                onClick={() => setIsCameraScanning(true)}
+              >
+                📊 {isRtl ? "تفعيل مسح الكاميرا" : "Scan via Device Camera"}
+              </button>
+              {touchPos && (
+                <button
+                  type="button"
+                  className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                    wedgeScannerMode
+                      ? 'bg-emerald-600 text-white'
+                      : 'bg-white dark:bg-white/5 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-white/10'
+                  }`}
+                  onClick={() => {
+                    setWedgeScannerMode((on) => {
+                      const next = !on;
+                      if (next) window.setTimeout(() => scannerInputRef.current?.focus({ preventScroll: true }), 0);
+                      else scannerInputRef.current?.blur();
+                      return next;
+                    });
+                  }}
+                  title={isRtl
+                    ? 'لماسح باركود بلوتوث يعمل كلوحة مفاتيح. يبقي الحقل مركّزاً وقد تظهر لوحة المفاتيح.'
+                    : 'For a Bluetooth barcode scanner that types like a keyboard. Keeps the field focused; the soft keyboard may appear.'}
+                  aria-pressed={wedgeScannerMode}
+                >
+                  {wedgeScannerMode
+                    ? (isRtl ? 'وضع الماسح: يعمل' : 'Scanner mode: on')
+                    : (isRtl ? 'وضع الماسح' : 'Scanner mode')}
+                </button>
+              )}
+            </div>
 
             <div className="flex items-center gap-3">
               <button
@@ -1491,19 +1564,8 @@ export default function POSSystem({ language }: POSSystemProps) {
             <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-4 w-full box-border">
               {gridPage.visible
                 .map((product) => {
-                  const getEmojiIcon = (category: string = '', name: string = '') => {
-                    const text = (category + ' ' + name).toLowerCase();
-                    if (text.includes('coffee') || text.includes('قهوة') || text.includes('اسبريسو') || text.includes('كابتشينو') || text.includes('espresso') || text.includes('cappuccino')) return '☕';
-                    if (text.includes('tea') || text.includes('شاي')) return '🍵';
-                    if (text.includes('croissant') || text.includes('كرواسون') || text.includes('donut') || text.includes('دونات') || text.includes('مخبوزات') || text.includes('خبز')) return '🥐';
-                    if (text.includes('milk') || text.includes('حليب') || text.includes('cheese') || text.includes('جبن') || text.includes('ألبان')) return '🥛';
-                    if (text.includes('orange') || text.includes('عصير') || text.includes('juice') || text.includes('ليمون')) return '🍹';
-                    if (text.includes('water') || text.includes('ماء') || text.includes('مياه') || text.includes('cola') || text.includes('كولا')) return '💧';
-                    if (text.includes('asset') || text.includes('أصل') || text.includes('جهاز') || text.includes('equipment')) return '⚙️';
-                    return '📦';
-                  };
-
-                  const emoji = getEmojiIcon(product.category, product.name);
+                  const emoji = productVisualEmoji(product.category, product.name);
+                  const tone = productVisualTone(product.category, product.name);
                   const rawPrice = posMode === 'sale' ? product.sellingPrice : product.unitCost;
                   const baseCurrency = product.currency || settings?.currency || 'JOD';
                   const activePrice = safeConvertMoney(rawPrice, baseCurrency, activeCurrency, usdUnitRates);
@@ -1515,7 +1577,7 @@ export default function POSSystem({ language }: POSSystemProps) {
                       onClick={() => addItemToPOS(product)}
                       className="group relative flex flex-col items-center justify-center p-4 rounded-xl border border-slate-200 bg-white dark:border-white/10 dark:bg-white/[0.02] hover:border-emerald-500/50 hover:bg-emerald-50 dark:hover:bg-emerald-500/10 transition-all duration-200 active:scale-95 min-h-[120px] box-border cursor-pointer shadow-sm text-center"
                     >
-                      <span className="text-3xl mb-1.5 group-hover:scale-110 transition-transform">
+                      <span className={`text-3xl mb-1.5 w-12 h-12 rounded-2xl flex items-center justify-center group-hover:scale-110 transition-transform ${tone}`}>
                         {emoji}
                       </span>
                       <span className="text-xs font-bold text-slate-700 dark:text-slate-200 line-clamp-2 w-full text-center">
@@ -1618,7 +1680,7 @@ export default function POSSystem({ language }: POSSystemProps) {
                   <span className="text-amber-600 dark:text-amber-400">{parkedHeldBills(heldBills).length}</span>)
                 </span>
                 <span className="text-[10px] text-slate-400 font-medium font-arabic">
-                  {isRtl ? 'محفوظة على هذا الجهاز' : 'Saved on this device'}
+                  {isRtl ? 'محلية لهذا الجهاز · لا حجز مخزون سحابي' : 'This device only · no cloud stock hold'}
                 </span>
               </div>
               

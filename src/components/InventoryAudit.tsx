@@ -14,7 +14,8 @@ import {
   newAuditNumber,
   planAuditApply,
   refreshExpectedFromBook,
-  stocktakeCloseAccepted,
+  stocktakeClaimAllowsStock,
+  stocktakeClaimedOnServer,
   stocktakeMovement,
 } from '../lib/inventoryAudit';
 import {
@@ -261,7 +262,7 @@ export default function InventoryAudit({ language, settings }: Props) {
     }
 
     setBusy(true);
-    let stockCommitted = false;
+    let claimedOnServer = false;
     try {
       const draftCloud = await persist();
       if (!draftCloud.cloud && draftCloud.reason === 'failed') {
@@ -288,38 +289,49 @@ export default function InventoryAudit({ language, settings }: Props) {
           movementLabel: `${line.movement} ${audit.auditNumber}`,
         }));
 
-      // One transaction: every counted line commits together, or none do.
-      if (stockLines.length) {
-        await applyStocktake({ auditNumber: audit.auditNumber, lines: stockLines });
-        stockCommitted = true;
-      }
-
+      // Claim/seal first so a second device cannot also apply the same draft.
       const cloud = await completeAuditCloudWithRetry(audit.id);
-      if (!stocktakeCloseAccepted(cloud)) {
-        // Stock may already be written; seal locally so this device cannot apply the same counts twice,
-        // and surface a hard error (never a success toast).
-        const sealed = markLocalCompleted(userId, audit.id);
-        setArchive(await loadAuditArchive(userId));
-        setOpenReportId(audit.id);
-        setTab('archive');
-        setConfirmApply(false);
-        setLines([]);
-        setAudit(freshAudit(userId));
+      if (!stocktakeClaimAllowsStock(cloud)) {
         toast.error(isRtl
-          ? (sealed
-            ? 'تحدّث المخزون، لكن تعذّر إغلاق الجرد على الخادم بعد عدة محاولات. أُغلق على هذا الجهاز. تحقق من الاتصال وأعد فتح السجل إن لزم.'
-            : 'تحدّث المخزون وتعذّر إغلاق الجرد على الخادم، وامتنع الجهاز عن حفظ الختم محلياً (الذاكرة ممتلئة؟). لا تُعد تطبيق نفس العدّ قبل المراجعة.')
-          : (sealed
-            ? 'Stock was updated, but closing the stocktake on the server failed after retries. It is sealed on this device. Check the connection and reopen the archive if needed.'
-            : 'Stock was updated and the server close failed; this device could not seal the count locally (storage full?). Do not re-apply the same count before review.'));
+          ? 'تعذّر إغلاق الجرد على الخادم؛ لم يتغيّر المخزون. أعد المحاولة بعد استقرار الاتصال.'
+          : 'Could not close the stocktake on the server; stock was not changed. Retry when the connection is stable.');
         return;
       }
+      claimedOnServer = stocktakeClaimedOnServer(cloud);
+      if (claimedOnServer) {
+        markLocalCompleted(userId, audit.id);
+      }
 
-      const sealed = markLocalCompleted(userId, audit.id);
-      if (!sealed) {
-        toast.error(isRtl
-          ? 'اعتُمد المخزون، لكن تعذّر ختم الجرد على هذا الجهاز (الذاكرة ممتلئة؟). راجع السجل قبل أي إعادة تطبيق.'
-          : 'Stock was applied, but this device could not seal the stocktake (storage full?). Review the archive before any re-apply.');
+      try {
+        if (stockLines.length) {
+          await applyStocktake({ auditNumber: audit.auditNumber, lines: stockLines });
+        }
+      } catch (stockErr: any) {
+        if (claimedOnServer) {
+          setArchive(await loadAuditArchive(userId));
+          setOpenReportId(audit.id);
+          setTab('archive');
+          setConfirmApply(false);
+          setLines([]);
+          setAudit(freshAudit(userId));
+          toast.error(isRtl
+            ? 'أُغلق الجرد على الخادم لكن تعذّر تحديث المخزون. راجع الكميات يدوياً أو أنشئ جرداً جديداً للفروقات.'
+            : 'The stocktake was closed on the server, but stock could not be updated. Review quantities manually or start a new count for the gaps.',
+            { duration: 12000 });
+          return;
+        }
+        throw stockErr;
+      }
+
+      if (!claimedOnServer) {
+        const sealed = markLocalCompleted(userId, audit.id);
+        if (!sealed) {
+          toast.error(isRtl
+            ? 'اعتُمد المخزون، لكن تعذّر ختم الجرد على هذا الجهاز (الذاكرة ممتلئة؟). راجع السجل قبل أي إعادة تطبيق.'
+            : 'Stock was applied, but this device could not seal the stocktake (storage full?). Review the archive before any re-apply.');
+        } else {
+          toast.success(isRtl ? 'اعتُمد الجرد وحُدّث المخزون' : 'Stocktake applied and stock was updated');
+        }
       } else {
         toast.success(isRtl ? 'اعتُمد الجرد وحُدّث المخزون' : 'Stocktake applied and stock was updated');
       }
@@ -330,16 +342,7 @@ export default function InventoryAudit({ language, settings }: Props) {
       setLines([]);
       setAudit(freshAudit(userId));
     } catch (err: any) {
-      if (stockCommitted) {
-        const sealed = markLocalCompleted(userId, audit.id);
-        toast.error(isRtl
-          ? (sealed
-            ? 'تحدّث المخزون ثم حدث خطأ أثناء الإغلاق. أُغلق الجرد على هذا الجهاز لتجنّب التكرار.'
-            : 'تحدّث المخزون ثم فشل الإغلاق، وامتنع الجهاز عن حفظ الختم. لا تُعد تطبيق نفس العدّ قبل المراجعة.')
-          : (sealed
-            ? 'Stock was updated, then closing failed. The stocktake is sealed on this device to avoid a double apply.'
-            : 'Stock was updated, then closing failed, and this device could not seal the count. Do not re-apply before review.'));
-      } else if (err?.code === 'stock-changed') {
+      if (err?.code === 'stock-changed') {
         toast.error(err.message || (isRtl
           ? 'تغيّر المخزون بعد بدء الجرد؛ لم يُعتمد أي تعديل. حدّث المسجّل ثم أعد المحاولة.'
           : 'Stock changed after the count started; nothing was applied. Refresh the book and try again.'));

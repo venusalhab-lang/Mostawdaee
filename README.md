@@ -22,6 +22,7 @@ Warehouse, point-of-sale and accounting app for small merchants. Web (PWA) and A
    2. `supabase_cheques.sql` — cheques register
    3. `supabase_inventory_audit.sql` — stocktakes
    4. `supabase_einvoicing.sql` — JoFotara e-invoicing (required for `/api/einvoice/*`)
+   5. `supabase_zatca_phase1.sql` — Saudi ZATCA Phase 1 tax QR (optional; after einvoicing)
 
 ## Commands
 

@@ -52,6 +52,24 @@ ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS email TEXT;
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS user_email TEXT;
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT TIMEZONE('utc', NOW());
 
+-- CREATE TABLE IF NOT EXISTS keeps a legacy shape; ensure user_id exists before any UPDATE/index on it.
+-- Some older projects keyed the row by id UUID (= auth.users.id) with no separate user_id column.
+ALTER TABLE public.user_subscriptions ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE;
+
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = 'user_subscriptions'
+           AND column_name = 'id' AND data_type = 'uuid'
+    ) THEN
+        UPDATE public.user_subscriptions s
+           SET user_id = s.id
+         WHERE s.user_id IS NULL
+           AND EXISTS (SELECT 1 FROM auth.users u WHERE u.id = s.id);
+    END IF;
+END $$;
+
 -- Added without defaults first so existing merchants keep their real trial start, not today's date.
 ALTER TABLE public.user_subscriptions ADD COLUMN IF NOT EXISTS trial_start_date TIMESTAMPTZ;
 ALTER TABLE public.user_subscriptions ADD COLUMN IF NOT EXISTS subscription_status TEXT;
@@ -62,6 +80,7 @@ DO $$
 DECLARE
     has_created_at BOOLEAN;
     has_status BOOLEAN;
+    orphans BIGINT;
 BEGIN
     SELECT EXISTS (SELECT 1 FROM information_schema.columns
                    WHERE table_schema = 'public' AND table_name = 'user_subscriptions' AND column_name = 'created_at')
@@ -69,6 +88,13 @@ BEGIN
     SELECT EXISTS (SELECT 1 FROM information_schema.columns
                    WHERE table_schema = 'public' AND table_name = 'user_subscriptions' AND column_name = 'status')
       INTO has_status;
+
+    SELECT count(*) INTO orphans FROM public.user_subscriptions WHERE user_id IS NULL;
+    IF orphans > 0 THEN
+        RAISE EXCEPTION
+            'user_subscriptions has % row(s) with no user_id — link each row to auth.users or delete them, then re-run',
+            orphans;
+    END IF;
 
     IF has_created_at THEN
         EXECUTE 'UPDATE public.user_subscriptions SET trial_start_date = created_at WHERE trial_start_date IS NULL';

@@ -17,10 +17,6 @@ import {
   Tag,
   ShieldAlert,
   ArrowRightLeft,
-  Droplets,
-  Wrench,
-  Cpu,
-  Zap,
   Edit2,
   Trash2,
   Check,
@@ -63,6 +59,8 @@ import {
 import { CURRENCY_SYMBOLS, buildUsdUnitRates, safeConvertMoney, formatMoney, readCachedLiveRates, roundMoney, POS_CURRENCY_CODES } from '../lib/exchangeRates';
 import CurrencyPicker from './CurrencyPicker';
 import { stockValueByCurrency } from '../lib/profits';
+import ProductVisualIcon from './ProductVisualIcon';
+import { productVisualTone } from '../lib/productVisual';
 
 const PRODUCT_FORMS = { one: 'منتج واحد', two: 'منتجين', few: '{n} منتجات', many: '{n} منتجاً', other: '{n} منتج' };
 
@@ -79,29 +77,6 @@ interface Props {
   }) => void | Promise<void>;
   onDeleteProduct: (id: string) => void | Promise<void>;
   transactions: Invoice[];
-}
-
-// Helper to determine the perfect Lucide React icon based on category/name
-function getProductIcon(category: string = '', name: string = '') {
-  const c = category.toLowerCase();
-  const n = name.toLowerCase();
-  
-  if (n.includes('زيت') || n.includes('oil') || n.includes('molygen') || c.includes('زيوت') || c.includes('oil') || c.includes('صيانة')) {
-    return <Droplets className="w-5 h-5 text-cyan-400 drop-shadow-[0_0_8px_rgba(34,211,238,0.5)]" />;
-  }
-  if (n.includes('كاوية') || n.includes('أداة') || n.includes('مفك') || c.includes('أدوات') || c.includes('tool') || c.includes('wrench') || c.includes('mechanic')) {
-    return <Wrench className="w-5 h-5 text-amber-400 drop-shadow-[0_0_8px_rgba(251,191,36,0.5)]" />;
-  }
-  if (n.includes('زينون') || n.includes('شريحة') || n.includes('وحدة') || c.includes('إلكترونيات') || c.includes('electronic') || c.includes('micro') || c.includes('cpu')) {
-    return <Cpu className="w-5 h-5 text-purple-400 drop-shadow-[0_0_8px_rgba(192,132,252,0.5)]" />;
-  }
-  if (n.includes('ملتيميتر') || n.includes('فحص') || n.includes('قياس') || c.includes('فحص') || c.includes('test') || c.includes('meter')) {
-    return <Zap className="w-5 h-5 text-emerald-400 drop-shadow-[0_0_8px_rgba(52,211,153,0.5)]" />;
-  }
-  if (c.includes('قطع') || c.includes('غيار') || c.includes('spares') || n.includes('فلتر') || n.includes('filter')) {
-    return <Boxes className="w-5 h-5 text-rose-400 drop-shadow-[0_0_8px_rgba(251,113,133,0.5)]" />;
-  }
-  return <Package className="w-5 h-5 text-slate-400" />;
 }
 
 const roundForExport = (v: number, cur: string) => roundMoney(Number(v) || 0, cur);
@@ -157,9 +132,8 @@ function ProductRow({
       {/* Product Details (المنتج) */}
       <td className="px-6 py-4.5 whitespace-nowrap">
         <div className="flex items-center gap-3">
-          {/* Floating glass-box icon */}
-          <div className="w-11 h-11 bg-slate-100/10 dark:bg-white/5 border border-slate-200/20 dark:border-white/10 rounded-xl flex items-center justify-center text-slate-400 group-hover:scale-105 group-hover:border-cyan-400/30 transition-all shadow-inner">
-            {getProductIcon(product.category, product.name)}
+          <div className={`w-11 h-11 border border-slate-200/20 dark:border-white/10 rounded-xl flex items-center justify-center group-hover:scale-105 group-hover:border-cyan-400/30 transition-all shadow-inner ${productVisualTone(product.category, product.name)}`}>
+            <ProductVisualIcon category={product.category} name={product.name} className="w-5 h-5" />
           </div>
           <div className="flex flex-col min-w-0">
             <span className="text-sm font-black text-slate-900 dark:text-slate-100 truncate group-hover:text-cyan-400 transition-colors max-w-[280px]">

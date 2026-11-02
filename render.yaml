@@ -1,0 +1,28 @@
+# Render Blueprint: one Web Service = app + API on app.mostawdaee.com
+# Dashboard: New → Blueprint → connect this repo → set env vars below.
+services:
+  - type: web
+    name: mostawdaee-app
+    runtime: node
+    plan: starter
+    region: frankfurt
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: VITE_API_BASE_URL
+        value: https://app.mostawdaee.com
+      - key: VITE_SUPABASE_URL
+        sync: false
+      - key: VITE_SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: ALLOWED_ORIGINS
+        value: https://www.mostawdaee.com,https://mostawdaee.com,https://app.mostawdaee.com

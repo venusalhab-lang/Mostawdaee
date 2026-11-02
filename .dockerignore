@@ -1,0 +1,14 @@
+node_modules
+dist
+server-dist
+.git
+.cursor
+android
+ios
+*.md
+.env
+.env.*
+!.env.production.example
+agent-transcripts
+coverage
+tmp

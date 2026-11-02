@@ -171,9 +171,8 @@ EXCEPTION
 END $$;
 
 -- ---------------------------------------------------------
--- Apply: close the stocktake. The app has already set each product to its counted
--- quantity through merchant_commit (one stock movement per line); this records that
--- the count is final so it can never be resumed or applied a second time.
+-- Apply / claim: close the stocktake first so a second device cannot apply the same
+-- draft. The app then sets each product to its counted quantity through merchant_commit.
 -- ---------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.apply_inventory_audit(p_audit_id UUID)
 RETURNS JSONB

@@ -116,6 +116,26 @@ export function stocktakeCloseAccepted(result: {
   return result.cloud || result.reason === 'schema_missing' || result.reason === 'no_session';
 }
 
+/**
+ * Claim-before-stock: only apply inventory when the cloud seal/claim succeeded,
+ * or when we are intentionally offline / missing the audits schema (local seal only).
+ * A hard cloud failure must not change stock.
+ */
+export function stocktakeClaimAllowsStock(result: {
+  cloud: boolean;
+  reason?: 'no_session' | 'schema_missing' | 'failed';
+}): boolean {
+  return stocktakeCloseAccepted(result);
+}
+
+/** Cloud seal already took the draft — stock apply runs after claim. */
+export function stocktakeClaimedOnServer(result: {
+  cloud: boolean;
+  reason?: 'no_session' | 'schema_missing' | 'failed';
+}): boolean {
+  return result.cloud === true;
+}
+
 /** Each scan of a known product adds one unit to the counted quantity. */
 export function countBarcode(
   lines: InventoryAuditLine[],

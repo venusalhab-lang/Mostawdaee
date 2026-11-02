@@ -100,7 +100,7 @@ function blankForm(type: ChequeType, currency: Currency, businessName: string, h
 export default function ChequesManagement({ language, settings }: Props) {
   const isRtl = language === 'ar';
   const locale = isRtl ? 'ar' : 'en-US';
-  const { user, customers, invoices, recordCustomerLedgerTransaction, deleteCustomerLedgerTransaction } = useFirebase();
+  const { user, customers, invoices, recordCustomerLedgerTransaction } = useFirebase();
   const userId = user?.uid || 'guest';
   const defaultCurrency: Currency = isPosCurrency(settings.currency) ? settings.currency : 'ILS';
 
@@ -335,8 +335,9 @@ export default function ChequesManagement({ language, settings }: Props) {
           ? appendNote(cheque.notes, `${isRtl ? 'سبب الرجوع' : 'Bounce reason'} (${today}): ${bounceReason.trim()}`)
           : cheque.notes;
         const payment = next === 'cashed' && bookPayment ? paymentFor(cheque) : null;
-        // Book AR first so a failed ledger write cannot leave a cashed cheque with an open debt.
-        // If status change fails after AR, reverse the ledger (and vault if linked) before surfacing the error.
+        // Idempotent ledger (draft id chq-{id}) then status. Never roll back AR on status failure —
+        // a retry skips the existing ledger row and finishes the status change. Compensating
+        // deletes were the divergence path when rollback itself failed.
         const paymentDraftId = payment?.customer && payment.plan?.ok ? `chq-${cheque.id}` : null;
         if (payment?.customer && payment.plan?.ok && paymentDraftId) {
           await recordCustomerLedgerTransaction(
@@ -353,14 +354,10 @@ export default function ChequesManagement({ language, settings }: Props) {
           updated = await changeChequeStatus(userId, cheque, next, endorsedTo, notes);
         } catch (statusError) {
           if (paymentDraftId) {
-            try {
-              await deleteCustomerLedgerTransaction(`TX_${paymentDraftId}`, { reverseVault: paymentToVault });
-            } catch {
-              toast.error(isRtl
-                ? 'سُجّلت دفعة على حساب الزبون ثم فشل تحديث حالة الشيك وتعذّر التراجع تلقائياً. راجع العملاء والشيكات يدوياً.'
-                : 'A customer payment was booked, then the cheque status failed and automatic rollback failed. Review Customers and Cheques manually.',
-                { duration: 12000 });
-            }
+            toast.error(isRtl
+              ? 'سُجّلت الدفعة على حساب الزبون، لكن تحديث حالة الشيك فشل. اضغط تأكيد مرة أخرى لإغلاق الشيك (لن تُخصم الدفعة مرتين).'
+              : 'Customer payment was booked, but updating the cheque status failed. Confirm again to close the cheque (the payment will not be charged twice).',
+              { duration: 12000 });
           }
           throw statusError;
         }
