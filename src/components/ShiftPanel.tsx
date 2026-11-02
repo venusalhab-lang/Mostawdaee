@@ -1,13 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Clock, Lock, Printer, Unlock, X } from 'lucide-react';
+import { CalendarDays, Clock, Lock, Printer, Unlock, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { useFirebase } from './FirebaseProvider';
 import { CurrencySelect } from './CurrencyPicker';
-import type { Currency, Shift, ShiftCurrencyTotals } from '../types';
+import type { Cheque, Currency, Shift, ShiftCurrencyTotals } from '../types';
 import { formatMoney, isPosCurrency, roundMoney } from '../lib/exchangeRates';
 import { cashDifference, openShiftOf, summarizeShift } from '../lib/shifts';
 import { buildShiftReportHtml } from '../lib/shiftReport';
+import { buildDayCloseSnapshot } from '../lib/dayClose';
+import { buildDayCloseReportHtml } from '../lib/dayCloseReport';
+import { loadCheques } from '../lib/chequesStore';
 import { printHtmlDocument } from '../lib/printHtml';
 import { printReceipt, printerErrorMessage, readReceiptPrinter } from '../lib/receiptPrinter';
 
@@ -16,18 +19,21 @@ interface ShiftPanelProps {
   onClose: () => void;
   language: 'ar' | 'en';
   defaultCurrency: string;
+  /** Prefer the store-day close tab when the panel opens (back-office). */
+  initialTab?: 'drawer' | 'day';
 }
 
 const HISTORY_LIMIT = 30;
 
-export default function ShiftPanel({ isOpen, onClose, language, defaultCurrency }: ShiftPanelProps) {
+export default function ShiftPanel({ isOpen, onClose, language, defaultCurrency, initialTab = 'drawer' }: ShiftPanelProps) {
   const isRtl = language === 'ar';
   const L = (ar: string, en: string) => (isRtl ? ar : en);
-  const { user, settings, invoices, shifts, openShift, closeShift, can } = useFirebase();
+  const { user, settings, invoices, shifts, openShift, closeShift, can, vault, vaultTransactions, customers } = useFirebase();
   const uid = user?.uid;
   const seesStore = can('back_office');
 
   const mine = openShiftOf(shifts, uid);
+  const [panelTab, setPanelTab] = useState<'drawer' | 'day'>(initialTab);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [closedLocal, setClosedLocal] = useState<Shift | null>(null);
   const listed = selectedId ? shifts.find((s) => s.id === selectedId) : undefined;
@@ -42,14 +48,31 @@ export default function ShiftPanel({ isOpen, onClose, language, defaultCurrency 
   const [closeNotes, setCloseNotes] = useState('');
   const [busy, setBusy] = useState(false);
   const [now, setNow] = useState(() => Date.now());
+  const [cheques, setCheques] = useState<Cheque[]>([]);
   const openDraftRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!isOpen) return;
+    setPanelTab(seesStore ? initialTab : 'drawer');
     setNow(Date.now());
     const timer = setInterval(() => setNow(Date.now()), 30_000);
     return () => clearInterval(timer);
-  }, [isOpen, invoices]);
+  }, [isOpen, invoices, initialTab, seesStore]);
+
+  useEffect(() => {
+    if (!isOpen || !seesStore || !uid || panelTab !== 'day') return;
+    let cancelled = false;
+    loadCheques(uid)
+      .then((rows) => {
+        if (!cancelled) setCheques(rows);
+      })
+      .catch(() => {
+        if (!cancelled) setCheques([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, seesStore, uid, panelTab, now]);
 
   useEffect(() => {
     openDraftRef.current = null;
@@ -73,6 +96,20 @@ export default function ShiftPanel({ isOpen, onClose, language, defaultCurrency 
     return summarizeShift(selected, invoices, now, shifts);
   }, [selected, invoices, now, shifts]);
 
+  const daySnap = useMemo(() => {
+    if (!seesStore) return null;
+    return buildDayCloseSnapshot({
+      invoices,
+      vault,
+      vaultTransactions,
+      customers,
+      cheques,
+      shifts,
+      fallbackCurrency: isPosCurrency(defaultCurrency) ? defaultCurrency : 'JOD',
+      now,
+    });
+  }, [seesStore, invoices, vault, vaultTransactions, customers, cheques, shifts, defaultCurrency, now]);
+
   const history = useMemo(
     () => shifts.filter((s) => s.id !== selected?.id && (seesStore || s.actorId === uid)).slice(0, HISTORY_LIMIT),
     [shifts, selected?.id, seesStore, uid],
@@ -85,6 +122,23 @@ export default function ShiftPanel({ isOpen, onClose, language, defaultCurrency 
     year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
   });
   const who = (s: Shift) => s.userName || s.actorEmail || L('مستخدم', 'User');
+
+  const goScreen = (screen: string) => {
+    onClose();
+    window.dispatchEvent(new CustomEvent('change-screen', { detail: screen }));
+  };
+
+  const printDay = () => {
+    if (!daySnap) return;
+    const html = buildDayCloseReportHtml({
+      isAr: isRtl,
+      businessName: settings?.businessName || '',
+      snapshot: daySnap,
+      money,
+      formatDate,
+    });
+    printHtmlDocument(html, L('إقفال-اليوم', 'day-close'));
+  };
 
   const print = (shift: Shift, totals: ShiftCurrencyTotals[]) => {
     const html = buildShiftReportHtml({
@@ -208,12 +262,19 @@ export default function ShiftPanel({ isOpen, onClose, language, defaultCurrency 
           <div className="flex items-center gap-2">
             <span className="p-2 rounded-xl bg-slate-100 dark:bg-white/5 text-slate-700 dark:text-slate-200"><Clock size={18} /></span>
             <div>
-              <h2 id="shift-panel-title" className="text-base font-black text-slate-900 dark:text-white">{L('عدّ درج الكاشير', 'Cash drawer count')}</h2>
+              <h2 id="shift-panel-title" className="text-base font-black text-slate-900 dark:text-white">
+                {panelTab === 'day' ? L('إقفال يوم المتجر', 'Store day close') : L('عدّ درج الكاشير', 'Cash drawer count')}
+              </h2>
               <p className="text-xs text-slate-500 dark:text-slate-400">
-                {L(
-                  'ورقة درج اختيارية: رصيد افتتاح وعدّ عند الإغلاق وتقرير Z. لا تحرّك الخزنة ولا تمنع البيع.',
-                  'Optional drawer worksheet: opening float, closing count and Z-report. Does not move the vault or block sales.',
-                )}
+                {panelTab === 'day'
+                  ? L(
+                      'ملخص يومي للمطابقة: مبيعات كل الكاشيرات، الخزنة، الديون، الشيكات. لا يحرّك المال.',
+                      'Daily reconciliation: all-cashier sales, vault, debts, cheques. Does not move money.',
+                    )
+                  : L(
+                      'ورقة درج اختيارية: رصيد افتتاح وعدّ عند الإغلاق وتقرير Z. لا تحرّك الخزنة ولا تمنع البيع.',
+                      'Optional drawer worksheet: opening float, closing count and Z-report. Does not move the vault or block sales.',
+                    )}
               </p>
             </div>
           </div>
@@ -222,7 +283,167 @@ export default function ShiftPanel({ isOpen, onClose, language, defaultCurrency 
           </button>
         </div>
 
+        {seesStore && (
+          <div className="px-5 pt-3 flex gap-1 shrink-0" role="tablist">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={panelTab === 'drawer'}
+              onClick={() => setPanelTab('drawer')}
+              className={`flex-1 rounded-xl px-3 py-2 text-xs font-black cursor-pointer ${
+                panelTab === 'drawer'
+                  ? 'bg-indigo-600 text-white'
+                  : 'bg-slate-100 dark:bg-white/5 text-slate-600 dark:text-slate-300'
+              }`}
+            >
+              <span className="inline-flex items-center justify-center gap-1.5"><Clock size={13} />{L('عدّ الدرج', 'Drawer')}</span>
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={panelTab === 'day'}
+              onClick={() => setPanelTab('day')}
+              className={`flex-1 rounded-xl px-3 py-2 text-xs font-black cursor-pointer ${
+                panelTab === 'day'
+                  ? 'bg-indigo-600 text-white'
+                  : 'bg-slate-100 dark:bg-white/5 text-slate-600 dark:text-slate-300'
+              }`}
+            >
+              <span className="inline-flex items-center justify-center gap-1.5"><CalendarDays size={13} />{L('إقفال اليوم', 'Day close')}</span>
+            </button>
+          </div>
+        )}
+
         <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5 pb-[max(1rem,env(safe-area-inset-bottom))]">
+          {panelTab === 'day' && seesStore && daySnap && (
+            <section className="space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded-2xl bg-slate-50 dark:bg-white/5 p-3 text-sm">
+                <div>
+                  <div className="font-black text-slate-900 dark:text-white">{daySnap.dayIso}</div>
+                  <div className="text-xs text-slate-500">{L('حتى', 'As of')} {formatDate(daySnap.asOf)}</div>
+                </div>
+                <button
+                  type="button"
+                  onClick={printDay}
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-slate-900 dark:bg-white text-white dark:text-slate-900 px-3 py-2 text-xs font-black cursor-pointer"
+                >
+                  <Printer size={14} />{L('طباعة الملخص', 'Print summary')}
+                </button>
+              </div>
+
+              <div className="rounded-2xl border border-slate-200 dark:border-white/10 p-4 space-y-3">
+                <h3 className="text-sm font-black text-slate-900 dark:text-white">{L('مبيعات اليوم (كل الكاشيرات)', 'Today’s sales (all cashiers)')}</h3>
+                {daySnap.sales.length === 0 ? (
+                  <p className="text-xs text-slate-500">{L('لا مبيعات اليوم بعد.', 'No sales yet today.')}</p>
+                ) : (
+                  daySnap.sales.map((s) => (
+                    <div key={s.currency} className="text-sm border-t border-slate-100 dark:border-white/10 pt-2 first:border-0 first:pt-0">
+                      <div className="flex justify-between font-black text-slate-900 dark:text-white mb-1">
+                        <span>{s.currency}</span>
+                        <span className="tabular-nums" dir="ltr">{money(s.net, s.currency)}</span>
+                      </div>
+                      {row(L('إجمالي', 'Gross'), s.sales, s.currency)}
+                      {row(L('مرتجعات', 'Returns'), s.returns, s.currency)}
+                      {row(L('نقدي', 'Cash'), s.byMethod.cash, s.currency)}
+                      {row(L('بطاقة', 'Card'), s.byMethod.card, s.currency)}
+                      {row(L('محفظة', 'Wallet'), s.byMethod.wallet, s.currency)}
+                      {row(L('آجل', 'Credit'), s.byMethod.credit, s.currency)}
+                    </div>
+                  ))
+                )}
+              </div>
+
+              <div className="rounded-2xl border border-slate-200 dark:border-white/10 p-4 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="text-sm font-black text-slate-900 dark:text-white">{L('الخزنة الآن', 'Vault now')}</h3>
+                  <button type="button" onClick={() => goScreen('vault')} className="text-[11px] font-bold text-indigo-600 cursor-pointer">
+                    {L('فتح الخزنة', 'Open vault')}
+                  </button>
+                </div>
+                {Object.entries(daySnap.vaultBalances).filter(([, v]) => v !== 0).length === 0 ? (
+                  <p className="text-xs text-slate-500">—</p>
+                ) : (
+                  Object.entries(daySnap.vaultBalances)
+                    .filter(([, v]) => v !== 0)
+                    .map(([code, value]) => row(code, value, code, true))
+                )}
+                {daySnap.vaultFlows.length > 0 && (
+                  <div className="pt-2 border-t border-slate-100 dark:border-white/10 space-y-1">
+                    <p className="text-[11px] font-bold text-slate-500">{L('حركة اليوم', 'Today’s movement')}</p>
+                    {daySnap.vaultFlows.map((f) => (
+                      <div key={f.currency} className="flex justify-between text-xs text-slate-600 dark:text-slate-300 gap-2">
+                        <span>{f.currency}</span>
+                        <span className="tabular-nums" dir="ltr">
+                          +{money(f.income, f.currency)} / −{money(f.expense, f.currency)}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="rounded-2xl border border-slate-200 dark:border-white/10 p-4 space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <h3 className="text-sm font-black text-slate-900 dark:text-white">
+                      {L(`ديون (${daySnap.debts.count})`, `Debts (${daySnap.debts.count})`)}
+                    </h3>
+                    <button type="button" onClick={() => goScreen('customers')} className="text-[11px] font-bold text-indigo-600 cursor-pointer">
+                      {L('العملاء', 'Customers')}
+                    </button>
+                  </div>
+                  {daySnap.debts.rows.length === 0
+                    ? <p className="text-xs text-slate-500">—</p>
+                    : daySnap.debts.rows.map((r) => row(r.currency, r.amount, r.currency))}
+                </div>
+                <div className="rounded-2xl border border-slate-200 dark:border-white/10 p-4 space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <h3 className="text-sm font-black text-slate-900 dark:text-white">
+                      {L(`شيكات صُرفت (${daySnap.chequesCashedToday.count})`, `Cashed (${daySnap.chequesCashedToday.count})`)}
+                    </h3>
+                    <button type="button" onClick={() => goScreen('cheques')} className="text-[11px] font-bold text-indigo-600 cursor-pointer">
+                      {L('الشيكات', 'Cheques')}
+                    </button>
+                  </div>
+                  {Object.keys(daySnap.chequesCashedToday.byCurrency).length === 0
+                    ? <p className="text-xs text-slate-500">—</p>
+                    : Object.entries(daySnap.chequesCashedToday.byCurrency).map(([code, value]) => row(code, value, code))}
+                  <p className="text-[11px] text-amber-700 dark:text-amber-300 font-bold">
+                    {L(`معلّقة متأخرة: ${daySnap.chequesOverduePending}`, `Overdue pending: ${daySnap.chequesOverduePending}`)}
+                  </p>
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-slate-200 dark:border-white/10 p-4 space-y-2">
+                <h3 className="text-sm font-black text-slate-900 dark:text-white">{L('عدّ الأدراج', 'Drawer counts')}</h3>
+                <p className="text-xs text-slate-500">
+                  {L(`ورديات أُغلقت اليوم: ${daySnap.shiftsClosedToday}`, `Shifts closed today: ${daySnap.shiftsClosedToday}`)}
+                </p>
+                {daySnap.openShifts.length === 0 ? (
+                  <p className="text-xs text-emerald-700 dark:text-emerald-300 font-bold">{L('لا عدّ درج مفتوح.', 'No open drawer counts.')}</p>
+                ) : (
+                  <ul className="text-xs space-y-1 text-slate-700 dark:text-slate-300">
+                    {daySnap.openShifts.map((s) => (
+                      <li key={s.id}>{s.label} · {formatDate(s.openedAt)}</li>
+                    ))}
+                  </ul>
+                )}
+                <button type="button" onClick={() => setPanelTab('drawer')} className="text-[11px] font-bold text-indigo-600 cursor-pointer">
+                  {L('الانتقال لعدّ الدرج', 'Go to drawer count')}
+                </button>
+              </div>
+
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                {L(
+                  'قائمة تحقق فقط. عدّل الخزنة يدوياً من شاشة الخزنة إن لزم، مع سبب واضح.',
+                  'Checklist only. Adjust the vault from the vault screen if needed, with a clear reason.',
+                )}
+              </p>
+            </section>
+          )}
+
+          {panelTab === 'drawer' && (
+          <>
           {!user && (
             <p className="rounded-xl bg-amber-50 dark:bg-amber-500/10 text-amber-800 dark:text-amber-200 text-sm p-3">
               {L('وضع المعاينة لا يحفظ الورديات. سجّل الدخول لاستخدامها.', 'Preview mode does not save shifts. Sign in to use them.')}
@@ -416,6 +637,8 @@ export default function ShiftPanel({ isOpen, onClose, language, defaultCurrency 
                 })}
               </ul>
             </section>
+          )}
+          </>
           )}
         </div>
       </div>

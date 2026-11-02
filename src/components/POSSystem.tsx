@@ -27,6 +27,7 @@ import {
   User,
   X,
   MonitorSmartphone,
+  CalendarClock,
 } from 'lucide-react';
 import { useFirebase } from './FirebaseProvider';
 import { migrateLegacyUserCache } from '../lib/userStorage';
@@ -163,6 +164,7 @@ export default function POSSystem({ language }: POSSystemProps) {
   const { products, saveInvoice, settings, saveProduct, warehouses, user, can, workspace, shifts, customers } = useFirebase();
   const myShift = openShiftOf(shifts, user?.uid);
   const [showShiftPanel, setShowShiftPanel] = useState(false);
+  const [shiftPanelTab, setShiftPanelTab] = useState<'drawer' | 'day'>('drawer');
   const canManageCatalog = can('manage_catalog');
   const storeCurrency = isPosCurrency(settings?.currency) ? settings.currency : 'JOD';
   const [posCurrency, setPosCurrency] = useState<PosCurrency>(() => {
@@ -1486,9 +1488,26 @@ export default function POSSystem({ language }: POSSystemProps) {
             {isRtl ? 'شاشة العميل' : 'Customer display'}
           </button>
         )}
+        {posMode === 'sale' && can('back_office') && (
+          <button
+            type="button"
+            onClick={() => {
+              setShiftPanelTab('day');
+              setShowShiftPanel(true);
+            }}
+            className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-2.5 text-xs font-black text-slate-600 hover:text-slate-900 dark:border-slate-800 dark:bg-slate-900/60 dark:text-slate-300 cursor-pointer transition-colors"
+            title={isRtl ? 'ملخص إقفال يوم المتجر' : 'Store day-close summary'}
+          >
+            <CalendarClock size={15} />
+            {isRtl ? 'إقفال اليوم' : 'Day close'}
+          </button>
+        )}
         <button
           type="button"
-          onClick={() => setShowShiftPanel(true)}
+          onClick={() => {
+            setShiftPanelTab('drawer');
+            setShowShiftPanel(true);
+          }}
           className={`inline-flex items-center gap-2 rounded-2xl border px-4 py-2.5 text-xs font-black cursor-pointer transition-colors ${
             myShift
               ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-300'
@@ -1532,7 +1551,13 @@ export default function POSSystem({ language }: POSSystemProps) {
         </div>
         </div>
       </div>
-      <ShiftPanel isOpen={showShiftPanel} onClose={() => setShowShiftPanel(false)} language={isRtl ? 'ar' : 'en'} defaultCurrency={activeCurrency} />
+      <ShiftPanel
+        isOpen={showShiftPanel}
+        onClose={() => setShowShiftPanel(false)}
+        language={isRtl ? 'ar' : 'en'}
+        defaultCurrency={activeCurrency}
+        initialTab={shiftPanelTab}
+      />
 
       {/* Main Grid Workspace */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-6 flex-1 items-stretch">
