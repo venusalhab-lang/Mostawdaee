@@ -1,7 +1,7 @@
 import type { Cheque, ChequeInput, ChequeStatus, Currency } from '../types';
 import { storeOwnerId } from './workspace';
 import { getSupabaseClient } from '../services/supabase';
-import { canTransition, validateChequeInput } from './cheques';
+import { canTransition, chequeRestorePath, validateChequeInput } from './cheques';
 import { roundMoney } from './exchangeRates';
 
 export type ChequeStoreErrorCode =
@@ -10,7 +10,9 @@ export type ChequeStoreErrorCode =
   | 'duplicate'
   | 'invalid'
   | 'invalid_transition'
+  | 'cheque-already-final'
   | 'not_found'
+  | 'storage_full'
   | 'failed';
 
 export class ChequeStoreError extends Error {
@@ -97,7 +99,11 @@ function readGuest(): Cheque[] {
 }
 
 function writeGuest(rows: Cheque[]) {
-  localStorage.setItem(GUEST_KEY, JSON.stringify(rows));
+  try {
+    localStorage.setItem(GUEST_KEY, JSON.stringify(rows));
+  } catch {
+    throw new ChequeStoreError('storage_full');
+  }
 }
 
 export async function loadCheques(userId: string): Promise<Cheque[]> {
@@ -108,6 +114,30 @@ export async function loadCheques(userId: string): Promise<Cheque[]> {
     .order('due_date', { ascending: true });
   if (error) throw mapError(error);
   return (data || []).map(fromRow);
+}
+
+/** Backup export: empty register when cheques cloud is unavailable; other errors still surface. */
+export async function loadChequesForBackup(userId: string | undefined | null): Promise<Cheque[]> {
+  if (!userId) return [];
+  try {
+    return await loadCheques(userId);
+  } catch (error) {
+    if (error instanceof ChequeStoreError && (error.code === 'schema_missing' || error.code === 'no_session')) return [];
+    throw error;
+  }
+}
+
+/**
+ * Restore LiveBooks: fail closed when the session is missing so an empty register cannot hide newer cheques.
+ * schema_missing still returns [] (store never had the cheques table).
+ */
+export async function loadChequesForRestore(userId: string): Promise<Cheque[]> {
+  try {
+    return await loadCheques(userId);
+  } catch (error) {
+    if (error instanceof ChequeStoreError && error.code === 'schema_missing') return [];
+    throw error;
+  }
 }
 
 export async function createCheque(userId: string, input: ChequeInput): Promise<Cheque> {
@@ -216,4 +246,137 @@ export async function deleteCheque(userId: string, cheque: Cheque): Promise<void
     .select('id');
   if (error) throw mapError(error);
   if (!data?.length) throw new ChequeStoreError('invalid_transition');
+}
+
+const chequeKey = (c: Pick<Cheque, 'type' | 'bankName' | 'chequeNumber'>) =>
+  `${c.type}|${c.bankName.trim().toLowerCase()}|${c.chequeNumber.trim()}`;
+
+function asChequeInput(cheque: Cheque): ChequeInput {
+  return {
+    chequeNumber: cheque.chequeNumber,
+    bankName: cheque.bankName,
+    amount: cheque.amount,
+    currency: cheque.currency,
+    dueDate: cheque.dueDate,
+    type: cheque.type,
+    drawerName: cheque.drawerName,
+    contactType: cheque.contactType,
+    contactId: cheque.contactId,
+    contactName: cheque.contactName,
+    notes: cheque.notes,
+  };
+}
+
+function normalizeRestoredCheque(cheque: Cheque): Cheque {
+  return {
+    id: String(cheque.id),
+    chequeNumber: String(cheque.chequeNumber || '').trim(),
+    bankName: String(cheque.bankName || '').trim(),
+    amount: Number(cheque.amount) || 0,
+    currency: cheque.currency,
+    dueDate: String(cheque.dueDate || '').slice(0, 10),
+    type: cheque.type === 'outgoing' ? 'outgoing' : 'incoming',
+    status: cheque.status,
+    drawerName: String(cheque.drawerName || ''),
+    contactType: cheque.contactType === 'customer' || cheque.contactType === 'supplier' ? cheque.contactType : null,
+    contactId: cheque.contactId ? String(cheque.contactId) : null,
+    contactName: String(cheque.contactName || ''),
+    endorsedTo: String(cheque.endorsedTo || ''),
+    notes: String(cheque.notes || ''),
+    statusChangedAt: cheque.statusChangedAt ? String(cheque.statusChangedAt) : null,
+    createdAt: String(cheque.createdAt || new Date().toISOString()),
+  };
+}
+
+/**
+ * Writes a backup cheque through the same store the screen uses.
+ * Cloud inserts always start as pending (DB trigger); status is then advanced along allowed transitions.
+ * When the live row is already past what the backup can reach, the restore skips that cheque (like a closed shift).
+ */
+export async function restoreCheque(userId: string, raw: Cheque): Promise<void> {
+  if (!raw?.id) return;
+  const cheque = normalizeRestoredCheque(raw);
+  const input = asChequeInput(cheque);
+  if (validateChequeInput(input)) throw new ChequeStoreError('invalid');
+  if (cheque.status === 'endorsed' && !cheque.endorsedTo.trim()) throw new ChequeStoreError('invalid');
+
+  if ((await mode(userId)) === 'guest') {
+    const rows = readGuest();
+    const byId = rows.findIndex((row) => row.id === cheque.id);
+    const byKey = rows.findIndex((row) => row.id !== cheque.id && chequeKey(row) === chequeKey(cheque));
+    const live = byId >= 0 ? rows[byId] : byKey >= 0 ? rows[byKey] : null;
+    if (live) {
+      if (live.status === cheque.status) {
+        if (live.status !== 'pending') return;
+      } else {
+        const path = chequeRestorePath(cheque.type, live.status, cheque.status);
+        if (!path) throw new ChequeStoreError('cheque-already-final');
+      }
+    }
+    const next = [...rows];
+    if (byId >= 0) next[byId] = cheque;
+    else if (byKey >= 0) next[byKey] = cheque;
+    else next.push(cheque);
+    writeGuest(next);
+    return;
+  }
+
+  const client = getSupabaseClient()!;
+  const ownerId = await storeOwnerId(userId);
+
+  const { data: byIdRow, error: byIdErr } = await client.from('cheques').select(COLUMNS).eq('id', cheque.id).maybeSingle();
+  if (byIdErr) throw mapError(byIdErr);
+
+  let live: Cheque | null = byIdRow ? fromRow(byIdRow) : null;
+  if (!live) {
+    const { data: byKeyRows, error: byKeyErr } = await client
+      .from('cheques')
+      .select(COLUMNS)
+      .eq('type', cheque.type)
+      .eq('cheque_number', cheque.chequeNumber.trim());
+    if (byKeyErr) throw mapError(byKeyErr);
+    live = (byKeyRows || []).map(fromRow).find((row) => chequeKey(row) === chequeKey(cheque)) || null;
+  }
+
+  if (!live) {
+    const { data, error } = await client
+      .from('cheques')
+      .insert({
+        id: cheque.id,
+        ...toRow(input),
+        user_id: ownerId,
+        status: 'pending',
+      })
+      .select(COLUMNS)
+      .single();
+    if (error) throw mapError(error);
+    live = fromRow(data);
+  } else if (live.status === 'pending' && cheque.status === 'pending') {
+    // Refresh editable fields from the backup while still pending.
+    const { error } = await client
+      .from('cheques')
+      .update(toRow(input))
+      .eq('id', live.id)
+      .eq('status', 'pending');
+    if (error) throw mapError(error);
+  }
+
+  if (live.status === cheque.status) return;
+
+  const path = chequeRestorePath(cheque.type, live.status, cheque.status);
+  if (!path) {
+    // Live is already finalized in a way the backup cannot undo — keep it and continue.
+    throw new ChequeStoreError('cheque-already-final');
+  }
+
+  let current = live;
+  for (const next of path) {
+    current = await changeChequeStatus(
+      userId,
+      current,
+      next,
+      next === 'endorsed' ? cheque.endorsedTo : current.endorsedTo,
+      cheque.notes,
+    );
+  }
 }

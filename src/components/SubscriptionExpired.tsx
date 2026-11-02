@@ -3,7 +3,7 @@ import { Capacitor } from '@capacitor/core';
 import { Globe2, HelpCircle, Lock, LogOut, RotateCw, ShieldCheck, Smartphone, WifiOff } from 'lucide-react';
 import { toast } from 'sonner';
 import { sounds } from '../lib/sounds';
-import { initializeBilling, makePurchase } from '../services/billing';
+import { initializeBilling, makePurchase, PLAY_PREMIUM_PRODUCT_ID } from '../services/billing';
 import { activatePaidSubscription, restoreOwnedPurchases, syncPaidSubscription } from '../lib/activateSubscription';
 
 export type LockReason = 'trial' | 'paid' | 'unverified';
@@ -19,7 +19,7 @@ interface Props {
   member?: { storeName: string; ownerEmail: string; onLeave: () => Promise<void> } | null;
 }
 
-const PRODUCT_ID = 'mostawdaee_premium_100';
+const PRODUCT_ID = PLAY_PREMIUM_PRODUCT_ID;
 
 export default function SubscriptionExpired({ language, onLanguageToggle, reason, expiryDate, onRefresh, onLogout, member }: Props) {
   const isRtl = language === 'ar';
@@ -63,6 +63,7 @@ export default function SubscriptionExpired({ language, onLanguageToggle, reason
     setBusy('buy');
     initializeBilling(
       async (tx) => {
+        setBusy('buy');
         try {
           await activatePaidSubscription(tx);
           toast.success(isRtl ? 'تم تفعيل اشتراكك.' : 'Your subscription is active.');
@@ -84,6 +85,8 @@ export default function SubscriptionExpired({ language, onLanguageToggle, reason
       await makePurchase(PRODUCT_ID);
     } catch (err: any) {
       toast.error(err?.message || (isRtl ? 'تعذّر بدء الشراء' : 'Could not start the purchase'));
+    } finally {
+      // Google Play reports the approved purchase later; the screen must not stay locked if it never comes (cancelled or pending payment).
       setBusy(null);
     }
   };
@@ -196,7 +199,6 @@ export default function SubscriptionExpired({ language, onLanguageToggle, reason
           <button
             type="button"
             onClick={() => { sounds.playClick(); onLogout(); }}
-            disabled={busy !== null}
             className={secondary}
           >
             <LogOut size={13} />

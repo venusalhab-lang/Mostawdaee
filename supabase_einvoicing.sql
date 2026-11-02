@@ -1,5 +1,5 @@
 -- National e-invoicing (Jordan JoFotara). Run once in the Supabase SQL editor; safe to run again.
--- Run after supabase_production_setup.sql.
+-- Run after supabase_production_setup.sql (needs merchant_documents and workspace_owner).
 -- The linking credentials are written and read only by the server (service role); the app never sees the secret.
 -- Every submission is logged with the exact XML and the system's answer, which the law requires keeping.
 
@@ -126,6 +126,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON public.einvoice_settings, public.einvoic
 
 -- An invoice the tax system accepted (or is receiving right now) cannot be edited or deleted from the app;
 -- it is corrected with a return invoice. Removing the whole account (no signed-in user) is not blocked.
+-- The quantities already returned (returnedQty) are bookkeeping of the returns, not part of the declared invoice.
 CREATE OR REPLACE FUNCTION public.einvoice_lock_invoice()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -136,7 +137,7 @@ BEGIN
     IF auth.uid() IS NULL THEN
         RETURN COALESCE(NEW, OLD);
     END IF;
-    IF TG_OP = 'UPDATE' AND NEW.data IS NOT DISTINCT FROM OLD.data THEN
+    IF TG_OP = 'UPDATE' AND (NEW.data - 'returnedQty') IS NOT DISTINCT FROM (OLD.data - 'returnedQty') THEN
         RETURN NEW;
     END IF;
     IF EXISTS (

@@ -43,6 +43,12 @@ body, html {
   transition: background-color 0.3s ease, color 0.3s ease;
 }
 
+@media screen {
+  body {
+    padding-top: env(safe-area-inset-top);
+  }
+}
+
 /* تفعيل الوضع الداكن */
 :root.dark body, :root.dark html {
   background-color: #05060a; /* أسود عميق جداً مريح للعين */
@@ -1371,7 +1377,7 @@ body, html {
 
 /* تأثير الدخول الانسيابي للتبويب الفردي */
 .fade-in {
-  animation: fadeInEffect 0.4s ease forwards;
+  animation: fadeInEffect 0.4s ease backwards;
 }
 @keyframes fadeInEffect {
   from { opacity: 0; transform: translateY(10px); }
@@ -1425,10 +1431,10 @@ body, html {
 
 /* تأثير التلاشي والدخول الانسيابي الفائق عند التنقل بين الشاشات */
 .page-fade-in {
-  animation: smoothEntry 0.6s cubic-bezier(0.25, 1, 0.5, 1) forwards;
+  animation: smoothEntry 0.6s cubic-bezier(0.25, 1, 0.5, 1) backwards;
 }
 
-/* Ends at transform:none: a lingering transform would trap position:fixed children. */
+/* No forwards fill: a transform animation that stays applied traps position:fixed dialogs inside the page. */
 @keyframes smoothEntry {
   from { opacity: 0; transform: translateY(10px); }
   to { opacity: 1; transform: none; }

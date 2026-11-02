@@ -20,12 +20,28 @@ export function productsForCode<T extends Pick<Product, 'id' | 'sku'>>(products:
   return byId.length ? byId : products.filter((p) => sameSku(p.sku, c));
 }
 
-/** For a sale: the row that has stock (most first), so a sold-out warehouse doesn't block the scan. */
-export function pickForSale<T extends Pick<Product, 'quantity'>>(matches: T[]): T | undefined {
+/**
+ * For a sale: prefer the cashier's warehouse when set, else the original catalogue row if it has stock,
+ * else the stocked row with the most quantity (so an empty HQ does not block a stocked branch copy).
+ */
+export function pickForSale<T extends Pick<Product, 'quantity' | 'id' | 'warehouseId'>>(
+  matches: T[],
+  preferredWarehouseId?: string | null,
+): T | undefined {
   if (matches.length <= 1) return matches[0];
   const stocked = matches.filter((p) => (Number(p.quantity) || 0) > 0);
-  if (!stocked.length) return matches[0];
-  return stocked.reduce((best, p) => ((Number(p.quantity) || 0) > (Number(best.quantity) || 0) ? p : best));
+  const pool = stocked.length ? stocked : matches;
+  const most = (rows: T[]) =>
+    rows.reduce((best, p) => ((Number(p.quantity) || 0) > (Number(best.quantity) || 0) ? p : best));
+
+  if (preferredWarehouseId !== undefined && preferredWarehouseId !== null) {
+    const preferred = pool.filter((p) => (p.warehouseId || '') === (preferredWarehouseId || ''));
+    if (preferred.length) return most(preferred);
+  }
+
+  const original = pool.find((p) => !String(p.id).startsWith('PROD_SPLIT_'));
+  if (original && (Number(original.quantity) || 0) > 0) return original;
+  return most(pool);
 }
 
 /** For receiving stock: the original row, not a copy created by a transfer. */

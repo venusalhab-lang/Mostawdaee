@@ -1,4 +1,6 @@
 import type { InventoryAuditLine } from '../types';
+import { roundMoney } from './exchangeRates';
+import { roundQty as roundStockQty } from './stock';
 
 export type StocktakeMovement = 'عجز جرد' | 'زيادة جرد';
 
@@ -20,16 +22,16 @@ export interface AuditApplyLine {
 
 export function roundQty(value: number): number {
   if (!Number.isFinite(value)) return Number.NaN;
-  return Math.round(value * 1000) / 1000;
+  return roundStockQty(value);
 }
 
 export function auditDifference(expectedQty: number, actualQty: number): number {
   return roundQty(roundQty(actualQty) - roundQty(expectedQty));
 }
 
-export function auditVarianceValue(difference: number, unitCost: number): number {
+export function auditVarianceValue(difference: number, unitCost: number, currency = 'JOD'): number {
   if (!Number.isFinite(difference) || !Number.isFinite(unitCost)) return Number.NaN;
-  return Math.round(difference * unitCost * 1000) / 1000;
+  return roundMoney(difference * unitCost, currency);
 }
 
 export function stocktakeMovement(difference: number): StocktakeMovement | null {
@@ -64,11 +66,12 @@ export function planAuditApply(
       bookQty,
       difference,
       unitCost,
-      varianceValue: auditVarianceValue(difference, unitCost),
+      varianceValue: auditVarianceValue(difference, unitCost, line.currency),
       movement: stocktakeMovement(difference),
     };
 
-    if (!Number.isFinite(expectedQty) || expectedQty < 0 || !Number.isFinite(actualQty) || actualQty < 0 || !Number.isFinite(unitCost) || unitCost < 0) {
+    // The book may be below zero (sales taken offline); a count is how that gets corrected, so only the count must be >= 0.
+    if (!Number.isFinite(expectedQty) || !Number.isFinite(actualQty) || actualQty < 0 || !Number.isFinite(unitCost) || unitCost < 0) {
       return { ...base, action: 'unchanged' as const, block: 'INVALID_QTY' as const };
     }
     if (!Number.isFinite(bookQty)) {
@@ -84,6 +87,53 @@ export function planAuditApply(
   });
 
   return { ok: planned.length > 0 && planned.every((line) => !line.block), lines: planned };
+}
+
+/**
+ * Re-pins each line's book quantity to what is on the shelf now, keeping the counted qty.
+ * Use after STOCK_CHANGED so the merchant can re-apply without deleting lines.
+ */
+export function refreshExpectedFromBook(
+  lines: InventoryAuditLine[],
+  bookQtyByProduct: Record<string, number>,
+): InventoryAuditLine[] {
+  return lines.map((line) => {
+    const book = roundQty(bookQtyByProduct[line.productId] ?? Number.NaN);
+    if (!Number.isFinite(book)) return line;
+    return {
+      ...line,
+      expectedQty: book,
+      difference: auditDifference(book, line.actualQty),
+    };
+  });
+}
+
+/** True when the post-stock close step is acceptable (ok, offline, or schema not deployed). */
+export function stocktakeCloseAccepted(result: {
+  cloud: boolean;
+  reason?: 'no_session' | 'schema_missing' | 'failed';
+}): boolean {
+  return result.cloud || result.reason === 'schema_missing' || result.reason === 'no_session';
+}
+
+/**
+ * Claim-before-stock: only apply inventory when the cloud seal/claim succeeded,
+ * or when we are intentionally offline / missing the audits schema (local seal only).
+ * A hard cloud failure must not change stock.
+ */
+export function stocktakeClaimAllowsStock(result: {
+  cloud: boolean;
+  reason?: 'no_session' | 'schema_missing' | 'failed';
+}): boolean {
+  return stocktakeCloseAccepted(result);
+}
+
+/** Cloud seal already took the draft — stock apply runs after claim. */
+export function stocktakeClaimedOnServer(result: {
+  cloud: boolean;
+  reason?: 'no_session' | 'schema_missing' | 'failed';
+}): boolean {
+  return result.cloud === true;
 }
 
 /** Each scan of a known product adds one unit to the counted quantity. */

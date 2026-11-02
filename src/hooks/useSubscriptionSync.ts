@@ -12,6 +12,9 @@ export interface Subscription {
   expiry_date: string;
 }
 
+/** Brief grace only: after this, a failed verify locks the app (DB already rejects writes). */
+const SUBSCRIPTION_CACHE_MAX_AGE_MS = 15 * 60 * 1000;
+
 export function useSubscriptionSync(passedUser?: any, passedIsGuest?: boolean) {
   const { user: authUser, isGuest: authIsGuest } = useAuth();
   const supabaseUser = passedUser !== undefined ? passedUser : authUser;
@@ -21,7 +24,7 @@ export function useSubscriptionSync(passedUser?: any, passedIsGuest?: boolean) {
   const [profile, setProfile] = useState<any>(null);
   const [daysRemaining, setDaysRemaining] = useState<number>(0);
   const [hasOnboarded, setHasOnboarded] = useState<boolean>(true);
-  // True when the status could not be verified (slow/offline network) and nothing is cached
+  // True when the status could not be verified against the server on this attempt
   const [checkFailed, setCheckFailed] = useState<boolean>(false);
   const loadedUserRef = useRef<string | null>(null);
 
@@ -43,11 +46,16 @@ export function useSubscriptionSync(passedUser?: any, passedIsGuest?: boolean) {
     if (loadedUserRef.current !== userId) {
       try {
         const cached = JSON.parse(localStorage.getItem(cacheKey) || 'null');
-        if (cached?.subscription) {
+        const cachedAt = Number(cached?.cachedAt) || 0;
+        const freshEnough = cachedAt > 0 && Date.now() - cachedAt <= SUBSCRIPTION_CACHE_MAX_AGE_MS;
+        if (cached?.subscription && freshEnough) {
           setSubscription(cached.subscription);
           if (cached.profile) setProfile(cached.profile);
           setLoading(false);
         } else {
+          if (cached && !freshEnough) {
+            try { localStorage.removeItem(cacheKey); } catch { /* ignore */ }
+          }
           setLoading(true);
         }
       } catch {
@@ -96,7 +104,11 @@ export function useSubscriptionSync(passedUser?: any, passedIsGuest?: boolean) {
       if (data) {
         setSubscription(data);
         try {
-          localStorage.setItem(cacheKey, JSON.stringify({ subscription: data, profile: freshProfile }));
+          localStorage.setItem(cacheKey, JSON.stringify({
+            subscription: data,
+            profile: freshProfile,
+            cachedAt: Date.now(),
+          }));
         } catch { /* ignore */ }
         
         // Compute days remaining
@@ -109,9 +121,21 @@ export function useSubscriptionSync(passedUser?: any, passedIsGuest?: boolean) {
         setSubscription(null);
       }
     } catch (err) {
-      // A slow or offline network must NOT lock out a paying customer: keep the last known status.
-      console.warn("[SubscriptionSync] Could not verify subscription, keeping last known status:", err);
+      // Fail closed unless we already verified this session, or a short cache grace still applies.
+      console.warn("[SubscriptionSync] Could not verify subscription:", err);
       setCheckFailed(true);
+      const verifiedThisSession = loadedUserRef.current === userId;
+      if (!verifiedThisSession) {
+        let keepCache = false;
+        try {
+          const cached = JSON.parse(localStorage.getItem(cacheKey) || 'null');
+          const cachedAt = Number(cached?.cachedAt) || 0;
+          keepCache = !!(cached?.subscription && cachedAt > 0
+            && Date.now() - cachedAt <= SUBSCRIPTION_CACHE_MAX_AGE_MS);
+          if (!keepCache && cached) localStorage.removeItem(cacheKey);
+        } catch { /* ignore */ }
+        if (!keepCache) setSubscription(null);
+      }
     } finally {
       setLoading(false);
     }
@@ -136,9 +160,10 @@ export function useSubscriptionSync(passedUser?: any, passedIsGuest?: boolean) {
   const trialDaysLeft = isTrialActive ? access.daysRemaining : 0;
 
   const isSubscribed = isPremiumActive || isTrialActive;
-  // Fail closed: no verified window means no access. The lock screen tells "unverified" apart from "ended".
-  const isExpired = !isSubscribed;
-  const lockReason: 'trial' | 'paid' | 'unverified' = !subscription
+  // Fail closed: no window, or verify failed without a trusted grace row → lock.
+  // checkFailed with a still-valid in-session / short-cache row keeps work open; DB rejects unpaid writes.
+  const isExpired = !isSubscribed || (checkFailed && !subscription);
+  const lockReason: 'trial' | 'paid' | 'unverified' = !subscription || (checkFailed && !isSubscribed)
     ? 'unverified'
     : subscription.subscription_status === 'trial' ? 'trial' : 'paid';
 
@@ -149,6 +174,7 @@ export function useSubscriptionSync(passedUser?: any, passedIsGuest?: boolean) {
     isSubscribed,
     isExpired,
     lockReason,
+    checkFailed,
     isTrialActive,
     isPremiumActive,
     trialDaysLeft,

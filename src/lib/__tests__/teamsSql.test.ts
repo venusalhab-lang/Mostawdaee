@@ -251,6 +251,10 @@ describe('cashier writes', () => {
     ['add a customer', [set('customers', 'c2', { name: 'New' })]],
     ['pay a salary', [set('payroll', 'e1_2026-11', { amount: 1 })]],
     ['add a warehouse', [set('warehouses', 'w1', { name: 'W' })]],
+    ['add a supplier', [set('suppliers', 's1', { name: 'S', balances: {} })]],
+    ['pay a supplier', [set('supplier_transactions', 'st1', { type: 'payment', amount: 1 })]],
+    ['write a purchase order', [set('orders', 'po1', { kind: 'purchase_order', status: 'draft' })]],
+    ['write a quotation', [set('orders', 'qt1', { kind: 'quote', status: 'draft' })]],
   ])('cannot %s', async (_label, ops) => {
     await expect(commit(CASHIER, ops as Op[])).rejects.toThrow(/role not allowed/);
   });
@@ -264,6 +268,17 @@ describe('cashier writes', () => {
   it('a device cannot forge who created a record', async () => {
     await commit(CASHIER, [set('invoices', 'inv3', { type: 'sale', actorId: OWNER, actorEmail: 'owner@shop.com' })]);
     expect(await stored('invoices', 'inv3')).toMatchObject({ actorId: CASHIER, actorEmail: 'cashier@shop.com' });
+  });
+});
+
+describe('orders', () => {
+  it('a manager writes purchase orders and quotations, stamped with who wrote them', async () => {
+    await commit(MANAGER, [set('orders', 'po9', { kind: 'purchase_order', status: 'draft', actorId: OWNER })]);
+    expect(await stored('orders', 'po9')).toMatchObject({ kind: 'purchase_order', actorId: MANAGER, actorEmail: 'manager@shop.com' });
+    await commit(OWNER, [set('orders', 'po9', { kind: 'purchase_order', status: 'sent' })]);
+    expect(await stored('orders', 'po9')).toMatchObject({ status: 'sent', actorId: MANAGER });
+    await commit(MANAGER, [{ op: 'delete', collection: 'orders', id: 'po9' } as Op]);
+    expect(await stored('orders', 'po9')).toBeUndefined();
   });
 });
 
@@ -299,6 +314,14 @@ describe('manager writes', () => {
     await commit(MANAGER, [{ op: 'delete', collection: 'invoices', id: 'old1' }]);
     expect((await stored('inventory', 'p1')).sellingPrice).toBe(30);
     expect(await stored('invoices', 'old1')).toBeUndefined();
+  });
+
+  it('keeps supplier accounts and stamps who paid', async () => {
+    await commit(MANAGER, [
+      set('suppliers', 's1', { name: 'Noor', balances: { AED: 0 } }),
+      set('supplier_transactions', 'st1', { supplierId: 's1', type: 'payment', amount: 5, actorId: OWNER }),
+    ]);
+    expect(await stored('supplier_transactions', 'st1')).toMatchObject({ actorId: MANAGER, actorEmail: 'manager@shop.com' });
   });
 
   it('cannot touch salaries or the store profile', async () => {
@@ -351,6 +374,49 @@ describe('manager writes', () => {
     const raised = (await systemLogs()).length;
     await commit(MANAGER, [set('settings', 'vault', { balanceAED: Number((await stored('settings', 'vault')).balanceAED) + 5 }, true)]);
     expect(await systemLogs()).toHaveLength(raised);
+  });
+});
+
+describe('shifts', () => {
+  const open = { status: 'open', openedAt: 1000, currency: 'AED', openingFloat: 50 };
+  const close = { status: 'closed', closedAt: 2000, counted: { AED: 120 }, summary: [], closingNotes: 'ok' };
+
+  it('a cashier opens and closes their own shift, stamped with who did it', async () => {
+    await commit(CASHIER, [set('shifts', 'sh1', { ...open, actorId: OWNER, closedById: OWNER })]);
+    expect(await stored('shifts', 'sh1')).toMatchObject({ status: 'open', actorId: CASHIER, actorEmail: 'cashier@shop.com' });
+    expect((await stored('shifts', 'sh1')).closedById).toBeUndefined();
+
+    await commit(CASHIER, [set('shifts', 'sh1', { ...close, closedById: OWNER }, true)]);
+    expect(await stored('shifts', 'sh1')).toMatchObject({
+      status: 'closed', openingFloat: 50, actorId: CASHIER, closedById: CASHIER, closedByEmail: 'cashier@shop.com',
+    });
+  });
+
+  it.each([
+    ['open a shift already closed', [set('shifts', 'sh2', { ...open, ...close })]],
+    ['change the opening float', [set('shifts', 'sh1b', open), set('shifts', 'sh1b', { openingFloat: 0 }, true)]],
+    ['delete a shift', [{ op: 'delete', collection: 'shifts', id: 'sh-any' } as Op]],
+  ])('a cashier cannot %s', async (_label, ops) => {
+    await expect(commit(CASHIER, ops as Op[])).rejects.toThrow(/role not allowed/);
+  });
+
+  it('a cashier cannot close another person’s shift; a manager can', async () => {
+    await commit(OWNER, [set('shifts', 'sh3', open)]);
+    await expect(commit(CASHIER, [set('shifts', 'sh3', close, true)])).rejects.toThrow(/role not allowed/);
+    await commit(MANAGER, [set('shifts', 'sh3', close, true)]);
+    expect(await stored('shifts', 'sh3')).toMatchObject({ actorId: OWNER, closedById: MANAGER });
+  });
+
+  it('nobody edits or deletes a closed shift, not even the owner', async () => {
+    await expect(commit(OWNER, [set('shifts', 'sh1', { counted: { AED: 999 } }, true)])).rejects.toThrow(/shift is closed/);
+    await expect(commit(OWNER, [{ op: 'delete', collection: 'shifts', id: 'sh3' }])).rejects.toThrow(/shift is closed/);
+    expect((await stored('shifts', 'sh1')).counted).toEqual({ AED: 120 });
+  });
+
+  it('an open shift opened by mistake can be removed by a manager', async () => {
+    await commit(OWNER, [set('shifts', 'sh4', open)]);
+    await commit(MANAGER, [{ op: 'delete', collection: 'shifts', id: 'sh4' }]);
+    expect(await stored('shifts', 'sh4')).toBeUndefined();
   });
 });
 

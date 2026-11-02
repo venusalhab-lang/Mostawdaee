@@ -17,10 +17,6 @@ import {
   Tag,
   ShieldAlert,
   ArrowRightLeft,
-  Droplets,
-  Wrench,
-  Cpu,
-  Zap,
   Edit2,
   Trash2,
   Check,
@@ -28,8 +24,12 @@ import {
   Camera,
   Download,
   FileText,
-  Upload
+  Upload,
+  Barcode,
+  ClipboardCheck,
+  ChevronDown,
 } from 'lucide-react';
+import LabelPrintModal from './LabelPrintModal';
 import { Language, Product, StockStatus, ProductLog, AppSettings, Warehouse, Invoice } from '../types';
 import { translations } from '../translations';
 import { motion, AnimatePresence } from 'motion/react';
@@ -50,8 +50,17 @@ import { parseProductRows, ParsedProductRow } from '../lib/productImport';
 import { computeStockStatus, resolveLowStockThreshold, isExpiryCritical, isExpired } from '../lib/stock';
 import { formatPackStock, isValidPackSize, packFields, packIssues, suggestedPackPrice, unitPriceInPack, lineUnits, type PackIssue } from '../lib/packs';
 import { sameSku, skuOwner } from '../lib/productLookup';
-import { CURRENCY_SYMBOLS, buildUsdUnitRates, convertMoney, formatMoney, readCachedLiveRates, roundMoney, POS_CURRENCY_CODES } from '../lib/exchangeRates';
+import {
+  defaultProductCategory,
+  productHasAdvancedDetails,
+  resolveProductCategory,
+  resolveProductSku,
+} from '../lib/productForm';
+import { CURRENCY_SYMBOLS, buildUsdUnitRates, safeConvertMoney, formatMoney, readCachedLiveRates, roundMoney, POS_CURRENCY_CODES } from '../lib/exchangeRates';
 import CurrencyPicker from './CurrencyPicker';
+import { stockValueByCurrency } from '../lib/profits';
+import ProductVisualIcon from './ProductVisualIcon';
+import { productVisualTone } from '../lib/productVisual';
 
 const PRODUCT_FORMS = { one: 'منتج واحد', two: 'منتجين', few: '{n} منتجات', many: '{n} منتجاً', other: '{n} منتج' };
 
@@ -60,32 +69,14 @@ interface Props {
   products: Product[];
   settings?: AppSettings;
   onAddProduct: (p: Product, options?: { reason?: string }) => void | Promise<void>;
-  onUpdateProduct: (p: Product, options?: { reason?: string; baseQuantity?: number; baseProduct?: Product }) => void | Promise<void>;
+  onUpdateProduct: (p: Product, options?: {
+    reason?: string;
+    baseQuantity?: number;
+    baseProduct?: Product;
+    absoluteQuantity?: boolean;
+  }) => void | Promise<void>;
   onDeleteProduct: (id: string) => void | Promise<void>;
   transactions: Invoice[];
-}
-
-// Helper to determine the perfect Lucide React icon based on category/name
-function getProductIcon(category: string = '', name: string = '') {
-  const c = category.toLowerCase();
-  const n = name.toLowerCase();
-  
-  if (n.includes('زيت') || n.includes('oil') || n.includes('molygen') || c.includes('زيوت') || c.includes('oil') || c.includes('صيانة')) {
-    return <Droplets className="w-5 h-5 text-cyan-400 drop-shadow-[0_0_8px_rgba(34,211,238,0.5)]" />;
-  }
-  if (n.includes('كاوية') || n.includes('أداة') || n.includes('مفك') || c.includes('أدوات') || c.includes('tool') || c.includes('wrench') || c.includes('mechanic')) {
-    return <Wrench className="w-5 h-5 text-amber-400 drop-shadow-[0_0_8px_rgba(251,191,36,0.5)]" />;
-  }
-  if (n.includes('زينون') || n.includes('شريحة') || n.includes('وحدة') || c.includes('إلكترونيات') || c.includes('electronic') || c.includes('micro') || c.includes('cpu')) {
-    return <Cpu className="w-5 h-5 text-purple-400 drop-shadow-[0_0_8px_rgba(192,132,252,0.5)]" />;
-  }
-  if (n.includes('ملتيميتر') || n.includes('فحص') || n.includes('قياس') || c.includes('فحص') || c.includes('test') || c.includes('meter')) {
-    return <Zap className="w-5 h-5 text-emerald-400 drop-shadow-[0_0_8px_rgba(52,211,153,0.5)]" />;
-  }
-  if (c.includes('قطع') || c.includes('غيار') || c.includes('spares') || n.includes('فلتر') || n.includes('filter')) {
-    return <Boxes className="w-5 h-5 text-rose-400 drop-shadow-[0_0_8px_rgba(251,113,133,0.5)]" />;
-  }
-  return <Package className="w-5 h-5 text-slate-400" />;
 }
 
 const roundForExport = (v: number, cur: string) => roundMoney(Number(v) || 0, cur);
@@ -141,9 +132,8 @@ function ProductRow({
       {/* Product Details (المنتج) */}
       <td className="px-6 py-4.5 whitespace-nowrap">
         <div className="flex items-center gap-3">
-          {/* Floating glass-box icon */}
-          <div className="w-11 h-11 bg-slate-100/10 dark:bg-white/5 border border-slate-200/20 dark:border-white/10 rounded-xl flex items-center justify-center text-slate-400 group-hover:scale-105 group-hover:border-cyan-400/30 transition-all shadow-inner">
-            {getProductIcon(product.category, product.name)}
+          <div className={`w-11 h-11 border border-slate-200/20 dark:border-white/10 rounded-xl flex items-center justify-center group-hover:scale-105 group-hover:border-cyan-400/30 transition-all shadow-inner ${productVisualTone(product.category, product.name)}`}>
+            <ProductVisualIcon category={product.category} name={product.name} className="w-5 h-5" />
           </div>
           <div className="flex flex-col min-w-0">
             <span className="text-sm font-black text-slate-900 dark:text-slate-100 truncate group-hover:text-cyan-400 transition-colors max-w-[280px]">
@@ -373,6 +363,7 @@ export default function InventoryManagement({
   const [activeAuditTab, setActiveAuditTab] = useState<'costs' | 'movements'>('costs');
   const [showSuccessVisual, setShowSuccessVisual] = useState(false);
   const [contextMenuTarget, setContextMenuTarget] = useState<Product | null>(null);
+  const [labelProducts, setLabelProducts] = useState<Product[] | null>(null);
   const [logTarget, setLogTarget] = useState<Product | null>(null);
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
 
@@ -396,13 +387,25 @@ export default function InventoryManagement({
   const [newProduct, setNewProduct] = useState<Partial<Product>>(initialFormState);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const barcodeInputRef = useRef<HTMLInputElement>(null);
+  const nameInputRef = useRef<HTMLInputElement>(null);
   const [isCameraScannerOpen, setIsCameraScannerOpen] = useState(false);
+
+  const openCreateProduct = () => {
+    setEditingProduct(null);
+    setNewProduct({ ...initialFormState, category: defaultProductCategory(isRtl) });
+    setSellByPack(false);
+    setShowAdvanced(false);
+    setStockReason('');
+    setIsModalOpen(true);
+  };
 
   useEffect(() => {
     if (isModalOpen) {
       const timer = setTimeout(() => {
-        barcodeInputRef.current?.focus();
+        if (editingProduct) barcodeInputRef.current?.focus();
+        else nameInputRef.current?.focus();
       }, 150);
       setErrorMessage('');
       setIsSubmitting(false);
@@ -410,7 +413,7 @@ export default function InventoryManagement({
     } else {
       setIsCameraScannerOpen(false);
     }
-  }, [isModalOpen]);
+  }, [isModalOpen, editingProduct]);
 
   const handleViewProduct = (product: Product) => {
     setContextMenuTarget(product);
@@ -426,10 +429,7 @@ export default function InventoryManagement({
         handleViewProduct(intent.product);
         return;
       }
-      setEditingProduct(null);
-      setNewProduct(initialFormState);
-      setSellByPack(false);
-      setIsModalOpen(true);
+      openCreateProduct();
     };
 
     handleIntent();
@@ -469,9 +469,11 @@ export default function InventoryManagement({
   // Live/manual rates (same source the POS uses) so totals never add different currencies together.
   const baseCurrency = (settings?.currency || 'JOD') as string;
   const usdRates = useMemo(() => buildUsdUnitRates(settings as any, readCachedLiveRates()), [settings]);
-  const toBaseCurrency = (value: number, from?: string) => {
+  /** Null when FX cannot convert — callers must omit that amount from totals (never treat as 0 value). */
+  const toBaseCurrency = (value: number, from?: string): number | null => {
     const f = from || baseCurrency;
-    return f === baseCurrency ? Number(value) || 0 : Number(convertMoney(Number(value) || 0, f, baseCurrency, usdRates)) || 0;
+    if (f === baseCurrency) return Number(value) || 0;
+    return safeConvertMoney(Number(value) || 0, f, baseCurrency, usdRates);
   };
 
   // Filter & Sort Logic matching mockup selectors exactly
@@ -508,8 +510,11 @@ export default function InventoryManagement({
       let matchesPrice = true;
       if (minPrice !== '' || maxPrice !== '') {
         const priceInBase = toBaseCurrency(p.sellingPrice, p.currency);
-        if (minPrice !== '') matchesPrice = matchesPrice && priceInBase >= minPrice;
-        if (maxPrice !== '') matchesPrice = matchesPrice && priceInBase <= maxPrice;
+        if (priceInBase === null) matchesPrice = false;
+        else {
+          if (minPrice !== '') matchesPrice = matchesPrice && priceInBase >= minPrice;
+          if (maxPrice !== '') matchesPrice = matchesPrice && priceInBase <= maxPrice;
+        }
       }
 
       // 5. Advanced: Quantity Filter
@@ -577,11 +582,16 @@ export default function InventoryManagement({
   // Metrics
   const metrics = useMemo(() => {
     const totalItems = products.length;
-    const totalValue = products.reduce((acc, p) => acc + toBaseCurrency((Number(p.quantity) || 0) * (Number(p.unitCost) || 0), p.currency), 0);
+    // Items below zero (sold offline) hold no goods, so they add nothing instead of lowering the value.
+    const totalValue = Object.entries(stockValueByCurrency(products, settings?.currency || 'JOD'))
+      .reduce((acc, [code, value]) => {
+        const converted = toBaseCurrency(value, code);
+        return converted === null ? acc : acc + converted;
+      }, 0);
     const outOfStock = products.filter(p => (Number(p.quantity) || 0) <= 0).length;
     const lowStock = products.filter(p => computeStockStatus(p.quantity, p.lowStockThreshold, lowStockDefault) === 'Low Stock').length;
     return { totalItems, totalValue, outOfStock, lowStock };
-  }, [products, usdRates, baseCurrency, lowStockDefault]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [products, usdRates, baseCurrency, lowStockDefault, settings?.currency]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Dynamic Export Handlers for external accounting
   const statusText = (p: Product) => {
@@ -681,7 +691,10 @@ export default function InventoryManagement({
       });
 
       const currentDate = new Date().toLocaleString(isRtl ? 'ar-JO' : 'en-US');
-      const totalInventoryCost = filteredProducts.reduce((acc, p) => acc + toBaseCurrency((Number(p.quantity) || 0) * (Number(p.unitCost) || 0), p.currency), 0);
+      const totalInventoryCost = filteredProducts.reduce((acc, p) => {
+        const converted = toBaseCurrency((Number(p.quantity) || 0) * (Number(p.unitCost) || 0), p.currency);
+        return converted === null ? acc : acc + converted;
+      }, 0);
       const totalQty = filteredProducts.reduce((acc, p) => acc + (Number(p.quantity) || 0), 0);
 
       const reportHtml = `
@@ -780,7 +793,9 @@ export default function InventoryManagement({
     if (isSubmitting) return;
 
     const name = (newProduct.name || '').trim();
-    const sku = (newProduct.sku || '').trim();
+    const productId = editingProduct?.id || crypto.randomUUID();
+    const sku = resolveProductSku(newProduct.sku, productId);
+    const category = resolveProductCategory(newProduct.category, isRtl);
     const quantity = Number(newProduct.quantity ?? 0);
     const unitCost = Number(newProduct.unitCost ?? 0);
     const sellingPrice = Number(newProduct.sellingPrice ?? 0);
@@ -791,7 +806,8 @@ export default function InventoryManagement({
       toast.error(msg);
     };
 
-    if (!name || !sku) return fail('الرجاء تعبئة اسم المنتج والباركود', 'Please fill in the product name and SKU');
+    if (!name) return fail('الرجاء تعبئة اسم المنتج', 'Please enter the product name');
+    if (sellingPrice <= 0) return fail('سعر البيع يجب أن يكون أكبر من صفر', 'Selling price must be greater than zero');
     if (name.length > 200) return fail('اسم المنتج طويل جداً (الحد 200 حرف)', 'Product name is too long (max 200 chars)');
     if (sku.length > 64) return fail('الباركود طويل جداً (الحد 64 حرفاً)', 'SKU is too long (max 64 chars)');
     if (![quantity, unitCost, sellingPrice].every(Number.isFinite)) return fail('الرجاء إدخال أرقام صحيحة', 'Please enter valid numbers');
@@ -833,10 +849,10 @@ export default function InventoryManagement({
       const productToSave: Product = {
         // Keep fields this form does not edit (barcode, images, ...).
         ...(editingProduct || {}),
-        id: editingProduct?.id || crypto.randomUUID(),
+        id: productId,
         name,
         sku,
-        category: (newProduct.category || '').trim(),
+        category,
         brand: (newProduct.brand || '').trim(),
         quantity,
         unitCost,
@@ -873,6 +889,7 @@ export default function InventoryManagement({
       setEditingProduct(null);
       setNewProduct(initialFormState);
       setSellByPack(false);
+      setShowAdvanced(false);
       setStockReason('');
       
       setTimeout(() => {
@@ -899,12 +916,21 @@ export default function InventoryManagement({
         ...product,
         quantity: newQuantity,
         status: computeStockStatus(newQuantity, product.lowStockThreshold, lowStockDefault)
-      }, { reason: isRtl ? 'تعديل سريع من الجدول' : 'Quick adjust from table' });
+      }, {
+        reason: isRtl ? 'تعديل سريع من الجدول' : 'Quick adjust from table',
+        baseQuantity: current,
+        baseProduct: product,
+      });
       sounds.playPop();
       toast.info(`${product.name}: ${newQuantity} ${t.unitsPlural}`);
     } catch (err: any) {
       toast.error(err?.message || (isRtl ? 'تعذر تعديل الكمية' : 'Could not adjust quantity'));
     }
+  };
+
+  const openStocktake = () => {
+    sounds.playClick();
+    window.dispatchEvent(new CustomEvent('change-screen', { detail: 'inventory-audit' }));
   };
 
   const handleImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -990,7 +1016,15 @@ export default function InventoryManagement({
       try {
         const reason = isRtl ? 'استيراد من ملف' : 'Imported from file';
         if (job.create) await onAddProduct(job.p, { reason });
-        else await onUpdateProduct(job.p, { reason });
+        else {
+          const previous = products.find((p) => p.id === job.p.id);
+          await onUpdateProduct(job.p, {
+            reason,
+            baseQuantity: Number(previous?.quantity) || 0,
+            baseProduct: previous,
+            absoluteQuantity: true,
+          });
+        }
         ok++;
       } catch (err) {
         console.error('Import row failed', job.p.sku, err);
@@ -1042,10 +1076,12 @@ export default function InventoryManagement({
   };
 
   const handleEdit = (p: Product) => {
+    const packOn = isValidPackSize(p.packSize);
     setEditingProduct(p);
     setStockReason('');
     setNewProduct(p);
-    setSellByPack(isValidPackSize(p.packSize));
+    setSellByPack(packOn);
+    setShowAdvanced(productHasAdvancedDetails(p, packOn));
     setIsModalOpen(true);
   };
 
@@ -1055,17 +1091,17 @@ export default function InventoryManagement({
     (transactions || []).forEach((inv) => {
       (inv.items || []).forEach((item, idx) => {
         if (item.productId !== logTarget.id) return;
-        const isSale = inv.type === 'sale';
+        const isSale = inv.type === 'sale' || inv.type === 'purchase_return';
         logs.push({
           id: `${inv.id}-${idx}`,
           productId: item.productId,
-          action: isSale ? 'sale' : 'purchase',
+          action: inv.type,
           changeType: isSale ? 'decrement' : 'increment',
           quantityDelta: isSale ? -lineUnits(item) : lineUnits(item),
           previousValue: 0,
           newValue: 0,
           timestamp: inv.date,
-          userName: (isSale ? inv.customerName : inv.supplierName) || inv.invoiceNumber || '-'
+          userName: (inv.type === 'purchase' || inv.type === 'purchase_return' ? inv.supplierName : inv.customerName) || inv.invoiceNumber || '-'
         } as ProductLog);
       });
     });
@@ -1107,11 +1143,22 @@ export default function InventoryManagement({
         ]}
         actions={[
           { id: 'history', label: t.historyLog, icon: <History size={18}/>, onClick: () => { setLogTarget(contextMenuTarget); setActiveAuditTab('costs'); setIsLogOpen(true); setContextMenuTarget(null); } },
+          { id: 'labels', label: isRtl ? 'طباعة ملصق باركود' : 'Print barcode label', icon: <Barcode size={18}/>, onClick: () => { setLabelProducts([contextMenuTarget!]); setContextMenuTarget(null); } },
           { id: 'edit', label: t.editProduct, icon: <Edit2 size={18}/>, onClick: () => { handleEdit(contextMenuTarget!); setContextMenuTarget(null); } },
           { id: 'delete', label: t.delete, color: 'rose', icon: <Trash2 size={18}/>, onClick: () => { const id = contextMenuTarget!.id; setContextMenuTarget(null); handleDelete(id); } }
         ]}
       />
       
+      {labelProducts && (
+        <LabelPrintModal
+          products={labelProducts}
+          isRtl={isRtl}
+          defaultCurrency={baseCurrency}
+          businessName={settings?.businessName}
+          onClose={() => setLabelProducts(null)}
+        />
+      )}
+
       {/* Page Header (ترويسة الصفحة وزر الإضافة الرئيسي) */}
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border-b border-slate-200/40 dark:border-white/5 pb-5">
         <div className="space-y-1">
@@ -1127,12 +1174,7 @@ export default function InventoryManagement({
         </div>
         
         <TactileButton 
-          onClick={() => {
-            setEditingProduct(null);
-            setNewProduct(initialFormState);
-            setSellByPack(false);
-            setIsModalOpen(true);
-          }}
+          onClick={openCreateProduct}
           className="px-6 py-3 rounded-xl bg-cyan-400 text-black hover:bg-cyan-300 transition-all font-black text-xs flex items-center gap-2 shadow-[0_4px_15px_rgba(6,182,212,0.25)] hover:-translate-y-0.5"
         >
           <Plus size={15} strokeWidth={2.5} />
@@ -1253,6 +1295,15 @@ export default function InventoryManagement({
             />
             <button
               type="button"
+              onClick={openStocktake}
+              title={isRtl ? 'فتح الجرد والتسوية لتثبيت الكميات المعدودة' : 'Open stocktaking to set counted quantities'} aria-label={isRtl ? 'فتح الجرد والتسوية لتثبيت الكميات المعدودة' : 'Open stocktaking to set counted quantities'}
+              className="flex-1 md:flex-initial flex items-center justify-center gap-1.5 px-3.5 py-2.5 bg-slate-900/5 dark:bg-white/5 text-slate-800 dark:text-slate-100 border border-slate-300/50 dark:border-white/15 hover:border-slate-400 dark:hover:border-white/30 rounded-xl text-xs font-black tracking-tight transition-all cursor-pointer"
+            >
+              <ClipboardCheck size={14} />
+              <span>{isRtl ? 'الجرد' : 'Count'}</span>
+            </button>
+            <button
+              type="button"
               onClick={() => { sounds.playClick(); importInputRef.current?.click(); }}
               title={isRtl ? 'استيراد منتجات من ملف CSV أو Excel (نفس أعمدة ملف التصدير)' : 'Import products from CSV/Excel (same columns as the export)'} aria-label={isRtl ? 'استيراد منتجات من ملف CSV أو Excel (نفس أعمدة ملف التصدير)' : 'Import products from CSV/Excel (same columns as the export)'}
               className="flex-1 md:flex-initial flex items-center justify-center gap-1.5 px-3.5 py-2.5 bg-indigo-600/10 dark:bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border border-indigo-500/20 hover:border-indigo-500/50 rounded-xl text-xs font-black tracking-tight transition-all cursor-pointer"
@@ -1277,6 +1328,15 @@ export default function InventoryManagement({
             >
               <FileText size={14} />
               <span>{isRtl ? 'تقرير PDF' : 'PDF Report'}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => { sounds.playClick(); setLabelProducts(filteredProducts); }}
+              title={isRtl ? 'طباعة ملصقات باركود للأصناف المعروضة' : 'Print barcode labels for the listed products'} aria-label={isRtl ? 'طباعة ملصقات باركود للأصناف المعروضة' : 'Print barcode labels for the listed products'}
+              className="flex-1 md:flex-initial flex items-center justify-center gap-1.5 px-3.5 py-2.5 bg-slate-600/10 dark:bg-white/5 text-slate-700 dark:text-slate-200 border border-slate-500/20 hover:border-slate-500/50 rounded-xl text-xs font-black tracking-tight transition-all cursor-pointer"
+            >
+              <Barcode size={14} />
+              <span>{isRtl ? 'ملصقات' : 'Labels'}</span>
             </button>
           </div>
         </div>
@@ -1661,7 +1721,7 @@ export default function InventoryManagement({
                       <Plus size={20} strokeWidth={2.5} />
                     </div>
                     <h3 className="text-xl font-bold text-slate-800 dark:text-white flex items-center gap-2">
-                      {isRtl ? '✨ تسجيل منتج جديد' : t.addProduct}
+                      {isRtl ? 'تسجيل منتج جديد' : t.addProduct}
                     </h3>
                   </div>
                   <button 
@@ -1674,44 +1734,61 @@ export default function InventoryManagement({
                 </div>
               )}
               
-              {/* Modal Form */}
-              <form onSubmit={handleAddProduct} className="p-6 space-y-6 max-h-[75vh] overflow-y-auto custom-scrollbar">
-                
-                {/* 1. Barcode field styled premium with Scan Icon */}
+              {/* Modal Form — basic desk path first; advanced details stay collapsed */}
+              <form onSubmit={handleAddProduct} className="p-6 space-y-5 max-h-[75vh] overflow-y-auto custom-scrollbar">
+
+                {!editingProduct && (
+                  <p className="text-[11px] font-medium text-slate-500 dark:text-slate-400 leading-relaxed -mt-1">
+                    {isRtl
+                      ? 'للتسجيل السريع: الاسم وسعر البيع كافيان. الباركود يُولَّد تلقائياً إن تُرك فارغاً.'
+                      : 'For a fast entry: name and selling price are enough. An empty barcode gets an automatic SKU.'}
+                  </p>
+                )}
+
                 <div className="space-y-1.5">
-                  <label className="text-sm font-bold text-slate-700 dark:text-slate-300 flex items-center justify-between">
-                    <div className="flex items-center gap-2">
+                  <label className="text-sm font-bold text-slate-700 dark:text-slate-300">{isRtl ? 'اسم المنتج' : t.itemName}</label>
+                  <input
+                    ref={nameInputRef}
+                    required
+                    type="text"
+                    maxLength={200}
+                    value={newProduct.name || ''}
+                    onChange={e => setNewProduct({ ...newProduct, name: e.target.value })}
+                    placeholder={isRtl ? 'مثال: قهوة اسبريسو 1 كجم' : 'e.g. Espresso Coffee 1kg'}
+                    aria-label={isRtl ? 'اسم المنتج' : 'Product name'}
+                    className="w-full px-4 py-3 bg-white dark:bg-white/[0.02] border border-slate-200 dark:border-white/10 rounded-xl focus:border-blue-500 outline-none transition-all dark:text-white font-bold"
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-sm font-bold text-slate-700 dark:text-slate-300 flex items-center justify-between gap-2">
+                    <span className="flex items-center gap-2">
                       <Tag size={14} className="text-slate-400" />
-                      <span>{isRtl ? 'رمز الباركود / الـ SKU' : t.sku}</span>
-                    </div>
+                      <span>{isRtl ? 'الباركود / SKU' : t.sku}</span>
+                      <span className="text-[10px] font-semibold text-slate-400">{isRtl ? '(اختياري)' : '(optional)'}</span>
+                    </span>
                     <button
                       type="button"
                       onClick={() => {
                         sounds.playClick();
                         setIsCameraScannerOpen(!isCameraScannerOpen);
                       }}
-                      className="flex items-center gap-1.5 px-3 py-1 text-[11px] font-black bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 rounded-xl transition-all cursor-pointer select-none"
+                      className="flex items-center gap-1.5 px-3 py-1 text-[11px] font-bold bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700 rounded-lg transition-all cursor-pointer select-none"
                     >
                       <Camera size={13} className="shrink-0" />
-                      <span>{isRtl ? 'مسح بالكاميرا' : 'Scan with Camera'}</span>
+                      <span>{isRtl ? 'مسح' : 'Scan'}</span>
                     </button>
                   </label>
-                  <div className="relative">
-                    <input 
-                      ref={barcodeInputRef}
-                      required 
-                      type="text" 
-                      maxLength={64}
-                      value={newProduct.sku || ''}
-                      onChange={e => setNewProduct({...newProduct, sku: e.target.value})}
-                      placeholder={isRtl ? 'قم بمسح الباركود أو إدخاله يدوياً' : 'Scan barcode or enter manually'} aria-label={isRtl ? 'قم بمسح الباركود أو إدخاله يدوياً' : 'Scan barcode or enter manually'}
-                      className="w-full pl-4 pr-11 py-3 font-mono text-lg bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-xl focus:border-emerald-500 dark:focus:border-emerald-500 outline-none transition-all dark:text-white font-bold"
-                    />
-                    <svg className={`w-6 h-6 absolute ${isRtl ? 'right-3' : 'left-3'} top-1/2 -translate-y-1/2 text-slate-400`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm14 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z"></path>
-                    </svg>
-                  </div>
-
+                  <input
+                    ref={barcodeInputRef}
+                    type="text"
+                    maxLength={64}
+                    value={newProduct.sku || ''}
+                    onChange={e => setNewProduct({ ...newProduct, sku: e.target.value })}
+                    placeholder={isRtl ? 'امسح الباركود أو اتركه للتوليد التلقائي' : 'Scan barcode or leave blank to auto-generate'}
+                    aria-label={isRtl ? 'الباركود' : 'SKU'}
+                    className="w-full px-4 py-3 font-mono text-base bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-xl focus:border-emerald-500 outline-none transition-all dark:text-white font-bold"
+                  />
                   <AnimatePresence>
                     {isCameraScannerOpen && (
                       <motion.div
@@ -1732,43 +1809,16 @@ export default function InventoryManagement({
                   </AnimatePresence>
                 </div>
 
-                {/* 2. Product name and brand */}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-                  <div className="space-y-1.5">
-                    <label className="text-sm font-bold text-slate-700 dark:text-slate-300">{isRtl ? 'اسم المنتج' : t.itemName}</label>
-                    <input 
-                      required 
-                      type="text" 
-                      maxLength={200}
-                      value={newProduct.name || ''}
-                      onChange={e => setNewProduct({...newProduct, name: e.target.value})}
-                      placeholder={isRtl ? 'مثال: قهوة اسبريسو 1 كجم' : 'e.g. Espresso Coffee 1kg'} aria-label={isRtl ? 'مثال: قهوة اسبريسو 1 كجم' : 'e.g. Espresso Coffee 1kg'}
-                      className="w-full px-4 py-3 bg-white dark:bg-white/[0.02] border border-slate-200 dark:border-white/10 rounded-xl focus:border-blue-500 outline-none transition-all dark:text-white font-bold"
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <label className="text-sm font-bold text-slate-700 dark:text-slate-300">{isRtl ? 'العلامة التجارية' : t.brand}</label>
-                    <input 
-                      type="text" 
-                      value={newProduct.brand || ''}
-                      onChange={e => setNewProduct({...newProduct, brand: e.target.value})}
-                      placeholder={isRtl ? 'العلامة التجارية (اختياري)...' : 'Brand name (optional)...'} aria-label={isRtl ? 'العلامة التجارية (اختياري)...' : 'Brand name (optional)...'}
-                      className="w-full px-4 py-3 bg-white dark:bg-white/[0.02] border border-slate-200 dark:border-white/10 rounded-xl focus:border-blue-500 outline-none transition-all dark:text-white font-bold"
-                    />
-                  </div>
-                </div>
-                
-                {/* 3. Category, S/N, Expiry Date */}
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div className="space-y-1.5">
                     <label className="text-sm font-bold text-slate-700 dark:text-slate-300">{isRtl ? 'التصنيف' : t.category}</label>
-                    <input 
-                      required 
-                      type="text" 
+                    <input
+                      type="text"
                       list="categories-list"
                       value={newProduct.category || ''}
-                      onChange={e => setNewProduct({...newProduct, category: e.target.value})}
-                      placeholder={isRtl ? 'اختر أو اكتب تصنيف...' : 'Select or type...'} aria-label={isRtl ? 'اختر أو اكتب تصنيف...' : 'Select or type...'}
+                      onChange={e => setNewProduct({ ...newProduct, category: e.target.value })}
+                      placeholder={defaultProductCategory(isRtl)}
+                      aria-label={isRtl ? 'التصنيف' : 'Category'}
                       className="w-full px-4 py-3 bg-white dark:bg-white/[0.02] border border-slate-200 dark:border-white/10 rounded-xl focus:border-blue-500 outline-none transition-all dark:text-white font-bold"
                     />
                     <datalist id="categories-list">
@@ -1777,32 +1827,6 @@ export default function InventoryManagement({
                       ))}
                     </datalist>
                   </div>
-                  <div className="space-y-1.5">
-                    <label className="text-sm font-bold text-slate-700 dark:text-slate-300">{isRtl ? 'الرقم التسلسلي (S/N)' : t.serialNumber}</label>
-                    <input 
-                      type="text" 
-                      value={newProduct.serialNumber || ''}
-                      onChange={e => setNewProduct({...newProduct, serialNumber: e.target.value})}
-                      placeholder={isRtl ? 'الرقم التسلسلي...' : 'Serial number...'} aria-label={isRtl ? 'الرقم التسلسلي...' : 'Serial number...'}
-                      className="w-full px-4 py-3 bg-white dark:bg-white/[0.02] border border-slate-200 dark:border-white/10 rounded-xl focus:border-blue-500 outline-none transition-all dark:text-white font-bold"
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <label className="text-sm font-bold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
-                      <Calendar size={14} className="text-slate-400" />
-                      {isRtl ? 'تاريخ الصلاحية' : t.expiryDate}
-                    </label>
-                    <input 
-                      type="date" 
-                      value={newProduct.expiryDate ? new Date(newProduct.expiryDate).toISOString().split('T')[0] : ''}
-                      onChange={e => setNewProduct({...newProduct, expiryDate: e.target.value ? new Date(e.target.value).getTime() : undefined})}
-                      className="w-full px-4 py-3 bg-white dark:bg-white/[0.02] border border-slate-200 dark:border-white/10 rounded-xl focus:border-blue-500 outline-none transition-all dark:text-white font-bold"
-                    />
-                  </div>
-                </div>
-
-                {/* 4. Stock & Low Stock Threshold */}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
                   <div className="space-y-1.5">
                     <label className="text-sm font-bold text-slate-700 dark:text-slate-300">{isRtl ? 'الكمية المتوفرة' : t.stock}</label>
                     {sellByPack && isValidPackSize(newProduct.packSize) ? (() => {
@@ -1860,21 +1884,6 @@ export default function InventoryManagement({
                       </div>
                     )}
                   </div>
-                  
-                  <div className="space-y-1.5">
-                    <label className="text-sm font-bold text-slate-700 dark:text-slate-300">{isRtl ? 'حد نقص المخزون (الأمان)' : t.itemLowStockThreshold}</label>
-                    <div className="relative">
-                      <input 
-                        type="number" 
-                        min={0}
-                        placeholder={String(resolveLowStockThreshold(undefined, lowStockDefault))} aria-label={String(resolveLowStockThreshold(undefined, lowStockDefault))}
-                        value={newProduct.lowStockThreshold !== undefined ? newProduct.lowStockThreshold : ''}
-                        onChange={e => setNewProduct({...newProduct, lowStockThreshold: e.target.value ? Number(e.target.value) : undefined})}
-                        className="w-full px-4 py-3 bg-rose-500/[0.02] dark:bg-rose-500/[0.01] border border-rose-500/10 rounded-xl focus:border-rose-400 focus:ring-1 focus:ring-rose-500/15 outline-none dark:text-white font-bold text-sm"
-                      />
-                      <ShieldAlert className={`absolute top-1/2 -translate-y-1/2 ${isRtl ? 'left-4' : 'right-4'} text-rose-400/70`} size={16} />
-                    </div>
-                  </div>
                 </div>
 
                 {/* Reason for a manual quantity change (stored in the stock movement log) */}
@@ -1890,14 +1899,26 @@ export default function InventoryManagement({
                       maxLength={300}
                       value={stockReason}
                       onChange={e => setStockReason(e.target.value)}
-                      placeholder={isRtl ? 'مثال: جرد، تالف، هدية، تصحيح خطأ إدخال...' : 'e.g. stocktake, damaged, correction...'} aria-label={isRtl ? 'مثال: جرد، تالف، هدية، تصحيح خطأ إدخال...' : 'e.g. stocktake, damaged, correction...'}
+                      placeholder={isRtl ? 'مثال: تالف، هدية، تصحيح خطأ إدخال...' : 'e.g. damaged, gift, data correction...'} aria-label={isRtl ? 'سبب تغيير الكمية' : 'Reason for quantity change'}
                       className="w-full px-4 py-2.5 bg-white dark:bg-white/[0.02] border border-amber-500/30 rounded-xl outline-none text-sm font-bold dark:text-white"
                     />
+                    <p className="text-[11px] text-amber-800/80 dark:text-amber-300/80 font-medium leading-relaxed">
+                      {isRtl
+                        ? 'لتثبيت كمية معدودة من الجرد الفعلي استخدم شاشة الجرد والتسوية.'
+                        : 'To set a counted quantity from a physical count, use Stocktaking.'}
+                      {' '}
+                      <button
+                        type="button"
+                        onClick={openStocktake}
+                        className="underline font-bold text-amber-900 dark:text-amber-200 cursor-pointer bg-transparent p-0"
+                      >
+                        {isRtl ? 'فتح الجرد' : 'Open stocktaking'}
+                      </button>
+                    </p>
                   </div>
                 )}
 
-                {/* 5. Buying Cost and Selling Price */}
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 bg-slate-50 dark:bg-white/[0.01] p-5 rounded-2xl border border-slate-200 dark:border-white/5">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 bg-slate-50 dark:bg-white/[0.01] p-4 rounded-2xl border border-slate-200 dark:border-white/5">
                   <div className="space-y-1.5">
                     <label className="text-sm font-bold text-slate-700 dark:text-slate-300">
                       {isRtl ? 'عملة الصنف' : 'Product Currency'}
@@ -1913,36 +1934,143 @@ export default function InventoryManagement({
                     <label className="text-sm font-bold text-slate-700 dark:text-slate-300">
                       {isRtl ? 'سعر الشراء (التكلفة)' : t.unitCost}
                     </label>
-                    <input 
-                      required 
-                      type="number" 
+                    <input
+                      required
+                      type="number"
                       min={0}
                       step="any"
                       value={newProduct.unitCost !== undefined ? newProduct.unitCost : 0}
-                      onChange={e => setNewProduct({...newProduct, unitCost: Number(e.target.value)})}
+                      onChange={e => setNewProduct({ ...newProduct, unitCost: Number(e.target.value) })}
                       onFocus={e => e.target.select()}
                       className="w-full px-4 py-3 bg-white dark:bg-slate-900/60 border border-slate-200 dark:border-white/10 rounded-xl focus:border-blue-500 outline-none font-mono font-bold dark:text-white text-lg"
                     />
                   </div>
                   <div className="space-y-1.5">
                     <label className="text-sm font-bold text-slate-700 dark:text-slate-300">
-                      {isRtl ? 'سعر بيع القطعة للمستهلك' : t.sellPrice}
+                      {isRtl ? 'سعر البيع' : t.sellPrice}
                     </label>
-                    <input 
-                      required 
-                      type="number" 
+                    <input
+                      required
+                      type="number"
                       min={0}
                       step="any"
                       value={newProduct.sellingPrice !== undefined ? newProduct.sellingPrice : 0}
-                      onChange={e => setNewProduct({...newProduct, sellingPrice: Number(e.target.value)})}
+                      onChange={e => setNewProduct({ ...newProduct, sellingPrice: Number(e.target.value) })}
                       onFocus={e => e.target.select()}
                       className="w-full px-4 py-3 bg-white dark:bg-slate-900/60 border border-slate-200 dark:border-white/10 rounded-xl focus:border-blue-500 outline-none font-mono font-bold dark:text-white text-lg"
                     />
                   </div>
                 </div>
 
-                {/* Selling by the pack: stock stays in single units, a pack is N units at its own price */}
-                <div className="p-5 rounded-2xl border border-slate-200 dark:border-white/5 space-y-4">
+                {(() => {
+                  const costNum = Number(newProduct.unitCost) || 0;
+                  const priceNum = Number(newProduct.sellingPrice) || 0;
+                  const profitAmount = priceNum - costNum;
+                  const profitMargin = costNum > 0 ? ((profitAmount / costNum) * 100) : 0;
+                  const isLoss = profitAmount < 0;
+                  const isZero = costNum === 0 || priceNum === 0;
+                  const curSym = getCurrencySymbolByCode(newProduct.currency || settings?.currency || 'JOD');
+                  return (
+                    <div className={`px-4 py-3 rounded-xl border flex items-center justify-between gap-3 ${
+                      isZero
+                        ? 'bg-slate-50 dark:bg-white/[0.02] border-slate-200 dark:border-white/5'
+                        : isLoss
+                          ? 'bg-rose-50 dark:bg-rose-500/10 border-rose-200 dark:border-rose-500/20'
+                          : 'bg-emerald-50 dark:bg-emerald-500/10 border-emerald-200 dark:border-emerald-500/20'
+                    }`}>
+                      <span className={`text-xs font-bold ${isZero ? 'text-slate-500' : isLoss ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-700 dark:text-emerald-400'}`}>
+                        {isZero
+                          ? (isRtl ? 'هامش الربح' : 'Margin')
+                          : isLoss
+                            ? (isRtl ? 'تسعير بخسارة' : 'Priced at a loss')
+                            : (isRtl ? 'هامش الربح' : 'Margin')}
+                      </span>
+                      <span className={`text-sm font-black font-mono tabular-nums ${isZero ? 'text-slate-600 dark:text-slate-300' : isLoss ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600 dark:text-emerald-400'}`}>
+                        {profitAmount > 0 ? '+' : ''}{roundMoney(profitAmount, newProduct.currency || baseCurrency)} {curSym}
+                        {!isZero ? ` · ${profitMargin.toFixed(1)}%` : ''}
+                      </span>
+                    </div>
+                  );
+                })()}
+
+                <div className="rounded-2xl border border-slate-200 dark:border-white/10 overflow-hidden">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      sounds.playClick();
+                      setShowAdvanced((v) => !v);
+                    }}
+                    className="w-full px-4 py-3 flex items-center justify-between gap-3 bg-slate-50/80 dark:bg-slate-900/40 hover:bg-slate-100 dark:hover:bg-slate-800/50 transition-colors cursor-pointer"
+                    aria-expanded={showAdvanced}
+                  >
+                    <span className="text-start">
+                      <span className="block text-sm font-bold text-slate-800 dark:text-slate-100">
+                        {isRtl ? 'تفاصيل إضافية' : 'More details'}
+                      </span>
+                      <span className="block text-[11px] text-slate-500 dark:text-slate-400 font-medium mt-0.5">
+                        {isRtl
+                          ? 'علامة، صلاحية، عبوات، تكاليف، مستودع'
+                          : 'Brand, expiry, packs, landed cost, warehouse'}
+                      </span>
+                    </span>
+                    <ChevronDown className={`w-4 h-4 text-slate-400 shrink-0 transition-transform ${showAdvanced ? 'rotate-180' : ''}`} />
+                  </button>
+
+                  {showAdvanced && (
+                    <div className="p-4 space-y-5 border-t border-slate-200 dark:border-white/10">
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div className="space-y-1.5">
+                          <label className="text-sm font-bold text-slate-700 dark:text-slate-300">{isRtl ? 'العلامة التجارية' : t.brand}</label>
+                          <input
+                            type="text"
+                            value={newProduct.brand || ''}
+                            onChange={e => setNewProduct({ ...newProduct, brand: e.target.value })}
+                            placeholder={isRtl ? 'اختياري' : 'Optional'}
+                            aria-label={isRtl ? 'العلامة التجارية' : 'Brand'}
+                            className="w-full px-4 py-2.5 bg-white dark:bg-white/[0.02] border border-slate-200 dark:border-white/10 rounded-xl focus:border-blue-500 outline-none dark:text-white font-bold text-sm"
+                          />
+                        </div>
+                        <div className="space-y-1.5">
+                          <label className="text-sm font-bold text-slate-700 dark:text-slate-300">{isRtl ? 'الرقم التسلسلي (S/N)' : t.serialNumber}</label>
+                          <input
+                            type="text"
+                            value={newProduct.serialNumber || ''}
+                            onChange={e => setNewProduct({ ...newProduct, serialNumber: e.target.value })}
+                            placeholder={isRtl ? 'اختياري' : 'Optional'}
+                            aria-label={isRtl ? 'الرقم التسلسلي' : 'Serial number'}
+                            className="w-full px-4 py-2.5 bg-white dark:bg-white/[0.02] border border-slate-200 dark:border-white/10 rounded-xl focus:border-blue-500 outline-none dark:text-white font-bold text-sm"
+                          />
+                        </div>
+                        <div className="space-y-1.5">
+                          <label className="text-sm font-bold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
+                            <Calendar size={14} className="text-slate-400" />
+                            {isRtl ? 'تاريخ الصلاحية' : t.expiryDate}
+                          </label>
+                          <input
+                            type="date"
+                            value={newProduct.expiryDate ? new Date(newProduct.expiryDate).toISOString().split('T')[0] : ''}
+                            onChange={e => setNewProduct({ ...newProduct, expiryDate: e.target.value ? new Date(e.target.value).getTime() : undefined })}
+                            className="w-full px-4 py-2.5 bg-white dark:bg-white/[0.02] border border-slate-200 dark:border-white/10 rounded-xl focus:border-blue-500 outline-none dark:text-white font-bold text-sm"
+                          />
+                        </div>
+                        <div className="space-y-1.5">
+                          <label className="text-sm font-bold text-slate-700 dark:text-slate-300">{isRtl ? 'حد نقص المخزون' : t.itemLowStockThreshold}</label>
+                          <div className="relative">
+                            <input
+                              type="number"
+                              min={0}
+                              placeholder={String(resolveLowStockThreshold(undefined, lowStockDefault))}
+                              aria-label={isRtl ? 'حد نقص المخزون' : 'Low-stock threshold'}
+                              value={newProduct.lowStockThreshold !== undefined ? newProduct.lowStockThreshold : ''}
+                              onChange={e => setNewProduct({ ...newProduct, lowStockThreshold: e.target.value ? Number(e.target.value) : undefined })}
+                              className="w-full px-4 py-2.5 bg-white dark:bg-white/[0.02] border border-slate-200 dark:border-white/10 rounded-xl focus:border-rose-400 outline-none dark:text-white font-bold text-sm"
+                            />
+                            <ShieldAlert className={`absolute top-1/2 -translate-y-1/2 ${isRtl ? 'left-3' : 'right-3'} text-rose-400/70`} size={15} />
+                          </div>
+                        </div>
+                      </div>
+
+                <div className="p-4 rounded-2xl border border-slate-200 dark:border-white/5 space-y-4">
                   <label className="flex items-center justify-between gap-3 cursor-pointer">
                     <span className="flex flex-col">
                       <span className="text-sm font-bold text-slate-700 dark:text-slate-300">{isRtl ? 'يُباع أيضاً بالجملة (صندوق / كرتونة)' : 'Also sold by the pack (box / carton)'}</span>
@@ -2008,56 +2136,56 @@ export default function InventoryManagement({
                   })()}
                 </div>
 
-                {/* Optional Financial Cost Audit and breakdown config */}
-                <div className="bg-slate-500/[0.03] dark:bg-slate-500/[0.01] p-5 rounded-2xl border border-slate-200/50 dark:border-white/5 space-y-3">
+                <div className="bg-slate-500/[0.03] dark:bg-slate-500/[0.01] p-4 rounded-2xl border border-slate-200/50 dark:border-white/5 space-y-3">
                   <div className="flex flex-col">
-                    <span className="text-xs font-black uppercase text-indigo-600 dark:text-cyan-400">
-                      🧾 {isRtl ? 'تفصيل هيكلة وتكاليف الشراء والضرائب (اختياري للتدقيق المالي)' : 'Purchase Cost Breakdown & Taxes (Optional for Audit Log)'}
+                    <span className="text-xs font-bold text-slate-700 dark:text-slate-200">
+                      {isRtl ? 'تفصيل تكلفة الشراء (اختياري)' : 'Purchase cost breakdown (optional)'}
                     </span>
-                    <span className="text-[10px] text-slate-400 font-bold mt-0.5">
-                      {isRtl ? 'تساعدك هذه الحقول في توضيح سبب فروقات السعر والتدقيق المالي للقطع المستوردة والمحلية.' : 'These fields help analyze cost structure, currency translations, and import overheads.'}
+                    <span className="text-[10px] text-slate-400 font-medium mt-0.5">
+                      {isRtl ? 'للتدقيق على التكلفة المستوردة والضرائب والإضافات.' : 'For landed-cost audit: base, tax and extras.'}
                     </span>
                   </div>
 
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-3 pt-1">
                     <div className="space-y-1.5">
                       <label className="text-[11px] font-bold text-slate-600 dark:text-slate-300">
-                        {isRtl ? 'السعر الأصلي المستورد/الأساسي' : 'Base Original Cost'}
+                        {isRtl ? 'التكلفة الأساسية' : 'Base cost'}
                       </label>
-                      <input 
-                        type="number" 
-                        step="0.01" 
+                      <input
+                        type="number"
+                        step="0.01"
                         placeholder="0.00"
                         value={newProduct.baseCostPrice !== undefined ? newProduct.baseCostPrice : ''}
-                        onChange={e => setNewProduct({...newProduct, baseCostPrice: e.target.value ? Number(e.target.value) : undefined})}
+                        onChange={e => setNewProduct({ ...newProduct, baseCostPrice: e.target.value ? Number(e.target.value) : undefined })}
                         className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-white/10 rounded-xl focus:border-blue-500 outline-none font-mono font-bold text-sm dark:text-white"
                       />
                     </div>
 
                     <div className="space-y-1.5">
                       <label className="text-[11px] font-bold text-slate-600 dark:text-slate-300">
-                        {isRtl ? 'معدل الضرائب والجمارك %' : 'Taxes / Customs Duty %'}
+                        {isRtl ? 'ضرائب / جمارك %' : 'Tax / duty %'}
                       </label>
-                      <input 
-                        type="number" 
-                        step="0.1" 
-                        placeholder={String(settings?.defaultVatRate ?? 0)} aria-label={String(settings?.defaultVatRate ?? 0)}
+                      <input
+                        type="number"
+                        step="0.1"
+                        placeholder={String(settings?.defaultVatRate ?? 0)}
+                        aria-label={isRtl ? 'نسبة الضرائب' : 'Tax rate'}
                         value={newProduct.taxRate !== undefined ? newProduct.taxRate : ''}
-                        onChange={e => setNewProduct({...newProduct, taxRate: e.target.value ? Number(e.target.value) : undefined})}
+                        onChange={e => setNewProduct({ ...newProduct, taxRate: e.target.value ? Number(e.target.value) : undefined })}
                         className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-white/10 rounded-xl focus:border-blue-500 outline-none font-mono font-bold text-sm dark:text-white"
                       />
                     </div>
 
                     <div className="space-y-1.5">
                       <label className="text-[11px] font-bold text-slate-600 dark:text-slate-300">
-                        {isRtl ? 'تكاليف إضافية (شحن/تأمين)' : 'Additional Landed Cost'}
+                        {isRtl ? 'تكاليف إضافية' : 'Additional cost'}
                       </label>
-                      <input 
-                        type="number" 
-                        step="0.01" 
+                      <input
+                        type="number"
+                        step="0.01"
                         placeholder="0.00"
                         value={newProduct.additionalCosts !== undefined ? newProduct.additionalCosts : ''}
-                        onChange={e => setNewProduct({...newProduct, additionalCosts: e.target.value ? Number(e.target.value) : undefined})}
+                        onChange={e => setNewProduct({ ...newProduct, additionalCosts: e.target.value ? Number(e.target.value) : undefined })}
                         className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-white/10 rounded-xl focus:border-blue-500 outline-none font-mono font-bold text-sm dark:text-white"
                       />
                     </div>
@@ -2069,22 +2197,21 @@ export default function InventoryManagement({
                     const extra = Number(newProduct.additionalCosts) || 0;
                     const calculatedCost = base + (base * (tax / 100)) + extra;
                     const curr = newProduct.currency || settings?.currency || 'JOD';
-                    
+
                     if (base > 0) {
                       return (
-                        <div className="mt-2 text-xs bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 p-3 rounded-xl border border-indigo-500/20 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 font-arabic font-extrabold select-none">
+                        <div className="mt-2 text-xs bg-slate-100 dark:bg-slate-800/60 text-slate-700 dark:text-slate-200 p-3 rounded-xl border border-slate-200 dark:border-slate-700 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 font-bold select-none">
                           <span>
-                            {isRtl 
-                              ? `💡 الإجمالي المحتسب: \u2066${calculatedCost.toFixed(2)} ${curr}\u2069 (\u2066${base}\u2069 أصلي + \u2066${tax}%\u2069 ضرائب + \u2066${extra}\u2069 إضافيات)`
-                              : `💡 Total calculated: ${calculatedCost.toFixed(2)} ${curr} (${base} base + ${tax}% tax + ${extra} overheads)`
-                            }
+                            {isRtl
+                              ? `الإجمالي المحتسب: \u2066${calculatedCost.toFixed(2)} ${curr}\u2069`
+                              : `Calculated total: ${calculatedCost.toFixed(2)} ${curr}`}
                           </span>
                           <button
                             type="button"
                             onClick={() => setNewProduct(prev => ({ ...prev, unitCost: Number(calculatedCost.toFixed(4)) }))}
-                            className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold rounded-lg transition-colors cursor-pointer text-[10px]"
+                            className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 dark:bg-cyan-700 dark:hover:bg-cyan-600 text-white font-bold rounded-lg transition-colors cursor-pointer text-[10px]"
                           >
-                            {isRtl ? 'اعتماد كـ "سعر الشراء" 📥' : 'Apply as purchase cost 📥'}
+                            {isRtl ? 'اعتماد كسعر الشراء' : 'Apply as purchase cost'}
                           </button>
                         </div>
                       );
@@ -2093,18 +2220,17 @@ export default function InventoryManagement({
                   })()}
                 </div>
 
-                {/* Warehouse Location Assignment */}
                 <div className="space-y-1.5">
                   <label className="text-sm font-bold text-slate-700 dark:text-slate-300">
-                    {isRtl ? 'المستودع المخصص للبضاعة' : 'Allocated Warehouse'}
+                    {isRtl ? 'المستودع' : 'Warehouse'}
                   </label>
                   <select
                     value={newProduct.warehouseId || ''}
-                    onChange={e => setNewProduct({...newProduct, warehouseId: e.target.value})}
-                    className="w-full px-4 py-3 bg-white dark:bg-white/[0.02] border border-slate-200 dark:border-white/10 rounded-xl focus:border-blue-500 outline-none transition-all dark:text-white font-bold"
+                    onChange={e => setNewProduct({ ...newProduct, warehouseId: e.target.value })}
+                    className="w-full px-4 py-2.5 bg-white dark:bg-white/[0.02] border border-slate-200 dark:border-white/10 rounded-xl focus:border-blue-500 outline-none transition-all dark:text-white font-bold text-sm"
                   >
                     <option value="" className="text-slate-900 bg-white dark:bg-slate-900">
-                      {isRtl ? 'المقر الرئيسي (غير مخصص بمخزن)' : 'Headquarters (General Storage)'}
+                      {isRtl ? 'المقر الرئيسي' : 'Headquarters'}
                     </option>
                     {warehouses.map(wh => (
                       <option key={wh.id} value={wh.id} className="text-slate-900 bg-white dark:bg-slate-900">
@@ -2114,67 +2240,23 @@ export default function InventoryManagement({
                   </select>
                 </div>
 
-                {/* 6. Dynamic profitability analytics (بطاقة تحليل الربح اللحظية الشاحبة والتفاعلية) */}
-                {(() => {
-                  const costNum = Number(newProduct.unitCost) || 0;
-                  const priceNum = Number(newProduct.sellingPrice) || 0;
-                  const profitAmount = priceNum - costNum;
-                  const profitMargin = costNum > 0 ? ((profitAmount / costNum) * 100) : 0;
-                  const isLoss = profitAmount < 0;
-                  const isZero = costNum === 0 || priceNum === 0;
-
-                  const curSym = getCurrencySymbolByCode(newProduct.currency || settings?.currency || 'JOD');
-
-                  return (
-                    <div className={`p-5 rounded-2xl border transition-all duration-300 flex items-center justify-between
-                      ${isZero 
-                        ? 'bg-slate-50 dark:bg-white/[0.02] border-slate-200 dark:border-white/5 opacity-80' 
-                        : isLoss 
-                          ? 'bg-rose-50 dark:bg-rose-500/10 border-rose-200 dark:border-rose-500/20' 
-                          : 'bg-emerald-50 dark:bg-emerald-500/10 border-emerald-200 dark:border-emerald-500/20'}`}
-                    >
-                      <div className="flex flex-col">
-                        <span className={`text-sm font-bold ${isZero ? 'text-slate-500' : isLoss ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-700 dark:text-emerald-400'}`}>
-                          {isZero ? (isRtl ? 'مؤشر الربحية' : 'Profitability Index') : isLoss ? (isRtl ? '⚠️ تنبيه: تسعير بخسارة' : '⚠️ Warning: Pricing Loss') : (isRtl ? '📈 مؤشر الربحية' : '📈 Profitability Index')}
-                        </span>
-                        <span className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-                          {isRtl ? 'الربح الصافي للقطعة الواحدة بعد خصم التكاليف' : 'Net profit generated per item'}
-                        </span>
-                      </div>
-                      
-                      <div className="flex items-end gap-3 text-left">
-                        <div className="flex flex-col items-end">
-                          <span className={`text-2xl font-black font-mono ${isZero ? 'text-slate-600 dark:text-slate-300' : isLoss ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600 dark:text-emerald-400'}`}>
-                            {profitAmount > 0 ? '+' : ''}{roundMoney(profitAmount, newProduct.currency || baseCurrency)} {curSym}
-                          </span>
-                          {!isZero && (
-                            <span className={`text-xs font-bold font-mono px-2 py-0.5 rounded-md mt-1.5 ${isLoss ? 'bg-rose-100 text-rose-700 dark:bg-rose-500/20 dark:text-rose-400' : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-400'}`}>
-                              {isRtl ? 'الربح الـهامشي' : 'Margin'}: {profitMargin.toFixed(1)}%
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })()}
-
-                {/* عرض تمثيلي متقدم لتنبيه انتهاء الصلاحية الحرج */}
                 {newProduct.expiryDate && isExpiryCritical(newProduct.expiryDate) && (
-                  <div className="flex items-center gap-2.5 p-4 bg-amber-500/[0.08] dark:bg-amber-500/10 text-amber-800 dark:text-amber-300 text-xs rounded-2xl border border-amber-500/20 font-medium my-4">
-                    <AlertCircle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 animate-pulse" />
+                  <div className="flex items-center gap-2.5 p-3 bg-amber-500/[0.08] dark:bg-amber-500/10 text-amber-800 dark:text-amber-300 text-xs rounded-xl border border-amber-500/20 font-medium">
+                    <AlertCircle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
                     <span>
-                      {isRtl 
-                        ? 'تنبيه: تاريخ صلاحية هذا المنتج حرج (ينتهي خلال أقل من 6 أشهر). يرجى التأكد قبل التعديل أو التوزيع.' 
-                        : 'Warning: This product has a critical expiry date (expires in less than 6 months). Please double-check before editing or distributing.'}
+                      {isRtl
+                        ? 'تاريخ الصلاحية حرج (أقل من 6 أشهر). راجع قبل الحفظ.'
+                        : 'Expiry is critical (under 6 months). Review before saving.'}
                     </span>
                   </div>
                 )}
+                    </div>
+                  )}
+                </div>
 
-                {/* عرض رسالة الخطأ إن وجدت */}
                 {errorMessage && (
-                  <div className="p-3.5 rounded-xl bg-rose-50 dark:bg-rose-500/10 text-rose-600 dark:text-rose-400 text-sm font-bold border border-rose-200 dark:border-rose-500/20 flex items-center gap-2">
-                    <span>⚠️</span>
-                    <span>{errorMessage}</span>
+                  <div className="p-3.5 rounded-xl bg-rose-50 dark:bg-rose-500/10 text-rose-600 dark:text-rose-400 text-sm font-bold border border-rose-200 dark:border-rose-500/20">
+                    {errorMessage}
                   </div>
                 )}
 
@@ -2195,7 +2277,7 @@ export default function InventoryManagement({
                         className="flex items-center gap-2 px-5 py-2.5 bg-[#0b1329] text-cyan-400 border border-cyan-500/30 font-bold rounded-xl text-sm hover:bg-slate-800 dark:bg-white/5 dark:hover:bg-white/10 transition-all shadow-[0_0_15px_rgba(34,211,238,0.15)] cursor-pointer disabled:opacity-50"
                       >
                         <Check className="w-4 h-4 text-cyan-400" />
-                        <span>{isSubmitting ? (isRtl ? 'جارٍ الحفظ...' : 'Saving...') : (isRtl ? 'حفظ التعديلات الفورية' : 'Save Immediate Changes')}</span>
+                        <span>{isSubmitting ? (isRtl ? 'جارٍ الحفظ...' : 'Saving...') : (isRtl ? 'حفظ التعديلات' : 'Save changes')}</span>
                       </button>
                     </>
                   ) : (
@@ -2210,7 +2292,7 @@ export default function InventoryManagement({
                       </button>
                       <button 
                         type="submit"
-                        disabled={!newProduct.name || !newProduct.sku || !newProduct.sellingPrice || isSubmitting}
+                        disabled={!(newProduct.name || '').trim() || !(Number(newProduct.sellingPrice) > 0) || isSubmitting}
                         className="px-6 py-2.5 rounded-xl font-bold text-white bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 dark:disabled:bg-slate-700/50 disabled:text-slate-500 disabled:cursor-not-allowed transition-all shadow-lg shadow-blue-600/30 disabled:shadow-none cursor-pointer active:scale-95 flex items-center gap-2"
                       >
                         {isSubmitting ? (
@@ -2222,10 +2304,7 @@ export default function InventoryManagement({
                             <span>{isRtl ? 'جارٍ الحفظ...' : 'Saving...'}</span>
                           </>
                         ) : (
-                          <>
-                            <span>💾</span>
-                            <span>{isRtl ? 'حفظ المنتج' : 'Save Product'}</span>
-                          </>
+                          <span>{isRtl ? 'حفظ المنتج' : 'Save Product'}</span>
                         )}
                       </button>
                     </>
@@ -2331,7 +2410,7 @@ export default function InventoryManagement({
 
                     // Same live/manual rates as the POS (no hardcoded numbers)
                     const getConvertedPrice = (value: number, from: string, to: string) =>
-                      Number(convertMoney(value, from, to, usdRates)) || 0;
+                      safeConvertMoney(value, from, to, usdRates);
 
                     const moneyHere = (amount: number, code = baseCurrency) =>
                       formatMoney(amount, code, isRtl ? 'ar' : 'en-US');
@@ -2348,12 +2427,13 @@ export default function InventoryManagement({
                             </span>
                             {showIsEstimatedWarning && (
                               <span className="text-[9px] bg-amber-500/10 text-amber-500 px-2.5 py-0.5 rounded-full font-bold">
-                                {isRtl ? 'تقديري (بناءً على نسبة الضريبة الافتراضية)' : 'Estimated (Default VAT)'}
+                                {isRtl ? 'لم تُسجَّل تفاصيل التكلفة لهذا الصنف' : 'No cost breakdown recorded'}
                               </span>
                             )}
                           </div>
 
                           <div className="space-y-2.5 divide-y divide-slate-100 dark:divide-white/5 text-xs">
+                            {!showIsEstimatedWarning && (<>
                             <div className="flex justify-between items-center py-2">
                               <span className="text-slate-400 font-bold">{isRtl ? 'السعر الأصلي المستورد/الأساسي:' : 'Factory / Original Base Price:'}</span>
                               <span className="font-mono font-extrabold text-slate-800 dark:text-slate-200">
@@ -2376,6 +2456,7 @@ export default function InventoryManagement({
                                 + {moneyHere(parsedOverhead)}
                               </span>
                             </div>
+                            </>)}
 
                             <div className="flex justify-between items-center py-3 bg-indigo-500/[0.02] dark:bg-indigo-500/[0.01] px-2 rounded-xl border border-indigo-500/10">
                               <span className="text-indigo-600 dark:text-cyan-400 font-black">{isRtl ? 'تكلفة التخزين / سعر الشراء النهائي:' : 'Registered Landed Unit Cost:'}</span>
@@ -2443,8 +2524,8 @@ export default function InventoryManagement({
                             {POS_CURRENCY_CODES.map((code) => (
                               <div key={code} className="p-3 bg-slate-50 dark:bg-black/20 rounded-xl border border-slate-200/50 dark:border-white/5 text-center">
                                 <span className="text-[10px] text-slate-400 font-bold block font-mono">{code}</span>
-                                <p className="font-mono font-black text-xs text-slate-800 dark:text-slate-200 mt-1">{moneyHere(getConvertedPrice(registeredLanded, baseCurrency, code), code)}</p>
-                                <p className="font-mono text-[9px] text-emerald-500 font-black mt-0.5">{moneyHere(getConvertedPrice(consumerPrice, baseCurrency, code), code)}</p>
+                                <p className="font-mono font-black text-xs text-slate-800 dark:text-slate-200 mt-1">{(() => { const v = getConvertedPrice(registeredLanded, baseCurrency, code); return v === null ? '—' : moneyHere(v, code); })()}</p>
+                                <p className="font-mono text-[9px] text-emerald-500 font-black mt-0.5">{(() => { const v = getConvertedPrice(consumerPrice, baseCurrency, code); return v === null ? '—' : moneyHere(v, code); })()}</p>
                               </div>
                             ))}
                           </div>
@@ -2468,6 +2549,8 @@ export default function InventoryManagement({
                               <p className="font-black text-xs uppercase dark:text-white">
                                 {log.action === 'sale' ? t.sale
                                   : log.action === 'purchase' ? t.purchase
+                                  : log.action === 'return' ? (isRtl ? 'مرتجع مبيعات' : 'Sales return')
+                                  : log.action === 'purchase_return' ? (isRtl ? 'مرتجع مشتريات' : 'Purchase return')
                                   : log.action === 'create' ? (isRtl ? 'رصيد افتتاحي' : 'Opening stock')
                                   : (isRtl ? 'تعديل يدوي للكمية' : 'Manual adjustment')}
                               </p>

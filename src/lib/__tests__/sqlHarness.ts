@@ -21,11 +21,14 @@ CREATE FUNCTION auth.role() RETURNS TEXT LANGUAGE sql STABLE AS
 GRANT USAGE ON SCHEMA auth TO anon, authenticated, service_role;
 GRANT EXECUTE ON FUNCTION auth.uid(), auth.role() TO anon, authenticated, service_role;
 GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role;
-CREATE TABLE public.profiles (id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE);
-CREATE TABLE public.user_subscriptions (id BIGSERIAL PRIMARY KEY, user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE);
 `;
 
-export const SQL_FILES = ['supabase_production_setup.sql', 'supabase_cheques.sql', 'supabase_inventory_audit.sql'];
+export const SQL_FILES = [
+  'supabase_production_setup.sql',
+  'supabase_cheques.sql',
+  'supabase_inventory_audit.sql',
+  'supabase_einvoicing.sql',
+];
 
 export interface SqlHarness {
   db: PGlite;

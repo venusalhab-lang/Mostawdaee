@@ -98,16 +98,18 @@ export default function ProfitsDashboard({ language = 'en', currency = 'JOD', on
   const productProfitability = useMemo(() => {
     const aggregates = new Map<string, ProfitReportProduct>();
     for (const inv of periodInvoices) {
-      if (inv.type !== 'sale') continue;
+      if (inv.type !== 'sale' && inv.type !== 'return') continue;
+      const sign = inv.type === 'return' ? -1 : 1;
       const invCurrency = inv.currency || defaultCurrency;
       for (const { item, revenue, cost } of saleLineProfits(inv, productsById, exchangeRates, defaultCurrency)) {
         const product = productsById.get(item.productId);
         const name = product?.name || item.description || L('صنف محذوف', 'Deleted product');
         const key = product ? product.id : `name:${name}`;
         const entry = aggregates.get(key) || { name, qty: 0, revenue: 0, profit: 0, unknownCost: false };
-        const rev = convertAmount(revenue, invCurrency, selectedCurrency, exchangeRates);
-        const cst = convertAmount(cost ?? 0, invCurrency, selectedCurrency, exchangeRates);
-        entry.qty = roundQty(entry.qty + lineUnits(item));
+        const rev = sign * convertAmount(revenue, invCurrency, selectedCurrency, exchangeRates);
+        const cst = sign * convertAmount(cost ?? 0, invCurrency, selectedCurrency, exchangeRates);
+        if (!Number.isFinite(rev) || !Number.isFinite(cst)) continue;
+        entry.qty = roundQty(entry.qty + sign * lineUnits(item));
         entry.revenue += rev;
         entry.profit += rev - cst;
         if (cost === null) entry.unknownCost = true;
@@ -500,7 +502,7 @@ export default function ProfitsDashboard({ language = 'en', currency = 'JOD', on
                     </thead>
                     <tbody className="divide-y divide-slate-100 dark:divide-gray-700">
                       {shownRows.map((row) => {
-                        const sale = row.type === 'sale';
+                        const sale = row.type !== 'purchase';
                         return (
                           <tr key={row.id} className="hover:bg-slate-50/80 dark:hover:bg-gray-700/40">
                             <td className="py-3 px-4 text-slate-600 dark:text-gray-300 whitespace-nowrap">{formatDate(row.date)}</td>
@@ -509,8 +511,8 @@ export default function ProfitsDashboard({ language = 'en', currency = 'JOD', on
                               {row.party || (sale ? L('زبون نقدي', 'Walk-in customer') : '—')}
                             </td>
                             <td className="py-3 px-4 text-center">
-                              <span className={`inline-block px-2 py-0.5 rounded text-[11px] font-bold ${sale ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'}`}>
-                                {sale ? L('بيع', 'Sale') : L('شراء', 'Purchase')}
+                              <span className={`inline-block px-2 py-0.5 rounded text-[11px] font-bold ${row.type === 'sale' ? 'bg-emerald-100 text-emerald-800' : row.type === 'return' ? 'bg-rose-100 text-rose-800' : 'bg-amber-100 text-amber-800'}`}>
+                                {row.type === 'sale' ? L('بيع', 'Sale') : row.type === 'return' ? L('مرتجع', 'Return') : L('شراء', 'Purchase')}
                               </span>
                             </td>
                             <td className="py-3 px-4 text-end font-bold whitespace-nowrap">{showMoney(row.amount, row.currency)}</td>

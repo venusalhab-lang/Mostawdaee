@@ -17,10 +17,12 @@ Warehouse, point-of-sale and accounting app for small merchants. Web (PWA) and A
 
 1. `npm install`
 2. Copy `.env.example` to `.env` and fill in the values. Never commit `.env`.
-3. In the Supabase SQL editor, run in order:
-   1. `supabase_production_setup.sql`
-   2. `supabase_cheques.sql`
-   3. `supabase_inventory_audit.sql`
+3. In the Supabase SQL editor, run each file to completion (in order). Safe to re-run. Do **not** run anything under `supabase/archive/`.
+   1. `supabase_production_setup.sql` — profiles, subscriptions, sync store, teams, platform staff, AI usage
+   2. `supabase_cheques.sql` — cheques register
+   3. `supabase_inventory_audit.sql` — stocktakes
+   4. `supabase_einvoicing.sql` — JoFotara e-invoicing (required for `/api/einvoice/*`)
+   5. `supabase_zatca_phase1.sql` — Saudi ZATCA Phase 1 tax QR (optional; after einvoicing)
 
 ## Commands
 

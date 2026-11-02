@@ -1,5 +1,5 @@
 -- Cheques register. Run once in the Supabase SQL editor; safe to run again.
--- Run after supabase_production_setup.sql (writes require public.has_access()).
+-- Run after supabase_production_setup.sql (needs public.has_access / workspace_*).
 -- Each store sees only its own cheques; owners and managers work on them, cashiers do not. Status changes follow the same rules as src/lib/cheques.ts.
 
 BEGIN;
@@ -28,6 +28,51 @@ CREATE TABLE IF NOT EXISTS public.cheques (
     CONSTRAINT cheques_endorsed_needs_party CHECK (status <> 'endorsed' OR length(btrim(endorsed_to)) > 0),
     CONSTRAINT cheques_endorse_incoming_only CHECK (status <> 'endorsed' OR type = 'incoming')
 );
+
+-- CREATE TABLE IF NOT EXISTS keeps a legacy shape; add missing columns before indexes/policies.
+ALTER TABLE public.cheques ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE;
+ALTER TABLE public.cheques ADD COLUMN IF NOT EXISTS cheque_number TEXT;
+ALTER TABLE public.cheques ADD COLUMN IF NOT EXISTS bank_name TEXT;
+ALTER TABLE public.cheques ADD COLUMN IF NOT EXISTS amount NUMERIC(18, 3);
+ALTER TABLE public.cheques ADD COLUMN IF NOT EXISTS currency TEXT DEFAULT 'ILS';
+ALTER TABLE public.cheques ADD COLUMN IF NOT EXISTS due_date DATE;
+ALTER TABLE public.cheques ADD COLUMN IF NOT EXISTS type TEXT;
+ALTER TABLE public.cheques ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'pending';
+ALTER TABLE public.cheques ADD COLUMN IF NOT EXISTS drawer_name TEXT DEFAULT '';
+ALTER TABLE public.cheques ADD COLUMN IF NOT EXISTS contact_type TEXT;
+ALTER TABLE public.cheques ADD COLUMN IF NOT EXISTS contact_id TEXT;
+ALTER TABLE public.cheques ADD COLUMN IF NOT EXISTS contact_name TEXT DEFAULT '';
+ALTER TABLE public.cheques ADD COLUMN IF NOT EXISTS endorsed_to TEXT DEFAULT '';
+ALTER TABLE public.cheques ADD COLUMN IF NOT EXISTS notes TEXT DEFAULT '';
+ALTER TABLE public.cheques ADD COLUMN IF NOT EXISTS status_changed_at TIMESTAMPTZ;
+ALTER TABLE public.cheques ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT TIMEZONE('utc', NOW());
+ALTER TABLE public.cheques ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT TIMEZONE('utc', NOW());
+
+-- Legacy tables sometimes used owner_id instead of user_id.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = 'cheques' AND column_name = 'owner_id'
+    ) THEN
+        EXECUTE 'UPDATE public.cheques SET user_id = owner_id WHERE user_id IS NULL AND owner_id IS NOT NULL';
+    END IF;
+END $$;
+
+ALTER TABLE public.cheques ALTER COLUMN user_id SET DEFAULT auth.uid();
+
+DO $$
+DECLARE
+    orphans BIGINT;
+BEGIN
+    SELECT count(*) INTO orphans FROM public.cheques WHERE user_id IS NULL;
+    IF orphans > 0 THEN
+        RAISE EXCEPTION
+            'cheques has % row(s) with no user_id/owner_id — assign an owner or delete those rows, then re-run',
+            orphans;
+    END IF;
+    ALTER TABLE public.cheques ALTER COLUMN user_id SET NOT NULL;
+END $$;
 
 -- CREATE TABLE IF NOT EXISTS keeps an older currency list; replace it so new currencies are accepted.
 ALTER TABLE public.cheques DROP CONSTRAINT IF EXISTS cheques_currency_check;

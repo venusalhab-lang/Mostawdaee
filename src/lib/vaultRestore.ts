@@ -12,7 +12,7 @@ export async function restoreVaultBalance(db: unknown, uid: string, vault: objec
   });
 }
 
-/** Shown when a restore was refused, or kept the live vault, because the store is newer than the backup. */
+/** Shown when a restore was refused because the store (or vault) is newer than the backup. Nothing was written. */
 export function vaultRestoreMessage(error: { code?: string; newer?: number } | null | undefined, isRtl: boolean): string | null {
   if (error?.code === 'backup-older') {
     const when = error.newer ? new Date(error.newer).toLocaleString(isRtl ? 'ar' : 'en-US') : '';
@@ -21,7 +21,8 @@ export function vaultRestoreMessage(error: { code?: string; newer?: number } | n
       : `The backup was not restored: sales, payments or vault movements were recorded after it${when ? ` (latest ${when})` : ''}. Restoring it would bring back goods that were already sold. Nothing was changed.`;
   }
   if (error?.code !== 'vault-newer') return null;
+  const when = error.newer ? new Date(error.newer).toLocaleString(isRtl ? 'ar' : 'en-US') : '';
   return isRtl
-    ? 'أُعيدت البيانات التي سبقت الخزنة، وبقي رصيد الخزنة كما هو لأن حركات أحدث من هذه النسخة سُجّلت بعدها.'
-    : 'Earlier data was restored. The vault balance was kept because newer movements exist than this backup.';
+    ? `لم تُستعد النسخة: رصيد الخزنة الحالي أحدث من هذه النسخة${when ? ` (آخر تحديث ${when})` : ''}. لم يتغيّر شيء.`
+    : `The backup was not restored: the live vault is newer than this backup${when ? ` (last updated ${when})` : ''}. Nothing was changed.`;
 }

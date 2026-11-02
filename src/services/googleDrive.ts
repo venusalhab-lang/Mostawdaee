@@ -2,33 +2,52 @@
  * Helper client to interact with Google Drive API v3
  */
 
-let cachedAccessToken: string | null = (() => {
-  try {
-    return localStorage.getItem('mustawdae_drive_access_token') || null;
-  } catch (e) {
-    return null;
-  }
-})();
+import { DRIVE_BACKUP_QUERY } from '../lib/backupNames';
 
-export const setDriveAccessToken = (token: string) => {
-  cachedAccessToken = token;
+const TOKEN_KEY = 'mustawdae_drive_access_token';
+const EXPIRES_KEY = 'mustawdae_drive_access_expires';
+
+let cachedAccessToken: string | null = null;
+let cachedExpiresAt = 0;
+// sessionStorage only (tab lifetime): avoid durable localStorage for OAuth access tokens.
+try {
+  cachedAccessToken = sessionStorage.getItem(TOKEN_KEY) || null;
+  cachedExpiresAt = Number(sessionStorage.getItem(EXPIRES_KEY)) || 0;
+  try {
+    localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(EXPIRES_KEY);
+  } catch { /* ignore migration cleanup */ }
+} catch { /* storage unavailable */ }
+
+/** `expiresAt` is epoch ms; 0 means unknown, in which case Drive's 401 is what disconnects. */
+export const setDriveAccessToken = (token: string, expiresAt = 0) => {
+  cachedAccessToken = token || null;
+  cachedExpiresAt = token ? expiresAt : 0;
   try {
     if (token) {
-      localStorage.setItem('mustawdae_drive_access_token', token);
+      sessionStorage.setItem(TOKEN_KEY, token);
+      if (expiresAt) sessionStorage.setItem(EXPIRES_KEY, String(expiresAt));
+      else sessionStorage.removeItem(EXPIRES_KEY);
     } else {
-      localStorage.removeItem('mustawdae_drive_access_token');
+      sessionStorage.removeItem(TOKEN_KEY);
+      sessionStorage.removeItem(EXPIRES_KEY);
     }
+    try {
+      localStorage.removeItem(TOKEN_KEY);
+      localStorage.removeItem(EXPIRES_KEY);
+    } catch { /* ignore */ }
   } catch (e) {
     console.error('[GoogleDrive] Persistence set error:', e);
   }
 };
 
 export const getDriveAccessToken = (): string | null => {
+  if (cachedAccessToken && cachedExpiresAt && Date.now() >= cachedExpiresAt) setDriveAccessToken('');
   return cachedAccessToken;
 };
 
 export const hasDriveAccessToken = (): boolean => {
-  return !!cachedAccessToken;
+  return !!getDriveAccessToken();
 };
 
 export interface DriveFile {
@@ -45,8 +64,8 @@ export const listBackupFiles = async (): Promise<DriveFile[]> => {
     throw new Error('No Google Drive Access Token available. Please log in.');
   }
 
-  const q = encodeURIComponent("name contains 'mustawdae_' and trashed = false");
-  const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,mimeType,createdTime,size)&orderBy=createdTime desc`;
+  const q = encodeURIComponent(DRIVE_BACKUP_QUERY);
+  const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,mimeType,createdTime,size)&orderBy=createdTime desc&pageSize=100`;
 
   const response = await fetch(url, {
     method: 'GET',
@@ -58,6 +77,9 @@ export const listBackupFiles = async (): Promise<DriveFile[]> => {
   if (!response.ok) {
     const errText = await response.text();
     console.error('Google Drive List Error:', errText);
+    if (response.status === 401 || response.status === 403) {
+      setDriveAccessToken('');
+    }
     throw new Error(`Failed to list backup files: [${response.status}] ${response.statusText}`);
   }
 
@@ -102,6 +124,9 @@ export const uploadBackupFile = async (filename: string, content: string): Promi
   if (!response.ok) {
     const errText = await response.text();
     console.error('Google Drive Upload Error:', errText);
+    if (response.status === 401 || response.status === 403) {
+      setDriveAccessToken('');
+    }
     throw new Error(`Upload to Google Drive failed: [${response.status}] ${response.statusText}`);
   }
 
@@ -125,6 +150,9 @@ export const downloadBackupFile = async (fileId: string): Promise<any> => {
   if (!response.ok) {
     const errText = await response.text();
     console.error('Google Drive Download Error:', errText);
+    if (response.status === 401 || response.status === 403) {
+      setDriveAccessToken('');
+    }
     throw new Error(`Download from Google Drive failed: [${response.status}] ${response.statusText}`);
   }
 
@@ -148,6 +176,9 @@ export const deleteBackupFile = async (fileId: string): Promise<boolean> => {
   if (!response.ok) {
     const errText = await response.text();
     console.error('Google Drive Delete Error:', errText);
+    if (response.status === 401 || response.status === 403) {
+      setDriveAccessToken('');
+    }
     throw new Error(`Failed to delete backup file: [${response.status}] ${response.statusText}`);
   }
 

@@ -1,5 +1,5 @@
--- Inventory reconciliation (الجرد الفعلي والتسوية المخزنية)
--- Run after supabase_production_setup.sql (writes require public.has_access()).
+-- Inventory reconciliation (الجرد الفعلي والتسوية المخزنية). Safe to run again.
+-- Run after supabase_production_setup.sql (needs public.has_access / workspace_*).
 -- Product quantities live in merchant_documents and are changed by the app through merchant_commit.
 -- Applying an audit here only closes it, so the same count can never be applied twice.
 
@@ -101,11 +101,14 @@ CREATE TABLE IF NOT EXISTS public.inventory_audit_items (
     actual_qty NUMERIC NOT NULL,
     difference NUMERIC GENERATED ALWAYS AS (actual_qty - expected_qty) STORED,
     unit_cost NUMERIC NOT NULL DEFAULT 0,
-    CONSTRAINT inventory_audit_items_expected_chk CHECK (expected_qty >= 0),
+    -- expected_qty may be negative when offline sales oversold the book; the count (actual) must still be >= 0.
     CONSTRAINT inventory_audit_items_actual_chk CHECK (actual_qty >= 0),
     CONSTRAINT inventory_audit_items_cost_chk CHECK (unit_cost >= 0),
     CONSTRAINT inventory_audit_items_product_uniq UNIQUE (audit_id, product_id)
 );
+
+-- Existing projects created with expected_qty >= 0: drop that check so a negative book can be reconciled.
+ALTER TABLE public.inventory_audit_items DROP CONSTRAINT IF EXISTS inventory_audit_items_expected_chk;
 
 CREATE INDEX IF NOT EXISTS inventory_audit_items_audit_idx
     ON public.inventory_audit_items (audit_id);
@@ -168,9 +171,8 @@ EXCEPTION
 END $$;
 
 -- ---------------------------------------------------------
--- Apply: close the stocktake. The app has already set each product to its counted
--- quantity through merchant_commit (one stock movement per line); this records that
--- the count is final so it can never be resumed or applied a second time.
+-- Apply / claim: close the stocktake first so a second device cannot apply the same
+-- draft. The app then sets each product to its counted quantity through merchant_commit.
 -- ---------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.apply_inventory_audit(p_audit_id UUID)
 RETURNS JSONB

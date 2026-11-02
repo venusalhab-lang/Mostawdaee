@@ -14,9 +14,19 @@ describe('productLookup', () => {
     expect(productsForCode(rows, '')).toEqual([]);
   });
 
-  it('sells from the row that has stock', () => {
+  it('sells from the row that has stock when the original is empty', () => {
     expect(pickForSale(productsForCode(rows, 'ABC'))?.id).toBe('PROD_SPLIT_1');
-    expect(pickForSale([{ quantity: 0 }, { quantity: -1 }])).toEqual({ quantity: 0 });
+    expect(pickForSale([{ id: 'a', quantity: 0, warehouseId: '' }, { id: 'b', quantity: -1, warehouseId: '' }])?.id).toBe('a');
+  });
+
+  it('prefers the preferred warehouse, else the original catalogue row when it has stock', () => {
+    const multi = [
+      { id: 'p1', sku: 'ABC', quantity: 3, warehouseId: 'w1' },
+      { id: 'PROD_SPLIT_1', sku: 'ABC', quantity: 9, warehouseId: 'w2' },
+    ];
+    expect(pickForSale(multi, 'w1')?.id).toBe('p1');
+    expect(pickForSale(multi, 'w2')?.id).toBe('PROD_SPLIT_1');
+    expect(pickForSale(multi)?.id).toBe('p1');
   });
 
   it('receives stock on the original row', () => {

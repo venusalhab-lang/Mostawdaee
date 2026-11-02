@@ -21,7 +21,7 @@ export interface StockReversal {
   shortages: Array<{ name: string; available: number; needed: number }>;
 }
 
-/** Stock changes that undo an invoice: a sale returns goods to stock, a purchase removes them. */
+/** Stock changes that undo an invoice: a sale or a purchase return puts goods back, a purchase or a sales return removes them. */
 export function planStockReversal(
   invoice: Pick<Invoice, 'type' | 'items'>,
   current: Map<string, { quantity?: number; name?: string } | undefined>,
@@ -34,11 +34,12 @@ export function planStockReversal(
       continue;
     }
     const available = roundQty(Number(product.quantity) || 0);
-    if (invoice.type === 'purchase' && available < qty) {
+    const addsBack = invoice.type === 'sale' || invoice.type === 'purchase_return';
+    if (!addsBack && available < qty) {
       result.shortages.push({ name: product.name || description || productId, available, needed: qty });
       continue;
     }
-    result.updates.push({ productId, quantity: roundQty(invoice.type === 'sale' ? available + qty : available - qty) });
+    result.updates.push({ productId, quantity: roundQty(addsBack ? available + qty : available - qty) });
   }
   return result;
 }

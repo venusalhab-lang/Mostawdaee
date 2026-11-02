@@ -1,4 +1,5 @@
 import type { InvoiceItem, Product } from '../types';
+import { roundMoney } from './exchangeRates';
 import { roundQty } from './stock';
 import { sameSku } from './productLookup';
 
@@ -18,7 +19,8 @@ export interface ProductPack {
   barcode?: string;
 }
 
-const money = (n: number) => Math.round(n * 1000) / 1000;
+/** Pack prices are stored with the product; use JOD's 3 decimals as a safe max for POS currencies. */
+const money = (n: number) => roundMoney(n, 'JOD');
 
 export function isValidPackSize(size: unknown): size is number {
   const n = Number(size);

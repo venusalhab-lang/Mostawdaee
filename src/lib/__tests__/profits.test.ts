@@ -54,6 +54,24 @@ describe('profits', () => {
     expect(t.saleCount).toBe(1);
   });
 
+  it('skips invoices in currencies that cannot convert, instead of NaN-ing the dashboard', () => {
+    const exotic = sale({ id: 'x1', currency: 'EUR' as any, totalAmount: 50, subtotal: 50 });
+    const t = summarizeProfits([sale({}), exotic], [product({})], rates, 'JOD', 'JOD');
+    expect(Number.isFinite(t.revenue)).toBe(true);
+    expect(t.revenue).toBe(6);
+    expect(t.saleCount).toBe(2);
+  });
+
+  it('takes a return back out of revenue and cost without counting it as a sale', () => {
+    const ret = sale({ id: 'r1', type: 'return', items: [{ productId: 'p1', description: 'شاي', quantity: 1, unitPrice: 3, total: 3, unitCost: 2 }],
+      subtotal: 3, totalAmount: 3 });
+    const t = summarizeProfits([sale({}), ret], [product({})], rates, 'JOD', 'JOD');
+    expect(t.revenue).toBe(3);
+    expect(t.cost).toBe(2);
+    expect(t.profit).toBe(1);
+    expect(t.saleCount).toBe(1);
+  });
+
   it('snapshots the current product cost onto new sale lines', () => {
     const byId = new Map([['p1', product({ unitCost: 2.5, currency: 'USD' })]]);
     const [line] = snapshotLineCosts(sale({}).items, byId, 'JOD');
@@ -93,8 +111,9 @@ describe('weightedAverageCost', () => {
     expect(weightedAverageCost({ ...product, quantity: -3 }, 4, 10, 'JOD', 'JOD')).toBe(2.5);
   });
 
-  it('refuses to mix currencies', () => {
+  it('refuses to mix currencies into an existing cost basis, but lets empty stock adopt the purchase', () => {
     expect(weightedAverageCost(product, 10, 40, 'USD', 'JOD')).toBeNull();
+    expect(weightedAverageCost({ ...product, quantity: 0 }, 10, 40, 'USD', 'JOD')).toBe(4);
     expect(weightedAverageCost({ ...product, currency: undefined }, 10, 40, 'USD', 'USD')).toBe(3);
   });
 

@@ -4,7 +4,7 @@ import { FileText, Trash2, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { useFirebase } from './FirebaseProvider';
 import { isVerifiedAdmin } from '../lib/adminAccess';
-import { pendingSalesBlockSwitch } from '../lib/storeSwitch';
+import { deviceLocalWorkMessage, pendingSalesBlockSwitch } from '../lib/storeSwitch';
 import { AccountDeletionError, accountDeletionMessage, confirmationMatches, deleteMyAccount } from '../lib/accountDeletion';
 import { SUPPORT_EMAIL, privacyPolicy } from '../lib/privacyPolicy';
 import PrivacyPolicyBody from './PrivacyPolicyBody';
@@ -29,8 +29,11 @@ export default function AccountSettings({ language }: { language: 'ar' | 'en' })
 
   const handleDelete = async () => {
     if (!user || !confirmationMatches(typed, user.email)) return;
-    if (pendingSalesBlockSwitch(user.uid) > 0) {
-      toast.error(accountDeletionMessage(new AccountDeletionError('pending_offline'), ar));
+    const blocked = deviceLocalWorkMessage(user.uid, ar);
+    if (blocked) {
+      toast.error(pendingSalesBlockSwitch(user.uid) > 0
+        ? accountDeletionMessage(new AccountDeletionError('pending_offline'), ar)
+        : blocked);
       return;
     }
     setDeleting(true);

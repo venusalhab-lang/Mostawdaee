@@ -424,17 +424,21 @@ export interface JoFotaraFromInvoiceOptions {
   uuid: string;
   icv: number;
   buyer?: JoFotaraBuyer;
+  /** Returns only: the original sale as JoFotara accepted it (its number, UUID and declared total). */
+  original?: { number: string; uuid: string; total: number };
 }
 
 export type JoFotaraFromInvoice = { ok: true; doc: JoFotaraDocument } | { ok: false; issues: JoFotaraIssue[] };
 
 /**
- * Turns a saved sale into the document sent to JoFotara. Refuses rather than guessing:
- * the amount sent must be the amount the customer was charged.
+ * Turns a saved sale, or a sales return as a credit note, into the document sent to JoFotara. Refuses rather than guessing:
+ * the amount sent must be the amount the customer was charged or refunded.
  */
 export function joFotaraFromInvoice(inv: Invoice, opts: JoFotaraFromInvoiceOptions): JoFotaraFromInvoice {
-  if (inv.type !== 'sale') return { ok: false, issues: [{ code: 'not_sale' }] };
+  if (inv.type !== 'sale' && inv.type !== 'return') return { ok: false, issues: [{ code: 'not_sale' }] };
   if (inv.currency !== 'JOD') return { ok: false, issues: [{ code: 'currency' }] };
+  const credit = inv.type === 'return';
+  if (credit && !opts.original) return { ok: false, issues: [{ code: 'original' }] };
 
   const items = Array.isArray(inv.items) ? inv.items : [];
   const broken = items.findIndex((item) => !item || typeof item !== 'object' || typeof item.description !== 'string');
@@ -446,7 +450,7 @@ export function joFotaraFromInvoice(inv: Invoice, opts: JoFotaraFromInvoiceOptio
   if (income && taxCharged) return { ok: false, issues: [{ code: 'income_has_tax' }] };
 
   const doc: JoFotaraDocument = {
-    kind: 'invoice',
+    kind: credit ? 'credit' : 'invoice',
     number: inv.invoiceNumber,
     uuid: opts.uuid,
     icv: opts.icv,
@@ -459,20 +463,21 @@ export function joFotaraFromInvoice(inv: Invoice, opts: JoFotaraFromInvoiceOptio
       phone: joFotaraPhone(opts.buyer?.phone),
     },
     lines: items.map((item, i) => ({
-      id: i + 1,
+      // A credit note line carries the line number it had on the original sale.
+      id: credit ? Number(item.sourceLine) + 1 : i + 1,
       name: isPackLine(item) ? `${item.description} - ${item.packName?.trim() || 'pack'} × ${item.packSize}` : item.description,
       quantity: Number(item.quantity) || 0,
       unitPrice: Number(item.unitPrice) || 0,
       discount: discounts[i],
     })),
     taxRate: income ? 0 : storedRate(inv),
+    ...(credit ? { original: opts.original, returnReason: inv.returnReason || '' } : {}),
   };
 
   const built = buildJoFotaraXml(doc);
   if (built.ok === false) return { ok: false, issues: built.issues };
-  // Line totals and tax were rounded per line when the sale was saved; anything beyond that is a real mismatch.
-  const tolerance = 0.001 + 0.0006 * items.length;
-  if (Math.abs(Number(built.totals.payable) - (Number(inv.totalAmount) || 0)) > tolerance) {
+  // JoFotara is always JOD (fils = 0.001). Do not grow tolerance with line count — that hid payable ≠ charged total.
+  if (Math.abs(Number(built.totals.payable) - (Number(inv.totalAmount) || 0)) > 0.001 + 1e-9) {
     return { ok: false, issues: [{ code: 'totals_mismatch' }] };
   }
   return { ok: true, doc };
@@ -564,7 +569,7 @@ const ISSUE_TEXT: Record<JoFotaraIssueCode, [string, string]> = {
   buyer_phone: ['هاتف المشتري يجب أن يكون من 9 إلى 14 رقماً.', 'The buyer phone must be 9 to 14 digits.'],
   original: ['بيانات الفاتورة الأصلية للإرجاع ناقصة.', 'The original invoice reference is incomplete.'],
   return_reason: ['سبب الإرجاع مطلوب.', 'A return reason is required.'],
-  not_sale: ['فواتير المبيعات فقط تُرسل إلى الفوترة الوطنية.', 'Only sale invoices are sent to JoFotara.'],
+  not_sale: ['فواتير المبيعات ومرتجعاتها فقط تُرسل إلى الفوترة الوطنية.', 'Only sale invoices and their returns are sent to JoFotara.'],
   currency: ['الفوترة الوطنية تقبل الفواتير بالدينار الأردني فقط.', 'JoFotara only accepts invoices in Jordanian dinars.'],
   totals_mismatch: [
     'مجموع الأسطر لا يطابق إجمالي الفاتورة المحفوظ؛ لن تُرسل حتى لا يختلف المبلغ المصرّح به عمّا دفعه الزبون.',

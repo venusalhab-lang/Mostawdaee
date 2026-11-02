@@ -42,6 +42,8 @@ export interface AppSettings {
   businessPhone?: string;
   businessAddress?: string;
   businessEmail?: string;
+  /** Epoch ms when the owner finished or skipped first-run setup. Absent on older stores. */
+  onboardingCompletedAt?: number;
 }
 
 export interface Product {
@@ -98,7 +100,7 @@ export interface StockMovement {
 export interface ProductLog {
   id: string;
   productId: string;
-  action: 'create' | 'update_stock' | 'update_info' | 'delete' | 'sale' | 'purchase';
+  action: 'create' | 'update_stock' | 'update_info' | 'delete' | 'sale' | 'purchase' | 'return' | 'purchase_return';
   changeType: 'increment' | 'decrement' | 'set';
   quantityDelta?: number;
   previousValue: any;
@@ -128,6 +130,31 @@ export interface Customer {
   createdAt: string;
   totalDebt: number;
   currency: Currency;
+}
+
+export interface Supplier {
+  id: string;
+  name: string;
+  phone?: string;
+  notes?: string;
+  /** What the store owes this supplier, one balance per currency. Currencies are never converted or added together. */
+  balances: Partial<Record<Currency, number>>;
+  createdAt: number;
+}
+
+export interface SupplierTransaction {
+  id: string;
+  supplierId: string;
+  /** purchase = unpaid part of a purchase; payment = paid out of the vault; opening = owed before the app; return = goods sent back, taken off what is owed. */
+  type: 'purchase' | 'payment' | 'opening' | 'return';
+  amount: number;
+  currency: Currency;
+  invoiceId?: string;
+  vaultRecordId?: string;
+  date: number;
+  notes?: string;
+  /** The supplier's balance in this currency right after this entry. */
+  balanceAfter: number;
 }
 
 export type ChequeType = 'incoming' | 'outgoing';
@@ -231,6 +258,8 @@ export interface InvoiceItem {
    */
   packSize?: number;
   packName?: string;
+  /** Return lines: index of the line on the original sale. */
+  sourceLine?: number;
 }
 
 export interface Invoice {
@@ -245,32 +274,148 @@ export interface Invoice {
   /** VAT % stored with the invoice. Reprints must use this, not the current settings. */
   vatRate?: number;
   totalAmount: number;
-  type: 'sale' | 'purchase';
+  /**
+   * 'return' = sales return (credit note) against the sale in `returnOf`; 'purchase_return' = goods sent back to the
+   * supplier of the purchase in `returnOf`. Return amounts are positive.
+   */
+  type: 'sale' | 'purchase' | 'return' | 'purchase_return';
   currency: Currency;
   discount?: number;
   cashReceived?: number;
   changeDue?: number;
-  /** 'credit' = آجل: no cash enters the vault until the customer pays. Missing = cash. */
+  /**
+   * 'credit' = آجل (full or split): unpaid part is on the customer (or supplier for purchases).
+   * Missing = cash. Card/wallet never enter the cash vault.
+   */
   paymentMethod?: 'cash' | 'card' | 'wallet' | 'credit';
   customerId?: string;
-  /** Credit sale: debt added to the customer, in the customer's own currency. */
+  /** Purchases: the registered supplier. Required when part of the purchase is owed. */
+  supplierId?: string;
+  /**
+   * Credit sales/purchases: amount settled when the invoice was saved (invoice currency).
+   * Sale: cash into the vault now; purchase: cash leaving the vault now. The rest is owed.
+   * Omitted on legacy full-credit sales (= paid 0).
+   */
+  paidAmount?: number;
+  /** Credit sale: debt added to the customer, in the customer's own currency (the unpaid part). */
   debtAmount?: number;
   debtCurrency?: Currency;
   /** Whether saving this invoice moved the cash vault. Missing on invoices saved before card/wallet were excluded. */
   vaultPosted?: boolean;
-  /** Purchases: each product's average unit cost before and after this receipt, so deleting it can put the cost back. */
+  /** Purchases and purchase returns: each product's average unit cost before and after, so deleting it can put the cost back. */
   costChanges?: Record<string, { before: number; after: number }>;
   /** The account that created the invoice. Stamped by merchant_commit; a device cannot set or change it. */
+  actorId?: string;
+  actorEmail?: string;
+  /** Sales and purchases: quantity returned so far per line (same order as items). */
+  returnedQty?: number[];
+  /** Returns: the sale or purchase this return reverses. */
+  returnOf?: string;
+  returnOfNumber?: string;
+  returnReason?: string;
+  /**
+   * Returns: how the money went back. Vault and debt amounts are in their own currencies.
+   * On a purchase return the vault receives the cash and `debt` is what came off the supplier balance.
+   */
+  refund?: { vault: number; vaultCurrency: Currency; debt: number; debtCurrency?: Currency; external: number };
+}
+
+/** One currency of a shift: what was sold and what cash the drawer should hold. */
+export interface ShiftCurrencyTotals {
+  currency: Currency;
+  salesCount: number;
+  /** Sale totals including VAT, after discounts. */
+  sales: number;
+  byMethod: { cash: number; card: number; wallet: number; credit: number };
+  discounts: number;
+  tax: number;
+  returnsCount: number;
+  /** Credit-note totals, however they were refunded. */
+  returns: number;
+  openingFloat: number;
+  cashSales: number;
+  /** Paid back from the drawer on returns. */
+  cashRefunds: number;
+  /** openingFloat + cashSales - cashRefunds. */
+  expectedCash: number;
+}
+
+/** A cashier's session at the till, from opening float to the closing count (Z-report). */
+export interface Shift {
+  id: string;
+  status: 'open' | 'closed';
+  openedAt: number;
+  /** The currency the opening float was counted in. */
+  currency: Currency;
+  openingFloat: number;
+  openingNotes?: string;
+  userName?: string;
+  closedAt?: number;
+  /** Cash counted at close, per currency. */
+  counted?: Partial<Record<Currency, number>>;
+  /** Figures frozen at close; a reprint shows these, not today's invoices. */
+  summary?: ShiftCurrencyTotals[];
+  closingNotes?: string;
+  /** Who opened the shift; stamped by merchant_commit. */
+  actorId?: string;
+  actorEmail?: string;
+  /** Who closed it; stamped by merchant_commit. */
+  closedById?: string;
+  closedByEmail?: string;
+}
+
+/** A purchase order to a supplier or a price quotation to a customer. Neither moves stock or money. */
+export type OrderKind = 'purchase_order' | 'quote';
+export type OrderStatus = 'draft' | 'sent' | 'converted' | 'cancelled';
+
+export interface OrderLine {
+  productId: string;
+  description: string;
+  sku?: string;
+  quantity: number;
+  /** Per pack on pack lines, like invoice lines. */
+  unitPrice: number;
+  packSize?: number;
+  packName?: string;
+}
+
+export interface TradeOrder {
+  id: string;
+  kind: OrderKind;
+  number: string;
+  date: number;
+  /** Quotes: the price holds until this day. */
+  validUntil?: number;
+  /** Purchase orders: when the goods are expected. */
+  expectedDate?: number;
+  supplierId?: string;
+  supplierName?: string;
+  customerId?: string;
+  customerName?: string;
+  currency: Currency;
+  vatRate: number;
+  items: OrderLine[];
+  notes?: string;
+  status: OrderStatus;
+  /** The invoice this order became. */
+  invoiceId?: string;
+  invoiceNumber?: string;
+  createdAt: number;
+  updatedAt: number;
+  /** Stamped by merchant_commit. */
   actorId?: string;
   actorEmail?: string;
 }
 
 export type VaultSource =
   | 'sale_invoice'
+  | 'sale_return'
   | 'purchase_invoice'
+  | 'purchase_return'
   | 'expense'
   | 'payroll'
   | 'customer_payment'
+  | 'supplier_payment'
   | 'manual'
   | 'reversal';
 

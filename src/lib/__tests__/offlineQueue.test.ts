@@ -1,5 +1,19 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { canQueueOffline, enqueueInvoice, isOfflineError, localSaleShortages, readQueue, writeQueue } from '../offlineQueue';
+import {
+  applyQueuedSalesToProducts,
+  applyQueuedSalesToVault,
+  belongsToStore,
+  canDeferSaleToQueue,
+  canQueueOffline,
+  enqueueInvoice,
+  isOfflineError,
+  localSaleShortages,
+  mergeQueuedInvoices,
+  mergeQueuedVaultRecords,
+  readQueue,
+  writeQueue,
+} from '../offlineQueue';
+import { buildVaultDoc } from '../vaultMath';
 import type { Invoice, Product } from '../../types';
 
 class MemoryStorage {
@@ -26,10 +40,25 @@ describe('offline queue', () => {
   });
 
   it('treats only connection failures as offline', () => {
+    const offlineNav = typeof navigator !== 'undefined' ? navigator : undefined;
+    try {
+      Object.defineProperty(globalThis, 'navigator', { value: { onLine: false }, configurable: true });
+      expect(isOfflineError({ code: 'insufficient-stock', message: 'Insufficient stock' })).toBe(false);
+      expect(isOfflineError({ code: 'permission-denied', message: 'permission denied' })).toBe(false);
+    } finally {
+      if (offlineNav) Object.defineProperty(globalThis, 'navigator', { value: offlineNav, configurable: true });
+    }
     expect(isOfflineError({ message: 'TypeError: Failed to fetch' })).toBe(true);
     expect(isOfflineError({ code: 'offline' })).toBe(true);
+    expect(isOfflineError({ message: 'Request timed out' })).toBe(true);
     expect(isOfflineError({ code: 'aborted', message: 'conflict' })).toBe(false);
     expect(isOfflineError({ code: 'permission-denied', message: 'permission denied' })).toBe(false);
+  });
+
+  it('defers cash sales when the session cannot refresh without the network', () => {
+    expect(canDeferSaleToQueue({ code: 'unauthenticated' })).toBe(true);
+    expect(canDeferSaleToQueue({ code: 'offline' })).toBe(true);
+    expect(canDeferSaleToQueue({ code: 'aborted' })).toBe(false);
   });
 
   it('only lets cash-type sales wait for the network', () => {
@@ -43,6 +72,16 @@ describe('offline queue', () => {
     expect(enqueueInvoice('u1', invoice())).toBe(true);
     expect(enqueueInvoice('u1', invoice())).toBe(true);
     expect(readQueue('u1')).toHaveLength(1);
+  });
+
+  it('remembers the store a sale was taken in and sends it only there', () => {
+    expect(enqueueInvoice('u1', invoice({ id: 'a' }), 'owner-1')).toBe(true);
+    const [entry] = readQueue('u1');
+    expect(entry.storeId).toBe('owner-1');
+    expect(belongsToStore(entry, 'owner-1')).toBe(true);
+    expect(belongsToStore(entry, 'u1')).toBe(false);
+    expect(belongsToStore({}, 'u1')).toBe(false);
+    expect(belongsToStore({ storeId: '' }, 'u1')).toBe(false);
   });
 
   it('reads invoices queued by the previous app version', () => {
@@ -66,5 +105,43 @@ describe('offline queue', () => {
     expect(localSaleShortages(twoLines, [product(3)])).toEqual([{ productId: 'p1', name: 'شاي', available: 3, requested: 4 }]);
     expect(localSaleShortages(twoLines, [product(4)])).toEqual([]);
     expect(localSaleShortages(invoice(), [])).toHaveLength(1);
+  });
+
+  it('keeps queued sales on top of a server snapshot so stock and invoices stay honest until sync', () => {
+    enqueueInvoice('u1', invoice({ id: 'offline-1', invoiceNumber: 'POS-9' }), 'owner-1');
+    const queue = readQueue('u1');
+    expect(mergeQueuedInvoices([{ ...invoice({ id: 'server-1' }) }], queue, 'owner-1').map((i) => i.id).sort())
+      .toEqual(['offline-1', 'server-1']);
+    expect(applyQueuedSalesToProducts([product(10)], queue, 'owner-1')[0].quantity).toBe(8);
+    const vault = applyQueuedSalesToVault(
+      buildVaultDoc({ JOD: 5, ILS: 0, USD: 0, IQD: 0, SAR: 0, AED: 0, LYD: 0, EGP: 0 }),
+      queue,
+      'owner-1',
+    ) as { balanceJOD: number };
+    expect(vault.balanceJOD).toBe(7);
+    expect(mergeQueuedVaultRecords([], queue, 'owner-1')[0].id).toBe('inv-offline-1');
+    const withBalance = mergeQueuedVaultRecords(
+      [],
+      queue,
+      'owner-1',
+      buildVaultDoc({ JOD: 5, ILS: 0, USD: 0, IQD: 0, SAR: 0, AED: 0, LYD: 0, EGP: 0 }),
+    );
+    expect(withBalance[0].balanceAfter).toBe(7);
+  });
+
+  it('applies the queue only once on top of a raw server cache (never on an already-merged cache)', () => {
+    enqueueInvoice('u1', invoice({ id: 'offline-1' }), 'owner-1');
+    const queue = readQueue('u1');
+    const server = [product(10)];
+    const once = applyQueuedSalesToProducts(server, queue, 'owner-1');
+    expect(once[0].quantity).toBe(8);
+    // Persisting `once` then applying the queue again would understate stock — cache must stay raw.
+    expect(applyQueuedSalesToProducts(once, queue, 'owner-1')[0].quantity).toBe(6);
+  });
+
+  it('ignores queued sales from another store when merging snapshots', () => {
+    enqueueInvoice('u1', invoice({ id: 'other' }), 'other-owner');
+    expect(applyQueuedSalesToProducts([product(10)], readQueue('u1'), 'owner-1')[0].quantity).toBe(10);
+    expect(mergeQueuedInvoices([], readQueue('u1'), 'owner-1')).toEqual([]);
   });
 });

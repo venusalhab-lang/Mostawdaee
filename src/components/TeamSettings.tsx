@@ -7,7 +7,7 @@ import {
   type TeamMember, type WorkspaceInvite,
   acceptInvite, declineInvite, inviteMember, leaveStore, listTeam, refreshWorkspace, removeMember, teamErrorMessage,
 } from '../lib/workspace';
-import { pendingSalesBlockSwitch, switchStore } from '../lib/storeSwitch';
+import { deviceLocalWorkMessage, switchStore } from '../lib/storeSwitch';
 import SupportCenter from './SupportCenter';
 import AccountSettings from './AccountSettings';
 
@@ -30,11 +30,9 @@ function roleHelp(role: MemberRole, ar: boolean) {
 }
 
 function guardPendingSales(userId: string, ar: boolean): boolean {
-  const pending = pendingSalesBlockSwitch(userId);
-  if (pending === 0) return true;
-  toast.error(ar
-    ? `توجد ${pending} عملية بيع على هذا الجهاز لم تُرسل بعد. اتصل بالإنترنت وانتظر إرسالها أولاً حتى لا تُسجَّل في متجر آخر.`
-    : `${pending} sale(s) on this device have not been sent yet. Connect and wait for them first so they are not recorded in another store.`);
+  const blocked = deviceLocalWorkMessage(userId, ar);
+  if (!blocked) return true;
+  toast.error(blocked);
   return false;
 }
 

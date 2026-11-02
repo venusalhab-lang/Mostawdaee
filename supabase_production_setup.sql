@@ -1,5 +1,7 @@
 -- Mostawdaee production setup. Run once in the Supabase SQL editor; safe to run again.
--- Order: this file, then supabase_cheques.sql and supabase_inventory_audit.sql. Never run supabase/archive/*.
+-- Order: this file, then supabase_cheques.sql, supabase_inventory_audit.sql, supabase_einvoicing.sql.
+-- Never run supabase/archive/* (outdated; conflicts with this file).
+-- 0. Creates profiles and user_subscriptions when the project is empty.
 -- 1. Brings profiles and user_subscriptions up to the columns the app and server use.
 -- 2. Replaces their row-level security with owner-only policies.
 -- 3. Stops browsers from granting themselves premium, admin, or a longer trial.
@@ -16,6 +18,27 @@
 BEGIN;
 
 -- ---------------------------------------------------------------------------
+-- 0. Base tables (empty project). Existing projects keep their shape; columns follow.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.profiles (
+    id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS public.user_subscriptions (
+    id BIGSERIAL PRIMARY KEY,
+    user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE
+);
+
+GRANT SELECT, INSERT, UPDATE ON public.profiles TO authenticated;
+GRANT SELECT, INSERT, UPDATE ON public.user_subscriptions TO authenticated;
+DO $$
+BEGIN
+    IF to_regclass('public.user_subscriptions_id_seq') IS NOT NULL THEN
+        EXECUTE 'GRANT USAGE, SELECT ON SEQUENCE public.user_subscriptions_id_seq TO authenticated';
+    END IF;
+END $$;
+
+-- ---------------------------------------------------------------------------
 -- 1. Columns
 -- ---------------------------------------------------------------------------
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'user';
@@ -29,6 +52,24 @@ ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS email TEXT;
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS user_email TEXT;
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT TIMEZONE('utc', NOW());
 
+-- CREATE TABLE IF NOT EXISTS keeps a legacy shape; ensure user_id exists before any UPDATE/index on it.
+-- Some older projects keyed the row by id UUID (= auth.users.id) with no separate user_id column.
+ALTER TABLE public.user_subscriptions ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE;
+
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = 'user_subscriptions'
+           AND column_name = 'id' AND data_type = 'uuid'
+    ) THEN
+        UPDATE public.user_subscriptions s
+           SET user_id = s.id
+         WHERE s.user_id IS NULL
+           AND EXISTS (SELECT 1 FROM auth.users u WHERE u.id = s.id);
+    END IF;
+END $$;
+
 -- Added without defaults first so existing merchants keep their real trial start, not today's date.
 ALTER TABLE public.user_subscriptions ADD COLUMN IF NOT EXISTS trial_start_date TIMESTAMPTZ;
 ALTER TABLE public.user_subscriptions ADD COLUMN IF NOT EXISTS subscription_status TEXT;
@@ -39,6 +80,7 @@ DO $$
 DECLARE
     has_created_at BOOLEAN;
     has_status BOOLEAN;
+    orphans BIGINT;
 BEGIN
     SELECT EXISTS (SELECT 1 FROM information_schema.columns
                    WHERE table_schema = 'public' AND table_name = 'user_subscriptions' AND column_name = 'created_at')
@@ -46,6 +88,13 @@ BEGIN
     SELECT EXISTS (SELECT 1 FROM information_schema.columns
                    WHERE table_schema = 'public' AND table_name = 'user_subscriptions' AND column_name = 'status')
       INTO has_status;
+
+    SELECT count(*) INTO orphans FROM public.user_subscriptions WHERE user_id IS NULL;
+    IF orphans > 0 THEN
+        RAISE EXCEPTION
+            'user_subscriptions has % row(s) with no user_id — link each row to auth.users or delete them, then re-run',
+            orphans;
+    END IF;
 
     IF has_created_at THEN
         EXECUTE 'UPDATE public.user_subscriptions SET trial_start_date = created_at WHERE trial_start_date IS NULL';
@@ -333,7 +382,7 @@ CREATE TABLE IF NOT EXISTS public.merchant_documents (
     CONSTRAINT merchant_documents_collection_check CHECK (collection IN (
         'settings', 'inventory', 'invoices', 'employees', 'payroll', 'customers',
         'customer_transactions', 'stock_movements', 'vault_records', 'warehouses', 'audit_logs',
-        'invoice_numbers'
+        'invoice_numbers', 'suppliers', 'supplier_transactions', 'shifts', 'orders'
     ))
 );
 
@@ -342,7 +391,7 @@ ALTER TABLE public.merchant_documents DROP CONSTRAINT IF EXISTS merchant_documen
 ALTER TABLE public.merchant_documents ADD CONSTRAINT merchant_documents_collection_check CHECK (collection IN (
     'settings', 'inventory', 'invoices', 'employees', 'payroll', 'customers',
     'customer_transactions', 'stock_movements', 'vault_records', 'warehouses', 'audit_logs',
-    'invoice_numbers'
+    'invoice_numbers', 'suppliers', 'supplier_transactions', 'shifts', 'orders'
 ));
 
 ALTER TABLE public.merchant_documents ENABLE ROW LEVEL SECURITY;
@@ -425,6 +474,25 @@ BEGIN
         IF (p_col = 'invoices' AND p_new->>'type' IS DISTINCT FROM 'sale')
            OR (p_col = 'vault_records' AND p_new->>'type' IS DISTINCT FROM 'income')
            OR (p_col = 'customer_transactions' AND p_new->>'type' IS DISTINCT FROM 'invoice') THEN
+            RAISE EXCEPTION 'role not allowed';
+        END IF;
+        RETURN;
+    END IF;
+
+    -- A cashier opens a shift and later closes it; the opening float and time cannot change afterwards.
+    IF p_col = 'shifts' THEN
+        IF p_old IS NULL THEN
+            IF p_new->>'status' IS DISTINCT FROM 'open' THEN
+                RAISE EXCEPTION 'role not allowed';
+            END IF;
+            RETURN;
+        END IF;
+        IF p_new->>'status' IS DISTINCT FROM 'closed'
+           OR (p_new - 'status' - 'closedAt' - 'counted' - 'summary' - 'closingNotes'
+                     - 'actorId' - 'actorEmail' - 'closedById' - 'closedByEmail')
+              IS DISTINCT FROM
+              (p_old - 'status' - 'closedAt' - 'counted' - 'summary' - 'closingNotes'
+                     - 'actorId' - 'actorEmail' - 'closedById' - 'closedByEmail') THEN
             RAISE EXCEPTION 'role not allowed';
         END IF;
         RETURN;
@@ -558,6 +626,14 @@ BEGIN
         IF col IN ('audit_logs', 'stock_movements', 'invoice_numbers') AND (op = 'delete' OR existing IS NOT NULL) THEN
             RAISE EXCEPTION 'history is append-only';
         END IF;
+        -- A closed shift is a signed-off cash count: nobody edits or deletes it.
+        IF col = 'shifts' AND existing IS NOT NULL AND existing->>'status' = 'closed' THEN
+            RAISE EXCEPTION 'shift is closed';
+        END IF;
+        IF col = 'shifts' AND member_role = 'cashier' AND existing IS NOT NULL
+           AND existing->>'actorId' IS DISTINCT FROM actor::text THEN
+            RAISE EXCEPTION 'role not allowed';
+        END IF;
 
         IF op = 'delete' THEN
             PERFORM public.assert_role_can_write(member_role, op, col, did, existing, NULL);
@@ -630,15 +706,21 @@ BEGIN
                 END IF;
             END IF;
             -- Who created a record is set here, never trusted from the device, and an edit keeps it.
-            IF col IN ('invoices', 'vault_records', 'customer_transactions', 'stock_movements', 'audit_logs') THEN
+            IF col IN ('invoices', 'vault_records', 'customer_transactions', 'supplier_transactions', 'stock_movements', 'audit_logs', 'shifts', 'orders') THEN
+                IF actor_email IS NULL THEN
+                    SELECT lower(u.email) INTO actor_email FROM auth.users u WHERE u.id = actor;
+                END IF;
                 IF existing IS NULL THEN
-                    IF actor_email IS NULL THEN
-                        SELECT lower(u.email) INTO actor_email FROM auth.users u WHERE u.id = actor;
-                    END IF;
                     payload := payload || jsonb_build_object('actorId', actor::text, 'actorEmail', COALESCE(actor_email, ''));
                 ELSE
                     payload := (payload - 'actorId' - 'actorEmail')
                         || jsonb_strip_nulls(jsonb_build_object('actorId', existing->'actorId', 'actorEmail', existing->'actorEmail'));
+                END IF;
+            END IF;
+            IF col = 'shifts' THEN
+                payload := payload - 'closedById' - 'closedByEmail';
+                IF payload->>'status' = 'closed' THEN
+                    payload := payload || jsonb_build_object('closedById', actor::text, 'closedByEmail', COALESCE(actor_email, ''));
                 END IF;
             END IF;
             INSERT INTO public.merchant_documents (user_id, collection, doc_id, data, updated_at)

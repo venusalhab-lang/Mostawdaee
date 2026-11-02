@@ -7,6 +7,7 @@ import {
   creditRows,
   dailyTotals,
   mergeCurrencyTotals,
+  salesChartSeries,
   outstandingDebts,
   periodWindow,
   recentActivity,
@@ -142,15 +143,30 @@ describe('home desk money', () => {
     expect(points).toHaveLength(1);
     expect(points[0].amount).toBe(5);
   });
+
+  it('aligns a prior series for the home sales chart without mixing currencies', () => {
+    const now = at(2026, 10, 7, 18);
+    const rows = [
+      { currency: 'JOD', amount: 10, ts: at(2026, 10, 7, 10) },
+      { currency: 'JOD', amount: 4, ts: at(2026, 9, 30, 10) },
+      { currency: 'ILS', amount: 99, ts: at(2026, 10, 7, 11) },
+    ];
+    const series = salesChartSeries(rows, 'JOD', 'day', now);
+    expect(series).toHaveLength(7);
+    expect(series[6]).toMatchObject({ day: startOfLocalDay(now), amount: 10, previous: 4 });
+    expect(series[0]).toMatchObject({ day: startOfLocalDay(now) - 6 * 86400000, amount: 0, previous: 0 });
+    expect(series.every((point) => point.amount !== 99 && point.previous !== 99)).toBe(true);
+  });
 });
 
 describe('home desk exceptions', () => {
-  it('separates out, low, and expiring goods', () => {
+  it('separates out, low, and expiring goods within the same 7-day horizon as home tasks', () => {
     const now = at(2026, 10, 2, 12);
     const snap = stockSnapshot([
       { id: 'a', name: 'نافد', quantity: 0 },
       { id: 'b', name: 'قليل', quantity: 2, lowStockThreshold: 5 },
       { id: 'c', name: 'قريب', quantity: 20, expiryDate: now + 5 * 86400000 },
+      { id: 'far', name: 'بعيد', quantity: 20, expiryDate: now + 20 * 86400000 },
       { id: 'd', name: 'أصل', quantity: 0, type: 'asset' },
       { id: 'e', name: 'سليم', quantity: 40, lowStockThreshold: 5 },
     ], 5, now);

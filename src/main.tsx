@@ -6,6 +6,8 @@ import '@fontsource/cairo/400.css';
 import '@fontsource/cairo/500.css';
 import '@fontsource/cairo/600.css';
 import '@fontsource/cairo/700.css';
+import '@fontsource/cairo/800.css';
+import '@fontsource/cairo/900.css';
 import '@fontsource/inter/400.css';
 import '@fontsource/inter/500.css';
 import '@fontsource/inter/600.css';
@@ -17,6 +19,7 @@ import { AuthProvider } from './components/AuthContext.tsx';
 import ErrorBoundary from './components/ErrorBoundary.tsx';
 import { registerSW } from 'virtual:pwa-register';
 import { Toaster } from 'sonner';
+import { Capacitor } from '@capacitor/core';
 
 // OAuth providers may return to this server-side callback path. Normalize it
 // before the SPA starts so static hosts and HashRouter see the application root.
@@ -53,6 +56,7 @@ try {
 // to prevent aggressive caching of API endpoints and stale react assets.
 const isSandboxPreview = 
   (import.meta as any).env?.DEV ||
+  Capacitor.isNativePlatform() ||
   window.location.hostname.includes('.run.app') || 
   window.location.hostname.includes('localhost') ||
   window.location.hostname.includes('.aistudio.build') ||
@@ -99,7 +103,7 @@ window.addEventListener('vite:preloadError', (event) => {
   window.location.reload();
 });
 
-// Register the PWA service worker with auto-update (only if not loaded inside the sandbox web preview)
+// Register the PWA service worker with auto-update (not in previews, and not in the native app, which ships its files in the APK)
 if (!isSandboxPreview) {
   registerSW({ immediate: true });
 }

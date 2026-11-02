@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { AlertTriangle, CheckCircle2, Clock, FileCheck2, Loader2, Send, XCircle } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, Clock, FileCheck2, Loader2, QrCode, Send, XCircle } from 'lucide-react';
 import { toast } from 'sonner';
 import type { Invoice } from '../types';
 import { useFirebase } from './FirebaseProvider';
@@ -10,6 +10,7 @@ import {
   eInvoiceQrDataUrl,
   fetchEInvoiceConfig,
   fetchEInvoiceSubmissions,
+  generateZatcaQr,
   submitEInvoice,
 } from '../lib/einvoiceApi';
 
@@ -30,8 +31,14 @@ export default function EInvoicePanel({ invoice, isRtl }: { invoice: Invoice; is
   const [confirming, setConfirming] = useState(false);
   const [sending, setSending] = useState(false);
   const [ready, setReady] = useState(false);
+  const [originalAccepted, setOriginalAccepted] = useState(true);
 
-  const isSale = invoice.type === 'sale';
+  const isSale = invoice.type === 'sale' || invoice.type === 'return';
+  const isCredit = invoice.type === 'return';
+  const originalId = isCredit ? invoice.returnOf || '' : '';
+  const provider = config?.provider || config?.settings?.provider || null;
+  const isZatca = provider === 'zatca';
+  const isJo = provider === 'jofotara';
 
   useEffect(() => {
     if (!user || !isSale) return;
@@ -39,16 +46,19 @@ export default function EInvoicePanel({ invoice, isRtl }: { invoice: Invoice; is
     setReady(false);
     setSubmission(null);
     setQrImage('');
-    Promise.allSettled([fetchEInvoiceConfig(), fetchEInvoiceSubmissions([invoice.id])]).then(([cfg, subs]) => {
+    const ids = originalId ? [invoice.id, originalId] : [invoice.id];
+    Promise.allSettled([fetchEInvoiceConfig(), fetchEInvoiceSubmissions(ids)]).then(([cfg, subs]) => {
       if (!alive) return;
+      const sent = subs.status === 'fulfilled' ? subs.value : {};
       setConfig(cfg.status === 'fulfilled' ? cfg.value : null);
-      setSubmission(subs.status === 'fulfilled' ? subs.value[invoice.id] || null : null);
+      setSubmission(sent[invoice.id] || null);
+      setOriginalAccepted(!isCredit || sent[originalId]?.status === 'accepted');
       setReady(true);
     });
     return () => {
       alive = false;
     };
-  }, [user, isSale, invoice.id]);
+  }, [user, isSale, isCredit, invoice.id, originalId]);
 
   useEffect(() => {
     if (submission?.status === 'accepted' && submission.qr) {
@@ -65,20 +75,26 @@ export default function EInvoicePanel({ invoice, isRtl }: { invoice: Invoice; is
   const canSend = linked && (config!.role === 'owner' || config!.role === 'manager');
   const status = submission?.status;
   const jod = invoice.currency === 'JOD';
-  const sendable = canSend && jod && status !== 'accepted' && status !== 'sending';
+  const sar = invoice.currency === 'SAR';
+  const currencyOk = isZatca ? sar : jod;
+  const sendable = canSend && currencyOk && (isZatca || originalAccepted) && status !== 'accepted' && status !== 'sending';
 
   const send = async () => {
     setSending(true);
     try {
-      const result = await submitEInvoice(invoice.id);
+      const result = isZatca ? await generateZatcaQr(invoice.id) : await submitEInvoice(invoice.id);
       const subs = await fetchEInvoiceSubmissions([invoice.id]).catch(() => ({} as Record<string, EInvoiceSubmission>));
       setSubmission(subs[invoice.id] || null);
       if (result.outcome === 'accepted') {
-        toast.success(isRtl ? 'قُبلت الفاتورة في نظام الفوترة الوطني.' : 'The invoice was accepted by JoFotara.');
+        toast.success(isZatca
+          ? (isRtl ? 'تم توليد رمز QR الضريبي (ZATCA المرحلة 1).' : 'ZATCA Phase 1 tax QR generated.')
+          : isCredit
+            ? (isRtl ? 'قُبل إشعار الدائن في نظام الفوترة الوطني.' : 'The credit note was accepted by JoFotara.')
+            : (isRtl ? 'قُبلت الفاتورة في نظام الفوترة الوطني.' : 'The invoice was accepted by JoFotara.'));
       } else if (result.outcome === 'rejected') {
-        toast.error(isRtl ? 'رفض النظام الفاتورة. راجع السبب أدناه.' : 'JoFotara rejected the invoice. See the reason below.');
+        toast.error(isRtl ? 'رفض النظام الفاتورة. راجع السبب أدناه.' : 'The tax system rejected the invoice. See the reason below.');
       } else {
-        toast.error(isRtl ? 'لم يكتمل الإرسال. أعد المحاولة لاحقاً بنفس المعرّف.' : 'Sending did not complete. Retry later with the same identifier.');
+        toast.error(isRtl ? 'لم يكتمل الإرسال. أعد المحاولة لاحقاً.' : 'Sending did not complete. Retry later.');
       }
     } catch (error) {
       toast.error(eInvoiceErrorText(error, isRtl), { duration: 10_000 });
@@ -89,8 +105,10 @@ export default function EInvoicePanel({ invoice, isRtl }: { invoice: Invoice; is
   };
 
   const label = {
-    accepted: isRtl ? 'مقبولة في نظام الفوترة الوطني' : 'Accepted by JoFotara',
-    rejected: isRtl ? 'رفضها نظام الفوترة' : 'Rejected by JoFotara',
+    accepted: isZatca
+      ? (isRtl ? 'رمز QR الضريبي جاهز (ZATCA المرحلة 1)' : 'Tax QR ready (ZATCA Phase 1)')
+      : (isRtl ? 'مقبولة في نظام الفوترة الوطني' : 'Accepted by JoFotara'),
+    rejected: isRtl ? 'رفضها نظام الفوترة' : 'Rejected by the tax system',
     failed: isRtl ? 'لم يكتمل الإرسال' : 'Sending did not complete',
     sending: isRtl ? 'قيد الإرسال' : 'Sending',
   };
@@ -102,7 +120,11 @@ export default function EInvoicePanel({ invoice, isRtl }: { invoice: Invoice; is
         <div className="space-y-1">
           <p className="flex items-center gap-2 text-sm font-bold">
             <Icon size={18} />
-            {status ? label[status] : isRtl ? 'لم تُرسل إلى الفوترة الوطنية' : 'Not sent to JoFotara'}
+            {status
+              ? label[status]
+              : isZatca
+                ? (isRtl ? 'لم يُولَّد رمز QR الضريبي بعد' : 'Tax QR not generated yet')
+                : (isRtl ? 'لم تُرسل إلى الفوترة الوطنية' : 'Not sent to JoFotara')}
           </p>
           {submission && (
             <p className="text-xs opacity-80 font-mono" dir="ltr">
@@ -114,13 +136,23 @@ export default function EInvoicePanel({ invoice, isRtl }: { invoice: Invoice; is
           {submission?.error && status !== 'accepted' && (
             <p className="text-xs whitespace-pre-line" dir="auto">{submission.error}</p>
           )}
-          {status === 'failed' && (
+          {status === 'failed' && isJo && (
             <p className="text-xs opacity-80">
               {isRtl ? 'إعادة الإرسال تستخدم نفس المعرّف، فلن تُسجَّل الفاتورة مرتين.' : 'A resend uses the same identifier, so the invoice cannot be recorded twice.'}
             </p>
           )}
-          {linked && !jod && !status && (
-            <p className="text-xs opacity-80">{isRtl ? 'الفوترة الوطنية تقبل الفواتير بالدينار الأردني فقط.' : 'JoFotara only accepts invoices in Jordanian dinars.'}</p>
+          {linked && isJo && !jod && !status && (
+            <p className="text-xs opacity-80">{isRtl ? 'الفوترة الوطنية الأردنية تقبل الفواتير بالدينار فقط.' : 'JoFotara only accepts invoices in Jordanian dinars.'}</p>
+          )}
+          {linked && isZatca && !sar && !status && (
+            <p className="text-xs opacity-80">{isRtl ? 'رمز QR لهيئة الزكاة يقبل فواتير الريال السعودي فقط.' : 'ZATCA QR only accepts invoices in Saudi riyals (SAR).'}</p>
+          )}
+          {linked && isJo && jod && !originalAccepted && status !== 'accepted' && (
+            <p className="text-xs opacity-80">
+              {isRtl
+                ? 'يُرسل إشعار الدائن بعد قبول الفاتورة الأصلية في الفوترة الوطنية. افتح الفاتورة الأصلية وأرسلها أولاً.'
+                : 'The credit note can be sent once the original invoice is accepted by JoFotara. Open the original and send it first.'}
+            </p>
           )}
         </div>
         {qrImage && <img src={qrImage} alt="QR" className="w-24 h-24 rounded-lg bg-white p-1" />}
@@ -130,22 +162,32 @@ export default function EInvoicePanel({ invoice, isRtl }: { invoice: Invoice; is
             onClick={() => setConfirming(true)}
             className="rounded-xl bg-indigo-600 text-white px-4 py-2 text-sm font-bold inline-flex items-center gap-2"
           >
-            <Send size={16} />
-            {status ? (isRtl ? 'إعادة الإرسال' : 'Resend') : isRtl ? 'إرسال إلى الفوترة الوطنية' : 'Send to JoFotara'}
+            {isZatca ? <QrCode size={16} /> : <Send size={16} />}
+            {isZatca
+              ? (status ? (isRtl ? 'إعادة توليد QR' : 'Regenerate QR') : (isRtl ? 'توليد رمز QR الضريبي' : 'Generate tax QR'))
+              : (status ? (isRtl ? 'إعادة الإرسال' : 'Resend') : (isRtl ? 'إرسال إلى الفوترة الوطنية' : 'Send to JoFotara'))}
           </button>
         )}
       </div>
       {confirming && (
         <div role="alertdialog" className="rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-slate-900 p-3 space-y-2 text-sm text-slate-700 dark:text-slate-200">
           <p>
-            {isRtl
-              ? 'ستُسجَّل هذه الفاتورة رسمياً لدى دائرة ضريبة الدخل والمبيعات. بعد القبول لا يمكن تعديلها أو حذفها، وتُصحَّح بفاتورة إرجاع.'
-              : 'This invoice will be recorded officially by ISTD. Once accepted it cannot be edited or deleted; it is corrected with a return invoice.'}
+            {isZatca
+              ? (isRtl
+                ? 'سيُنشأ رمز QR ضريبي (TLV) من بيانات المنشأة وإجمالي هذه الفاتورة بالريال. هذه المرحلة 1 ولا تُرسل لبوابة فاتورة بعد.'
+                : 'A TLV tax QR will be built from the seller profile and this SAR invoice’s totals. This is Phase 1 — nothing is sent to Fatoora yet.')
+              : isCredit
+                ? (isRtl
+                  ? 'سيُسجَّل إشعار الدائن رسمياً لدى دائرة ضريبة الدخل والمبيعات مرتبطاً بالفاتورة الأصلية. بعد القبول لا يمكن حذف المرتجع.'
+                  : 'This credit note will be recorded officially by ISTD against the original invoice. Once accepted the return cannot be deleted.')
+                : (isRtl
+                  ? 'ستُسجَّل هذه الفاتورة رسمياً لدى دائرة ضريبة الدخل والمبيعات. بعد القبول لا يمكن تعديلها أو حذفها، وتُصحَّح بفاتورة إرجاع.'
+                  : 'This invoice will be recorded officially by ISTD. Once accepted it cannot be edited or deleted; it is corrected with a return invoice.')}
           </p>
           <div className="flex gap-2">
             <button type="button" disabled={sending} onClick={() => void send()} className="rounded-lg bg-indigo-600 text-white px-3 py-1.5 text-xs font-bold inline-flex items-center gap-1.5 disabled:opacity-50">
               {sending && <Loader2 size={14} className="animate-spin" />}
-              {isRtl ? 'تأكيد الإرسال' : 'Confirm and send'}
+              {isZatca ? (isRtl ? 'تأكيد التوليد' : 'Confirm generate') : (isRtl ? 'تأكيد الإرسال' : 'Confirm and send')}
             </button>
             <button type="button" disabled={sending} onClick={() => setConfirming(false)} className="rounded-lg border border-slate-200 dark:border-white/10 px-3 py-1.5 text-xs font-bold">
               {isRtl ? 'تراجع' : 'Cancel'}

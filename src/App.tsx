@@ -6,29 +6,26 @@ import { App as CapApp } from '@capacitor/app';
 import { useFirebase } from './components/FirebaseProvider';
 import Sidebar from './components/Sidebar';
 import Login from './components/Auth';
-import LandingPage from './components/LandingPage';
 import ErrorBoundary from './components/ErrorBoundary';
 import { decideBack, hasUnsavedWork } from './lib/backNavigation';
 import { requestInventoryIntent } from './lib/inventoryIntent';
 import Header from './components/Header';
 import CurrencyTicker from './components/CurrencyTicker';
-import { AuthContext, mockUserObj } from './components/AuthContext';
+import { AuthContext } from './components/AuthContext';
 import { supabase as rawSupabase } from './supabaseClient';
 import type { SupabaseClient } from '@supabase/supabase-js';
-
-// Ensure TypeScript recognizes runtime `supabase` shape for `.auth` usage.
-const supabase: SupabaseClient<any, 'public', any> = (rawSupabase as unknown) as SupabaseClient<any, 'public', any>;
-import { setDriveAccessToken } from './services/googleDrive';
+import { DRIVE_CONNECTED_EVENT, clearDriveConnect, finishDriveConnect, isDriveConnectPending } from './lib/driveConnect';
 import { toast } from 'sonner';
 import { usePreferredCurrency, type UserPreferredCurrency } from './components/CurrencyContext';
 import { POS_CURRENCY_CODES, type PosCurrency } from './lib/exchangeRates';
 import type { AppSettings, Currency } from './types';
 import { sounds } from './lib/sounds';
-import { Coins, LayoutDashboard, Package, Users, Sparkles, MessageSquare, Plus, Settings as SettingsIcon } from 'lucide-react';
+import { LayoutDashboard, Package, Users, Plus, Settings as SettingsIcon } from 'lucide-react';
 import QuickActionModal from './components/QuickActionModal';
 import CommandPalette from './components/CommandPalette';
 import { isVerifiedAdmin } from './lib/adminAccess';
 import { NATIVE_OAUTH_REDIRECT } from './lib/nativeAuth';
+import { usePasswordRecovery } from './lib/passwordRecovery';
 import { claimOAuthCallback, oauthProviderError, readOAuthCallbackParams, urlLooksLikeOAuthCallback } from './lib/completeOAuthSession';
 import { Browser } from '@capacitor/browser';
 import { useSubscriptionSync } from './hooks/useSubscriptionSync';
@@ -37,8 +34,13 @@ import SubscriptionExpired from './components/SubscriptionExpired';
 import { MembershipSettings, PendingInvites } from './components/TeamSettings';
 import { homeScreen } from './lib/roles';
 import { leaveStore, teamErrorMessage } from './lib/workspace';
-import { pendingSalesBlockSwitch, switchStore } from './lib/storeSwitch';
+import { deviceLocalWorkMessage, switchStore } from './lib/storeSwitch';
+import { needsOnboarding } from './lib/onboarding';
 
+// Ensure TypeScript recognizes runtime `supabase` shape for `.auth` usage.
+const supabase: SupabaseClient<any, 'public', any> = (rawSupabase as unknown) as SupabaseClient<any, 'public', any>;
+
+const OnboardingWizard = lazyWithRetry(() => import('./components/OnboardingWizard'));
 const HomeDesk = lazyWithRetry(() => import('./components/HomeDesk'));
 const POSSystem = lazyWithRetry(() => import('./components/POSSystem'));
 const InventoryManagement = lazyWithRetry(() => import('./components/InventoryManagement'));
@@ -64,20 +66,21 @@ export default function App() {
     user, 
     loading: dbLoading, 
     settings, 
-    products, 
+    products,
+    warehouses,
     invoices,
     saveSettings, 
-    saveProduct, 
+    saveProduct,
+    saveWarehouse,
     deleteProduct,
     saveInvoice,
     saveCustomer,
-    vault,
-    vaultTransactions,
     logout: firebaseLogout,
     workspace,
     isStoreOwner,
     canOpenScreen,
   } = useFirebase();
+  const recoveringPassword = usePasswordRecovery();
 
   const [language, setLanguage] = useState<'ar' | 'en'>('ar');
   const isRtl = language === 'ar';
@@ -103,6 +106,16 @@ export default function App() {
     };
   }, []);
 
+  // On the web, connecting Drive reloads the app; bring the merchant back to the cloud backup tab.
+  useEffect(() => {
+    const showDriveBackups = () => {
+      setBackupTab('cloud');
+      setActiveScreen('google-drive');
+    };
+    window.addEventListener(DRIVE_CONNECTED_EVENT, showDriveBackups);
+    return () => window.removeEventListener(DRIVE_CONNECTED_EVENT, showDriveBackups);
+  }, []);
+
   // Complete the Supabase session when the native app receives the OAuth deep link.
   useEffect(() => {
     if (!Capacitor.isNativePlatform()) return;
@@ -120,9 +133,11 @@ export default function App() {
 
       if (providerError) {
         console.error('[Auth] OAuth provider returned an error:', providerError);
-        toast.error(isRtl
-          ? `تعذر تسجيل الدخول بواسطة Google: ${providerError}`
-          : `Google sign-in failed: ${providerError}`);
+        const forDrive = isDriveConnectPending();
+        clearDriveConnect();
+        toast.error(forDrive
+          ? (isRtl ? `لم يتم ربط Google Drive: ${providerError}` : `Google Drive was not connected: ${providerError}`)
+          : (isRtl ? `تعذر تسجيل الدخول بواسطة Google: ${providerError}` : `Google sign-in failed: ${providerError}`));
         return;
       }
 
@@ -130,12 +145,13 @@ export default function App() {
         const { code } = readOAuthCallbackParams(url);
 
         if (code) {
-          const { error } = await supabase.auth.exchangeCodeForSession(code);
+          const { data: exchanged, error } = await supabase.auth.exchangeCodeForSession(code);
           if (error) {
             const { data } = await supabase.auth.getSession();
             if (data.session?.access_token) return;
             throw error;
           }
+          await finishDriveConnect(exchanged.session, true);
           return;
         }
 
@@ -323,14 +339,17 @@ export default function App() {
     );
   };
 
-  // Sync dark mode class
+  // Sync dark mode class (UI class always applies; storage write must not crash the shell)
   useEffect(() => {
     if (isClassDarkMode) {
       document.documentElement.classList.add('dark');
-      localStorage.setItem('theme_mode', 'dark');
     } else {
       document.documentElement.classList.remove('dark');
-      localStorage.setItem('theme_mode', 'light');
+    }
+    try {
+      localStorage.setItem('theme_mode', isClassDarkMode ? 'dark' : 'light');
+    } catch {
+      // Quota / private mode — theme still works for this session.
     }
   }, [isClassDarkMode]);
 
@@ -444,67 +463,63 @@ export default function App() {
     isExpired,
     lockReason,
     subscription,
+    daysRemaining: subscriptionDaysRemaining,
     refreshSubscription,
   } = useSubscriptionSync(user, !hasRealSession);
   usePlayBillingSync(hasRealSession ? user?.uid : null, refreshSubscription);
 
-  // Auth Context actions to support custom Login (Auth.tsx) handlers
-  // تسجيل الدخول بواسطة جوجل
-const signInWithGoogle = async () => {
-  if (Capacitor.isNativePlatform()) {
-    // Google blocks OAuth inside embedded WebViews (403 disallowed_useragent), so the flow
-    // must run in the system browser (Chrome Custom Tabs / SFSafariViewController) and
-    // come back to the app through the deep link handled by the appUrlOpen listener.
+  // Auth Context actions for Login (Auth.tsx)
+  const signInWithGoogle = async () => {
+    if (Capacitor.isNativePlatform()) {
+      // Google blocks OAuth inside embedded WebViews (403 disallowed_useragent), so the flow
+      // must run in the system browser and return via the appUrlOpen deep link.
+      const { data, error } = await supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: {
+          redirectTo: NATIVE_OAUTH_REDIRECT,
+          skipBrowserRedirect: true,
+          queryParams: { prompt: 'select_account' },
+        },
+      });
+      if (error) throw error;
+      if (!data?.url) throw new Error('Google sign-in could not start. Try again.');
+      await Browser.open({ url: data.url, presentationStyle: 'fullscreen' });
+      return data;
+    }
+
     const { data, error } = await supabase.auth.signInWithOAuth({
       provider: 'google',
       options: {
-        redirectTo: NATIVE_OAUTH_REDIRECT,
-        skipBrowserRedirect: true,
+        redirectTo: window.location.origin,
         queryParams: { prompt: 'select_account' },
       },
     });
     if (error) throw error;
-    if (!data?.url) throw new Error('Google sign-in could not start. Try again.');
-    await Browser.open({ url: data.url, presentationStyle: 'fullscreen' });
     return data;
-  }
+  };
 
-  const { data, error } = await supabase.auth.signInWithOAuth({
-    provider: 'google',
-    options: {
-      redirectTo: window.location.origin,
-      queryParams: { prompt: 'select_account' },
-    },
-  });
-  if (error) throw error;
-  return data;
-};
+  const signInWithEmail = async (emailVal: string, passwordVal: string) => {
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email: emailVal,
+      password: passwordVal,
+    });
+    if (error) throw error;
+    return data.user;
+  };
 
-// تسجيل الدخول بالبريد والكلمة
-const signInWithEmail = async (emailVal: string, passwordVal: string) => {
-  const { data, error } = await supabase.auth.signInWithPassword({
-    email: emailVal,
-    password: passwordVal,
-  });
-  if (error) throw error;
-  return data.user;
-};
+  const signUpWithEmail = async (emailVal: string, passwordVal: string) => {
+    const { data, error } = await supabase.auth.signUp({
+      email: emailVal,
+      password: passwordVal,
+    });
+    if (error) throw error;
+    // Supabase returns an obfuscated user with no identities (and no error) when the email already exists.
+    if (data.user && Array.isArray(data.user.identities) && data.user.identities.length === 0) {
+      throw new Error('User already registered');
+    }
+    return data.user;
+  };
 
-// إنشاء حساب جديد بالبريد
-const signUpWithEmail = async (emailVal: string, passwordVal: string) => {
-  const { data, error } = await supabase.auth.signUp({
-    email: emailVal,
-    password: passwordVal,
-  });
-  if (error) throw error;
-  // Supabase returns an obfuscated user with no identities (and no error) when the email already exists.
-  if (data.user && Array.isArray(data.user.identities) && data.user.identities.length === 0) {
-    throw new Error('User already registered');
-  }
-  return data.user;
-};
-
-// تسجيل الخروج
   const handleSignOut = async () => {
     try {
       await firebaseLogout();
@@ -552,12 +567,6 @@ const signUpWithEmail = async (emailVal: string, passwordVal: string) => {
     }
   };
 
-  const handleContinueAsGuestEnter = async () => {
-    // Supabase does not have a direct anonymous auth equivalent here — use local guest simulation
-    setIsGuestModeActive(true);
-    toast.success(isRtl ? 'تم تفعيل وضع المعاينة الفورية!' : 'Starting live sandbox guest preview...');
-  };
-
   // Expose context value matching AuthContext expectations
   const authContextValue = {
     user,
@@ -575,6 +584,20 @@ const signUpWithEmail = async (emailVal: string, passwordVal: string) => {
     refreshToken: async () => {},
   };
 
+  const loginScreen = (
+    <AuthContext.Provider value={authContextValue}>
+      <Login
+        language={language}
+        onLanguageToggle={toggleLanguage}
+        onLoginSuccess={() => setIsGuestModeActive(false)}
+        onContinueAsGuest={() => setIsGuestModeActive(true)}
+      />
+    </AuthContext.Provider>
+  );
+
+  // A reset link signs in; the new password is asked for before anything else opens.
+  if (recoveringPassword) return loginScreen;
+
   // 1. Loading State Splash (members must not glimpse owner screens before their role is known)
   if (dbLoading || (hasRealSession && !workspace)) {
     return (
@@ -590,18 +613,9 @@ const signUpWithEmail = async (emailVal: string, passwordVal: string) => {
     );
   }
 
-  // 2. Authentication routing rules
+  // 2. Sign-in (or guest trial) before the store opens
   if (!user && !isGuestModeActive) {
-    return (
-      <AuthContext.Provider value={authContextValue}>
-        <Login
-          language={language}
-          onLanguageToggle={toggleLanguage}
-          onLoginSuccess={() => setIsGuestModeActive(false)}
-          onContinueAsGuest={() => setIsGuestModeActive(true)}
-        />
-      </AuthContext.Provider>
-    );
+    return loginScreen;
   }
 
   if (hasRealSession && !isAdmin && !subscriptionLoading && isExpired) {
@@ -619,11 +633,9 @@ const signUpWithEmail = async (emailVal: string, passwordVal: string) => {
             ownerEmail: workspace.ownerEmail,
             onLeave: async () => {
               if (!user) return;
-              const pending = pendingSalesBlockSwitch(user.uid);
-              if (pending > 0) {
-                toast.error(isRtl
-                  ? `توجد ${pending} عملية بيع على هذا الجهاز لم تُرسل بعد. اتصل بالإنترنت وانتظر إرسالها أولاً.`
-                  : `${pending} sale(s) on this device have not been sent yet. Connect and wait for them first.`);
+              const blocked = deviceLocalWorkMessage(user.uid, isRtl);
+              if (blocked) {
+                toast.error(blocked);
                 return;
               }
               try {
@@ -634,6 +646,43 @@ const signUpWithEmail = async (emailVal: string, passwordVal: string) => {
             },
           } : null}
         />
+      </AuthContext.Provider>
+    );
+  }
+
+  // First-run setup for a new store owner (empty books, never completed).
+  const showOnboarding = needsOnboarding({
+    isOwner: isStoreOwner,
+    isGuest: !hasRealSession,
+    settings,
+    warehouses,
+    products,
+  });
+  if (showOnboarding && settings) {
+    return (
+      <AuthContext.Provider value={authContextValue}>
+        <Suspense
+          fallback={
+            <div className="min-h-screen flex items-center justify-center bg-slate-50 dark:bg-slate-950">
+              <p className="text-sm font-bold text-slate-500">
+                {isRtl ? 'جارٍ تحضير الإعداد…' : 'Preparing setup…'}
+              </p>
+            </div>
+          }
+        >
+          <OnboardingWizard
+            settings={settings}
+            language={language}
+            onLanguageChange={(lang) => setLanguage(lang)}
+            onCurrencyPrefer={(code) => setPreferredCurrency(code)}
+            saveSettings={saveSettings}
+            saveWarehouse={saveWarehouse}
+            saveProduct={saveProduct}
+            onFinished={(goToPos) => {
+              setActiveScreen(goToPos ? 'pos' : 'dashboard');
+            }}
+          />
+        </Suspense>
       </AuthContext.Provider>
     );
   }
@@ -713,8 +762,7 @@ const signUpWithEmail = async (emailVal: string, passwordVal: string) => {
                       ? 'bg-indigo-600 text-white shadow-md'
                       : 'text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800/10'}`}
                 >
-                  <span className="text-sm">🗄️</span>
-                  <span>{language === 'ar' ? 'النسخ المحلي والأمان (JSON)' : 'Local JSON Backup'}</span>
+                  <span>{language === 'ar' ? 'نسخة على الجهاز' : 'On this device'}</span>
                 </button>
                 <button
                   onClick={() => {
@@ -726,8 +774,7 @@ const signUpWithEmail = async (emailVal: string, passwordVal: string) => {
                       ? 'bg-indigo-600 text-white shadow-md'
                       : 'text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800/10'}`}
                 >
-                  <span className="text-sm">☁️</span>
-                  <span>{language === 'ar' ? 'المزامنة السحابية (Google Drive)' : 'Google Drive Sync'}</span>
+                  <span>{language === 'ar' ? 'Google Drive' : 'Google Drive'}</span>
                 </button>
               </div>
             </div>
@@ -782,9 +829,8 @@ const signUpWithEmail = async (emailVal: string, passwordVal: string) => {
       default:
         return (
           <div className="flex flex-col items-center justify-center h-[70vh] text-center px-4">
-            <span className="text-4xl">🏗️</span>
-            <h2 className="text-xl sm:text-2xl font-bold text-gray-900 mb-2 mt-4">
-              {isRtl ? 'تحت الإنشاء' : 'Under Construction'}
+            <h2 className="text-xl sm:text-2xl font-bold text-gray-900 dark:text-gray-100 mb-2">
+              {isRtl ? 'هذه الشاشة غير متاحة بعد' : 'This screen is not available yet'}
             </h2>
           </div>
         );
@@ -816,6 +862,7 @@ const signUpWithEmail = async (emailVal: string, passwordVal: string) => {
           onOpenSidebar={() => setIsSidebarOpen(true)}
           onChangeScreen={setActiveScreen}
           activeScreen={activeScreen}
+          subscriptionDaysRemaining={hasRealSession ? subscriptionDaysRemaining : null}
         />
 
         {/* Global Live scrolling news and exchange rates ticker */}
@@ -839,7 +886,7 @@ const signUpWithEmail = async (emailVal: string, passwordVal: string) => {
 
           {/* Screen Stage Container - Main Content Area */}
           <main 
-            className="main-content flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8 pb-28 lg:pb-8"
+            className="main-content flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8 pb-[calc(7rem+env(safe-area-inset-bottom))] lg:pb-8"
             style={sidebarOffsetStyle}
           >
 
@@ -896,10 +943,11 @@ const signUpWithEmail = async (emailVal: string, passwordVal: string) => {
         </div>
 
         {/* Modern iOS/Android/Capacitor-style Bottom Navigation Bar with CircularNotchedRectangle Notch Dock (lg:hidden) */}
-        <div className="lg:hidden fixed bottom-0 inset-x-0 h-20 z-50 pointer-events-none select-none font-arabic">
-          
+        <div className="lg:hidden fixed bottom-0 inset-x-0 h-[calc(5rem+env(safe-area-inset-bottom))] z-40 pointer-events-none select-none font-arabic">
+          <div className="absolute inset-x-0 bottom-0 h-[env(safe-area-inset-bottom)] bg-white/95 dark:bg-slate-900/95 pointer-events-auto" />
+
           {/* Physical Notched Backdrop with continuous smooth line */}
-          <div className="absolute inset-0 flex pointer-events-auto">
+          <div className="absolute inset-x-0 top-0 h-20 flex pointer-events-auto">
             {/* Left Wing */}
             <div className="flex-1 bg-white/95 dark:bg-slate-900/95 backdrop-blur-xl border-t border-slate-200/50 dark:border-white/10 rounded-tl-[22px] shadow-[0_-8px_30px_rgba(0,0,0,0.03)]" />
             
@@ -920,7 +968,7 @@ const signUpWithEmail = async (emailVal: string, passwordVal: string) => {
           </div>
 
           {/* Interactive Nav Content */}
-          <div className="absolute inset-0 flex items-center justify-between px-2 pb-[env(safe-area-inset-bottom)] pointer-events-auto">
+          <div className="absolute inset-x-0 top-0 h-20 flex items-center justify-between px-2 pointer-events-auto">
             
             {/* Left Navigation Actions (Home, Inventory) */}
             <div className="flex-1 flex justify-around items-center">

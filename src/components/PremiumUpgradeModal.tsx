@@ -4,7 +4,7 @@ import { X, Sparkles, ShieldCheck, RotateCw, Crown, Smartphone } from 'lucide-re
 import { toast } from 'sonner';
 import { Capacitor } from '@capacitor/core';
 import { sounds } from '../lib/sounds';
-import { initializeBilling, makePurchase } from '../services/billing';
+import { initializeBilling, makePurchase, PLAY_PREMIUM_FALLBACK_PRICE, PLAY_PREMIUM_PRODUCT_ID } from '../services/billing';
 import { activatePaidSubscription, restoreOwnedPurchases } from '../lib/activateSubscription';
 import { usePlayPrice } from '../hooks/usePlayPrice';
 
@@ -65,7 +65,7 @@ export default function PremiumUpgradeModal({
   const isRtl = language === 'ar';
   const isNative = Capacitor.isNativePlatform();
   const [processing, setProcessing] = useState(false);
-  const playPrice = usePlayPrice('mostawdaee_premium_100', isNative && isOpen);
+  const playPrice = usePlayPrice(PLAY_PREMIUM_PRODUCT_ID, isNative && isOpen);
 
   const handleRestore = async () => {
     sounds?.playClick();
@@ -103,6 +103,7 @@ export default function PremiumUpgradeModal({
     try {
       initializeBilling(
         async (tx) => {
+          setProcessing(true);
           try {
             await activatePaidSubscription(tx);
             sounds?.playSuccess();
@@ -121,10 +122,11 @@ export default function PremiumUpgradeModal({
           setProcessing(false);
         }
       );
-      const started = await makePurchase('mostawdaee_premium_100');
-      if (!started) setProcessing(false);
+      await makePurchase(PLAY_PREMIUM_PRODUCT_ID);
     } catch (err: any) {
       toast.error(err?.message || (isRtl ? 'تعذر بدء عملية الشراء' : 'Could not start the purchase'));
+    } finally {
+      // The approved purchase arrives later through the billing callback; a cancelled or pending one never does.
       setProcessing(false);
     }
   };
@@ -199,12 +201,12 @@ export default function PremiumUpgradeModal({
                     {isRtl ? 'الاشتراك السنوي' : 'ANNUAL PLAN'}
                   </span>
                   <span className="text-sm text-slate-300 block font-semibold">
-                    {isRtl ? 'تغطية شاملة لكامل خدمات النظام والمزامنة السحابية.' : 'Full access including cloud sync, updates and maintenance.'}
+                    {isRtl ? 'يشمل المزامنة السحابية والتحديثات والصيانة.' : 'Includes cloud sync, updates, and maintenance.'}
                   </span>
                 </div>
                 <div className="flex flex-col items-center sm:items-end gap-0.5">
                   <div className="flex items-baseline gap-1" dir="ltr">
-                    <span className="text-3xl font-black text-white">{playPrice || '$100'}</span>
+                    <span className="text-3xl font-black text-white">{playPrice || PLAY_PREMIUM_FALLBACK_PRICE}</span>
                     <span className="text-xs text-slate-400 font-bold">/{isRtl ? 'سنوياً' : 'yr'}</span>
                   </div>
                   {!playPrice && (

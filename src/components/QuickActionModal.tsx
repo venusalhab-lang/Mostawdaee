@@ -26,7 +26,7 @@ export default function QuickActionModal({
     {
       id: 'pos',
       screen: 'pos',
-      title: isRtl ? 'بيع مباشر' : 'Direct POS',
+      title: isRtl ? 'نقطة البيع' : 'POS',
       desc: isRtl ? 'حركة خروج بضاعة مبيعات' : 'Log outgoing sale items',
       icon: ShoppingCart,
       color: 'from-emerald-500 to-teal-700',
@@ -46,7 +46,7 @@ export default function QuickActionModal({
     {
       id: 'debts',
       screen: 'customers',
-      title: isRtl ? 'الديون' : 'Debts & Debtors',
+      title: isRtl ? 'الديون' : 'Debts',
       desc: isRtl ? 'الذمم المستحقة على العملاء' : 'Outstanding customer debts',
       icon: Wallet,
       color: 'from-amber-500 to-orange-600',
@@ -100,7 +100,7 @@ export default function QuickActionModal({
                     {isRtl ? 'الإجراءات السريعة' : 'Quick Actions'}
                   </h3>
                   <p className="text-[11px] text-slate-500 dark:text-slate-400 font-bold font-arabic">
-                    {isRtl ? 'اختصارات لوحة التحكم الفورية' : 'Instant controls and fast routes'}
+                    {isRtl ? 'اختصارات للوصول السريع' : 'Shortcuts to common screens'}
                   </p>
                 </div>
               </div>

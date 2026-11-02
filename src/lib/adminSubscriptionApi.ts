@@ -1,4 +1,4 @@
-import { apiUrl } from './apiBase';
+import { API_UNREACHABLE_AR, apiUrl, readApiJson } from './apiBase';
 import { supabase } from '../supabaseClient';
 import { isVerifiedAdmin } from './adminAccess';
 import { isPlatformRole, type PlatformRole, type StaffRole } from './platformStaff';
@@ -87,7 +87,8 @@ async function adminRequest(path: string, init?: RequestInit) {
       ...(init?.headers || {}),
     },
   });
-  const body = await response.json().catch(() => ({}));
+  const body = await readApiJson(response);
+  if (!body) throw new Error(API_UNREACHABLE_AR);
   if (!response.ok) {
     throw new Error(body.message || 'تعذر تنفيذ الأمر');
   }
