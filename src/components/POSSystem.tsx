@@ -26,6 +26,7 @@ import {
   Clock,
   User,
   X,
+  MonitorSmartphone,
 } from 'lucide-react';
 import { useFirebase } from './FirebaseProvider';
 import { migrateLegacyUserCache } from '../lib/userStorage';
@@ -74,6 +75,13 @@ import { resolveProductCategory, resolveProductSku } from '../lib/productForm';
 import ShowMoreBar from './ui/ShowMoreBar';
 import { useProgressiveList } from '../hooks/useProgressiveList';
 import { productVisualEmoji, productVisualTone } from '../lib/productVisual';
+import {
+  buildCustomerDisplayLines,
+  idleCustomerDisplaySnapshot,
+  openCustomerDisplayWindow,
+  publishCustomerDisplay,
+  type CustomerDisplaySnapshot,
+} from '../lib/customerDisplay';
 
 interface POSSystemProps {
   language: Language;
@@ -1110,6 +1118,87 @@ export default function POSSystem({ language }: POSSystemProps) {
     currency: activeCurrency as Currency,
   });
 
+  const customerDisplayHoldUntilRef = useRef(0);
+  const [customerDisplayEpoch, setCustomerDisplayEpoch] = useState(0);
+  const storeKey = workspace?.ownerId || user?.uid || 'local';
+  const businessLabel = settings?.businessName?.trim() || (isRtl ? 'مستودعي' : 'Mostawdaee');
+
+  useEffect(() => {
+    if (Date.now() < customerDisplayHoldUntilRef.current) return;
+
+    if (posMode !== 'sale') {
+      publishCustomerDisplay(
+        idleCustomerDisplaySnapshot({
+          language: isRtl ? 'ar' : 'en',
+          businessName: businessLabel,
+          currency: activeCurrency as Currency,
+          storeKey,
+        }),
+      );
+      return;
+    }
+
+    if (scannedItems.length === 0) {
+      publishCustomerDisplay(
+        idleCustomerDisplaySnapshot({
+          language: isRtl ? 'ar' : 'en',
+          businessName: businessLabel,
+          currency: activeCurrency as Currency,
+          storeKey,
+        }),
+      );
+      return;
+    }
+
+    const snapshot: CustomerDisplaySnapshot = {
+      v: 1,
+      updatedAt: Date.now(),
+      status: 'cart',
+      language: isRtl ? 'ar' : 'en',
+      businessName: businessLabel,
+      currency: activeCurrency as Currency,
+      lines: buildCustomerDisplayLines(scannedItems, isRtl ? 'ar' : 'en'),
+      itemCount: totalPieces,
+      subtotal,
+      discount: appliedDiscount,
+      taxAmount,
+      total: grandTotal,
+      storeKey,
+    };
+    publishCustomerDisplay(snapshot);
+  }, [
+    scannedItems,
+    posMode,
+    subtotal,
+    appliedDiscount,
+    taxAmount,
+    grandTotal,
+    totalPieces,
+    activeCurrency,
+    businessLabel,
+    storeKey,
+    isRtl,
+    customerDisplayEpoch,
+  ]);
+
+  const openCustomerScreen = async () => {
+    const win = await openCustomerDisplayWindow();
+    if (!win) {
+      toast.error(
+        isRtl
+          ? 'تعذّر فتح شاشة العميل. اسمح بالنوافذ المنبثقة ثم أعد المحاولة.'
+          : 'Could not open the customer display. Allow pop-ups and try again.',
+      );
+      return;
+    }
+    setCustomerDisplayEpoch((n) => n + 1);
+    toast.success(
+      isRtl
+        ? 'تم فتح شاشة العميل — اسحبها إلى الشاشة الأمامية إن لزم.'
+        : 'Customer display opened — drag it to the front screen if needed.',
+    );
+  };
+
   const printThermalReceipt = (invoiceObj: Invoice, cashSale = false) => {
     const html = buildReceiptHtml({
       invoice: invoiceObj,
@@ -1300,6 +1389,30 @@ export default function POSSystem({ language }: POSSystemProps) {
       // Only a sale that was actually saved may open the cash drawer; reprints never do.
       printThermalReceipt(officialInvoice, (isCashSale && paidNow > 0) || (saleMethod === 'credit' && paidNow > 0));
 
+      if (posMode === 'sale') {
+        customerDisplayHoldUntilRef.current = Date.now() + 7000;
+        publishCustomerDisplay({
+          v: 1,
+          updatedAt: Date.now(),
+          status: 'paid',
+          language: isRtl ? 'ar' : 'en',
+          businessName: businessLabel,
+          currency: activeCurrency as Currency,
+          lines: buildCustomerDisplayLines(scannedItems, isRtl ? 'ar' : 'en'),
+          itemCount: totalPieces,
+          subtotal,
+          discount: appliedDiscount,
+          taxAmount,
+          total: grandTotal,
+          changeDue: isCashSale ? changeDue : undefined,
+          storeKey,
+        });
+        window.setTimeout(() => {
+          customerDisplayHoldUntilRef.current = 0;
+          setCustomerDisplayEpoch((n) => n + 1);
+        }, 7000);
+      }
+
       // Clear State
       setLastInvoiceNumber(officialInvoice.invoiceNumber);
       setInvoiceTick((t) => t + 1);
@@ -1360,6 +1473,19 @@ export default function POSSystem({ language }: POSSystemProps) {
         </div>
 
         <div className="flex flex-wrap items-center gap-2 self-start">
+        {posMode === 'sale' && (
+          <button
+            type="button"
+            onClick={() => {
+              void openCustomerScreen();
+            }}
+            className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-2.5 text-xs font-black text-slate-600 hover:text-slate-900 dark:border-slate-800 dark:bg-slate-900/60 dark:text-slate-300 cursor-pointer transition-colors"
+            title={isRtl ? 'فتح شاشة العميل على الشاشة الثانية' : 'Open customer display on the second screen'}
+          >
+            <MonitorSmartphone size={15} />
+            {isRtl ? 'شاشة العميل' : 'Customer display'}
+          </button>
+        )}
         <button
           type="button"
           onClick={() => setShowShiftPanel(true)}

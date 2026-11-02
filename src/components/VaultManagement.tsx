@@ -7,7 +7,6 @@ import {
   Plus, 
   Minus,
   Search,
-  Calendar,
   X,
   Wallet,
   TrendingDown,
@@ -25,6 +24,7 @@ import { toast } from 'sonner';
 import { useSuccessCelebration } from '../hooks/useSuccessCelebration';
 import { sounds } from '../lib/sounds';
 import ExcelExportButton from './ui/ExcelExportButton';
+import DateField from './ui/DateField';
 import ShowMoreBar from './ui/ShowMoreBar';
 import { useProgressiveList } from '../hooks/useProgressiveList';
 import { formatMoney } from '../lib/exchangeRates';
@@ -630,29 +630,27 @@ export default function VaultManagement({ language, settings }: Props) {
           {/* From date */}
           <div className="space-y-1.5">
             <label className="text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider">{isRtl ? 'من تاريخ' : 'From Date'}</label>
-            <div className="relative">
-              <Calendar className={`absolute top-1/2 -translate-y-1/2 ${isRtl ? 'right-3' : 'left-3'} text-slate-400 w-3.5 h-3.5 pointer-events-none`} />
-              <input 
-                type="date"
-                value={fromDate}
-                onChange={(e) => setFromDate(e.target.value)}
-                className={`w-full ${isRtl ? 'pr-9 pl-4' : 'pl-9 pr-4'} py-2 bg-slate-50 dark:bg-black/40 border border-slate-200 dark:border-white/10 rounded-xl outline-none text-xs focus:ring-1 focus:ring-[#00E5FF] transition-all text-slate-900 dark:text-white`}
-              />
-            </div>
+            <DateField
+              value={fromDate}
+              max={toDate || undefined}
+              onChange={setFromDate}
+              compact
+              aria-label={isRtl ? 'من تاريخ' : 'From Date'}
+              className="w-full px-1 bg-slate-50 dark:bg-black/40 border border-slate-200 dark:border-white/10 rounded-xl outline-none text-xs focus-within:ring-1 focus-within:ring-[#00E5FF] transition-all text-slate-900 dark:text-white"
+            />
           </div>
 
           {/* To Date */}
           <div className="space-y-1.5">
             <label className="text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider">{isRtl ? 'إلى تاريخ' : 'To Date'}</label>
-            <div className="relative">
-              <Calendar className={`absolute top-1/2 -translate-y-1/2 ${isRtl ? 'right-3' : 'left-3'} text-slate-400 w-3.5 h-3.5 pointer-events-none`} />
-              <input 
-                type="date"
-                value={toDate}
-                onChange={(e) => setToDate(e.target.value)}
-                className={`w-full ${isRtl ? 'pr-9 pl-4' : 'pl-9 pr-4'} py-2 bg-slate-50 dark:bg-black/40 border border-slate-200 dark:border-white/10 rounded-xl outline-none text-xs focus:ring-1 focus:ring-[#00E5FF] transition-all text-slate-900 dark:text-white`}
-              />
-            </div>
+            <DateField
+              value={toDate}
+              min={fromDate || undefined}
+              onChange={setToDate}
+              compact
+              aria-label={isRtl ? 'إلى تاريخ' : 'To Date'}
+              className="w-full px-1 bg-slate-50 dark:bg-black/40 border border-slate-200 dark:border-white/10 rounded-xl outline-none text-xs focus-within:ring-1 focus-within:ring-[#00E5FF] transition-all text-slate-900 dark:text-white"
+            />
           </div>
 
         </div>

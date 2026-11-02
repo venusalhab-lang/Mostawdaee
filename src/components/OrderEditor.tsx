@@ -7,6 +7,7 @@ import { CurrencySelect } from './CurrencyPicker';
 import type { Currency, OrderLine, Product, TradeOrder } from '../types';
 import { formatMoney } from '../lib/exchangeRates';
 import { localDayEnd, localDayStart, localIsoDate } from '../lib/localDate';
+import DateField from './ui/DateField';
 import { orderKindLabel, orderLineTotal, orderTotals } from '../lib/orders';
 import { buildOrderPrintHtml } from '../lib/orderDocument';
 import { printHtmlDocument } from '../lib/printHtml';
@@ -142,17 +143,29 @@ export default function OrderEditor({ isRtl, initial, onClose }: Props) {
             </div>
             <div>
               <label className={label} htmlFor="order-date">{L('التاريخ', 'Date')}</label>
-              <input id="order-date" type="date" className={input} value={localIsoDate(draft.date)}
-                onChange={(e) => { const t = localDayStart(e.target.value); if (t !== null) setDraft((d) => ({ ...d, date: t })); }} />
+              <DateField
+                id="order-date"
+                className={input}
+                value={localIsoDate(draft.date)}
+                onChange={(iso) => {
+                  const t = localDayStart(iso);
+                  if (t !== null) setDraft((d) => ({ ...d, date: t }));
+                }}
+                aria-label={L('التاريخ', 'Date')}
+              />
             </div>
             <div>
               <label className={label} htmlFor="order-until">{isQuote ? L('صالح حتى', 'Valid until') : L('موعد التسليم المطلوب', 'Requested delivery')}</label>
-              <input id="order-until" type="date" className={input} value={dateField ? localIsoDate(dateField) : ''}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  const t = v ? (isQuote ? localDayEnd(v) : localDayStart(v)) : null;
+              <DateField
+                id="order-until"
+                className={input}
+                value={dateField ? localIsoDate(dateField) : ''}
+                onChange={(iso) => {
+                  const t = iso ? (isQuote ? localDayEnd(iso) : localDayStart(iso)) : null;
                   setDraft((d) => (isQuote ? { ...d, validUntil: t ?? undefined } : { ...d, expectedDate: t ?? undefined }));
-                }} />
+                }}
+                aria-label={isQuote ? L('صالح حتى', 'Valid until') : L('موعد التسليم المطلوب', 'Requested delivery')}
+              />
             </div>
             <div>
               <label className={label} htmlFor="order-currency">{L('العملة', 'Currency')}</label>

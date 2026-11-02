@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { localDayEnd, localDayStart, localIsoDate, timestampForLocalDay } from '../localDate';
+import {
+  formatDisplayDate,
+  localDayEnd,
+  localDayStart,
+  localIsoDate,
+  parseFlexibleDate,
+  timestampForLocalDay,
+} from '../localDate';
 
 describe('localDate', () => {
   it('uses the device calendar day, not UTC', () => {
@@ -29,5 +36,20 @@ describe('localDate', () => {
     expect(timestampForLocalDay('2026-10-09', now)).toBe(now);
     expect(timestampForLocalDay('2026-10-01', now)).toBe(new Date(2026, 9, 1).getTime());
     expect(timestampForLocalDay('bad', now)).toBe(now);
+  });
+
+  it('formats ISO as day-first display', () => {
+    expect(formatDisplayDate('2026-03-09')).toBe('09/03/2026');
+    expect(formatDisplayDate('')).toBe('');
+    expect(formatDisplayDate('bad')).toBe('');
+  });
+
+  it('parses day-first typed dates, not US month-first', () => {
+    expect(parseFlexibleDate('09/03/2026')).toBe('2026-03-09');
+    expect(parseFlexibleDate('9-3-2026')).toBe('2026-03-09');
+    expect(parseFlexibleDate('09032026')).toBe('2026-03-09');
+    expect(parseFlexibleDate('2026-03-09')).toBe('2026-03-09');
+    expect(parseFlexibleDate('31/02/2026')).toBeNull();
+    expect(parseFlexibleDate('')).toBeNull();
   });
 });

@@ -20,6 +20,44 @@ function parseIsoDate(value: string): [number, number, number] | null {
   return probe.getFullYear() === y && probe.getMonth() === mo - 1 && probe.getDate() === d ? [y, mo, d] : null;
 }
 
+function ymd(y: number, mo: number, d: number): string | null {
+  const probe = new Date(y, mo - 1, d);
+  if (probe.getFullYear() !== y || probe.getMonth() !== mo - 1 || probe.getDate() !== d) return null;
+  return `${y}-${pad(mo)}-${pad(d)}`;
+}
+
+/** YYYY-MM-DD → DD/MM/YYYY for typing fields. Empty stays empty. */
+export function formatDisplayDate(iso: string): string {
+  const p = parseIsoDate(iso);
+  if (!p) return '';
+  return `${pad(p[2])}/${pad(p[1])}/${p[0]}`;
+}
+
+/**
+ * Accepts merchant-friendly dates and returns YYYY-MM-DD, or null if invalid.
+ * Supports: YYYY-MM-DD, DD/MM/YYYY, DD-MM-YYYY, D/M/YYYY, and 8 digits DDMMYYYY.
+ * Day-first (not US month-first) so 09/03/2026 is 9 March.
+ */
+export function parseFlexibleDate(raw: string): string | null {
+  const value = raw.trim();
+  if (!value) return null;
+  const iso = parseIsoDate(value);
+  if (iso) return ymd(iso[0], iso[1], iso[2]);
+
+  const digits = value.replace(/\D/g, '');
+  if (/^\d{8}$/.test(digits)) {
+    return ymd(Number(digits.slice(4)), Number(digits.slice(2, 4)), Number(digits.slice(0, 2)));
+  }
+
+  const m = /^(\d{1,2})[/.\-](\d{1,2})[/.\-](\d{4})$/.exec(value);
+  if (!m) return null;
+  return ymd(Number(m[3]), Number(m[2]), Number(m[1]));
+}
+
+export function isIsoDate(value: string): boolean {
+  return parseIsoDate(value) !== null;
+}
+
 /** First millisecond of a YYYY-MM-DD day in the device time zone, or null for an invalid date. */
 export function localDayStart(value: string): number | null {
   const p = parseIsoDate(value);

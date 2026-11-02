@@ -61,6 +61,8 @@ import CurrencyPicker from './CurrencyPicker';
 import { stockValueByCurrency } from '../lib/profits';
 import ProductVisualIcon from './ProductVisualIcon';
 import { productVisualTone } from '../lib/productVisual';
+import { localDayStart, localIsoDate } from '../lib/localDate';
+import DateField from './ui/DateField';
 
 const PRODUCT_FORMS = { one: 'منتج واحد', two: 'منتجين', few: '{n} منتجات', many: '{n} منتجاً', other: '{n} منتج' };
 
@@ -2046,11 +2048,16 @@ export default function InventoryManagement({
                             <Calendar size={14} className="text-slate-400" />
                             {isRtl ? 'تاريخ الصلاحية' : t.expiryDate}
                           </label>
-                          <input
-                            type="date"
-                            value={newProduct.expiryDate ? new Date(newProduct.expiryDate).toISOString().split('T')[0] : ''}
-                            onChange={e => setNewProduct({ ...newProduct, expiryDate: e.target.value ? new Date(e.target.value).getTime() : undefined })}
-                            className="w-full px-4 py-2.5 bg-white dark:bg-white/[0.02] border border-slate-200 dark:border-white/10 rounded-xl focus:border-blue-500 outline-none dark:text-white font-bold text-sm"
+                          <DateField
+                            value={newProduct.expiryDate ? localIsoDate(newProduct.expiryDate) : ''}
+                            onChange={(iso) =>
+                              setNewProduct({
+                                ...newProduct,
+                                expiryDate: iso ? (localDayStart(iso) ?? undefined) : undefined,
+                              })
+                            }
+                            aria-label={isRtl ? 'تاريخ الصلاحية' : t.expiryDate}
+                            className="w-full bg-white dark:bg-white/[0.02] border border-slate-200 dark:border-white/10 rounded-xl focus-within:border-blue-500 dark:text-white font-bold text-sm"
                           />
                         </div>
                         <div className="space-y-1.5">

@@ -5,7 +5,6 @@ import {
   Wallet, 
   Plus, 
   Search, 
-  Calendar, 
   X, 
   FileText, 
   User, 
@@ -42,6 +41,7 @@ import { isOfflineError } from '../lib/offlineQueue';
 import { formatPackStock, lineKey, lineQuantityText, productPack } from '../lib/packs';
 import CurrencyPicker from './CurrencyPicker';
 import ShowMoreBar from './ui/ShowMoreBar';
+import DateField from './ui/DateField';
 import { useProgressiveList } from '../hooks/useProgressiveList';
 import { readVaultBalances, INSUFFICIENT_VAULT_FUNDS, planInvoiceVaultEntry, roundForCurrency } from '../lib/vaultMath';
 import { computeInvoiceTotals, resolveVatRate } from '../lib/invoiceTotals';
@@ -743,27 +743,25 @@ export default function PurchasesExpenses({ language }: Props) {
 
           {/* Date Picker Interval Filter */}
           <div className="flex items-center gap-2 w-full md:w-auto overflow-x-auto">
-            <div className="relative">
-              <Calendar className="absolute top-1/2 left-2.5 -translate-y-1/2 text-slate-400" size={14} />
-              <input
-                type="date"
-                className="py-1.5 pl-8 pr-2 text-xs bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg focus:outline-none dark:text-white"
-                title={isRtl ? "من تاريخ" : "From Date"}
-                value={fromDate}
-                onChange={(e) => setFromDate(e.target.value)}
-              />
-            </div>
-            <span className="text-xs text-slate-400">{isRtl ? "إلى" : "to"}</span>
-            <div className="relative">
-              <Calendar className="absolute top-1/2 left-2.5 -translate-y-1/2 text-slate-400" size={14} />
-              <input
-                type="date"
-                className="py-1.5 pl-8 pr-2 text-xs bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg focus:outline-none dark:text-white"
-                title={isRtl ? "إلى تاريخ" : "To Date"}
-                value={toDate}
-                onChange={(e) => setToDate(e.target.value)}
-              />
-            </div>
+            <DateField
+              value={fromDate}
+              max={toDate || undefined}
+              onChange={setFromDate}
+              compact
+              title={isRtl ? 'من تاريخ' : 'From Date'}
+              aria-label={isRtl ? 'من تاريخ' : 'From Date'}
+              className="min-w-[9.5rem] bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg dark:text-white"
+            />
+            <span className="text-xs text-slate-400">{isRtl ? 'إلى' : 'to'}</span>
+            <DateField
+              value={toDate}
+              min={fromDate || undefined}
+              onChange={setToDate}
+              compact
+              title={isRtl ? 'إلى تاريخ' : 'To Date'}
+              aria-label={isRtl ? 'إلى تاريخ' : 'To Date'}
+              className="min-w-[9.5rem] bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg dark:text-white"
+            />
 
             {(fromDate || toDate || searchQuery || expenseFilter !== 'all') && (
               <button
@@ -1200,12 +1198,12 @@ export default function PurchasesExpenses({ language }: Props) {
 
                   <div className="space-y-1.5">
                     <label className="text-xs font-black text-slate-400 uppercase tracking-wider">{isRtl ? "تاريخ الفاتورة" : "Invoice Issue Date"}</label>
-                    <input
-                      type="date"
-                      className="w-full p-3 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-sm focus:border-indigo-500 focus:outline-none dark:text-white"
+                    <DateField
                       required
                       value={purchaseDate}
-                      onChange={(e) => setPurchaseDate(e.target.value)}
+                      onChange={setPurchaseDate}
+                      aria-label={isRtl ? 'تاريخ الفاتورة' : 'Invoice Issue Date'}
+                      className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-sm focus-within:border-indigo-500 dark:text-white"
                     />
                   </div>
                 </div>

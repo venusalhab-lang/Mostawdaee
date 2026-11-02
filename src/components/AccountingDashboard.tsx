@@ -6,6 +6,7 @@ import { CURRENCY_NAMES } from './CurrencyPicker';
 import type { Currency, VaultTransaction } from '../types';
 import { formatMoney, isPosCurrency } from '../lib/exchangeRates';
 import { localDayEnd, localDayStart, localIsoDate } from '../lib/localDate';
+import DateField from './ui/DateField';
 import { printHtmlDocument } from '../lib/printHtml';
 import { stockValueByCurrency } from '../lib/profits';
 import { readVaultBalances } from '../lib/vaultMath';
@@ -490,8 +491,8 @@ export default function AccountingDashboard({ language = 'ar', currency: preferr
             </select>
             {preset === 'custom' && (
               <>
-                <input type="date" aria-label={L('من', 'From')} value={customFrom} onChange={(e) => setCustomFrom(e.target.value)} className={SELECT} />
-                <input type="date" aria-label={L('إلى', 'To')} value={customTo} onChange={(e) => setCustomTo(e.target.value)} className={SELECT} />
+                <DateField aria-label={L('من', 'From')} value={customFrom} onChange={setCustomFrom} className={SELECT} compact />
+                <DateField aria-label={L('إلى', 'To')} value={customTo} onChange={setCustomTo} className={SELECT} compact />
               </>
             )}
             <span className="text-xs text-slate-500 dark:text-gray-400">
@@ -813,7 +814,7 @@ export default function AccountingDashboard({ language = 'ar', currency: preferr
                     {OPENING_ACCOUNTS.map((c) => <option key={c} value={c}>{accountName(c, isAr)}</option>)}
                   </select>
                   <input type="number" inputMode="decimal" min="0" step="any" placeholder={L('المبلغ', 'Amount')} aria-label={L('المبلغ', 'Amount')} value={openAmount} onChange={(e) => setOpenAmount(e.target.value)} className={SELECT} />
-                  <input type="date" aria-label={L('التاريخ', 'Date')} value={openDate} onChange={(e) => setOpenDate(e.target.value)} className={SELECT} />
+                  <DateField aria-label={L('التاريخ', 'Date')} value={openDate} onChange={setOpenDate} className={SELECT} />
                   <input type="text" placeholder={L('ملاحظة (اختياري)', 'Note (optional)')} aria-label={L('ملاحظة', 'Note')} value={openMemo} onChange={(e) => setOpenMemo(e.target.value)} className={SELECT} />
                 </div>
                 <button type="button" disabled={saving || !user} onClick={addOpening} className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-semibold">

@@ -20,6 +20,7 @@ import {
   X,
 } from 'lucide-react';
 import { toast } from 'sonner';
+import DateField from './ui/DateField';
 import type {
   AppSettings,
   Cheque,
@@ -640,24 +641,22 @@ export default function ChequesManagement({ language, settings }: Props) {
         </label>
         <label className={`space-y-1 ${filtersOpen ? '' : 'hidden md:block'}`}>
           <span className="text-xs font-bold text-slate-400">{isRtl ? 'استحقاق من' : 'Due from'}</span>
-          <input
-            type="date"
-            dir="ltr"
+          <DateField
             value={filters.from}
             max={filters.to || undefined}
-            onChange={(event) => setFilters((current) => ({ ...current, from: event.target.value }))}
+            onChange={(from) => setFilters((current) => ({ ...current, from }))}
             className={inputClass}
+            aria-label={isRtl ? 'استحقاق من' : 'Due from'}
           />
         </label>
         <label className={`space-y-1 ${filtersOpen ? '' : 'hidden md:block'}`}>
           <span className="text-xs font-bold text-slate-400">{isRtl ? 'إلى' : 'To'}</span>
-          <input
-            type="date"
-            dir="ltr"
+          <DateField
             value={filters.to}
             min={filters.from || undefined}
-            onChange={(event) => setFilters((current) => ({ ...current, to: event.target.value }))}
+            onChange={(to) => setFilters((current) => ({ ...current, to }))}
             className={inputClass}
+            aria-label={isRtl ? 'إلى' : 'To'}
           />
         </label>
         <button
@@ -844,7 +843,7 @@ export default function ChequesManagement({ language, settings }: Props) {
               </label>
               <label className="space-y-1 col-span-2">
                 <span className="text-xs font-bold text-slate-500">{isRtl ? 'تاريخ الاستحقاق' : 'Due date'}</span>
-                <input type="date" dir="ltr" value={form.dueDate} onChange={(event) => setForm((current) => ({ ...current, dueDate: event.target.value }))} className={inputClass} required />
+                <DateField value={form.dueDate} onChange={(dueDate) => setForm((current) => ({ ...current, dueDate }))} className={inputClass} required aria-label={isRtl ? 'تاريخ الاستحقاق' : 'Due date'} />
               </label>
             </div>
 

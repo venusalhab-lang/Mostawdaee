@@ -36,12 +36,14 @@ import { homeScreen } from './lib/roles';
 import { leaveStore, teamErrorMessage } from './lib/workspace';
 import { deviceLocalWorkMessage, switchStore } from './lib/storeSwitch';
 import { needsOnboarding } from './lib/onboarding';
+import { isCustomerDisplayHash } from './lib/customerDisplay';
 
 // Ensure TypeScript recognizes runtime `supabase` shape for `.auth` usage.
 const supabase: SupabaseClient<any, 'public', any> = (rawSupabase as unknown) as SupabaseClient<any, 'public', any>;
 
 const OnboardingWizard = lazyWithRetry(() => import('./components/OnboardingWizard'));
 const HomeDesk = lazyWithRetry(() => import('./components/HomeDesk'));
+const CustomerDisplay = lazyWithRetry(() => import('./components/CustomerDisplay'));
 const POSSystem = lazyWithRetry(() => import('./components/POSSystem'));
 const InventoryManagement = lazyWithRetry(() => import('./components/InventoryManagement'));
 const InventoryAudit = lazyWithRetry(() => import('./components/InventoryAudit'));
@@ -596,6 +598,21 @@ export default function App() {
       />
     </AuthContext.Provider>
   );
+
+  // Second-monitor customer display: no chrome, no login gate — cart arrives via BroadcastChannel.
+  if (isCustomerDisplayHash()) {
+    return (
+      <Suspense
+        fallback={
+          <div className="min-h-screen bg-[#0b1220] flex items-center justify-center text-slate-400 text-sm font-bold">
+            …
+          </div>
+        }
+      >
+        <CustomerDisplay />
+      </Suspense>
+    );
+  }
 
   // A reset link signs in; the new password is asked for before anything else opens.
   if (recoveringPassword) return loginScreen;
