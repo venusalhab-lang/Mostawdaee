@@ -267,7 +267,7 @@ interface CommitInvoiceResult {
 let invoiceNumberClaimsEnabled = true;
 const MAX_NUMBER_SUFFIX = 20;
 
-/** Reserves a sale number on the server so two devices or tabs can never store the same one. */
+/** Reserves a sale or purchase number on the server so two devices or tabs can never store the same one. */
 async function claimInvoiceNumber(transaction: any, uid: string, invoice: Invoice): Promise<string> {
   const base = invoice.invoiceNumber;
   for (let attempt = 1; attempt <= MAX_NUMBER_SUFFIX; attempt++) {
@@ -555,7 +555,9 @@ async function commitPurchaseReturn(uid: string, input: SalesReturnInput, opts: 
  * an invoice that already exists is never applied twice, so retries and replays are safe.
  */
 async function commitInvoice(uid: string, invoice: Invoice, opts: CommitInvoiceOptions): Promise<CommitInvoiceResult> {
-  const claim = invoiceNumberClaimsEnabled && invoice.type === 'sale' && !!invoice.invoiceNumber;
+  const claim = invoiceNumberClaimsEnabled
+    && (invoice.type === 'sale' || invoice.type === 'purchase')
+    && !!invoice.invoiceNumber;
   try {
     return await commitInvoiceOnce(uid, invoice, opts, claim);
   } catch (error: any) {
@@ -2106,6 +2108,11 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           throw notify(ar
             ? 'تغيّرت البيانات من جهاز آخر أثناء الحفظ. لم تُسجَّل العملية، أعد المحاولة.'
             : 'The data changed on another device while saving. Nothing was recorded; try again.', { code: 'aborted' });
+        }
+        if (error?.code === 'invoice-number-taken') {
+          throw notify(ar
+            ? 'رقم الفاتورة مستخدم مسبقاً. غيّر الرقم أو اتركه فارغاً ليُولَّد تلقائياً. لم تُسجَّل العملية.'
+            : 'That invoice number is already used. Change it or leave it blank for an automatic number. Nothing was recorded.', { code: 'invoice-number-taken' });
         }
         throw error;
       }
