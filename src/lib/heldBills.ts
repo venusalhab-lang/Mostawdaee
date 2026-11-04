@@ -1,4 +1,5 @@
 import type { InvoiceItem } from '../types';
+import { isAdhocLine } from './adhocLine';
 import { lineUnits } from './packs';
 import { dropPendingUserCache, userCacheKey } from './userStorage';
 
@@ -92,6 +93,7 @@ export function heldBillFitsStock(
 ): { ok: true } | { ok: false; productId: string; available: number; needed: number } {
   const neededByProduct = new Map<string, number>();
   for (const item of bill.items) {
+    if (isAdhocLine(item)) continue;
     neededByProduct.set(item.productId, (neededByProduct.get(item.productId) || 0) + lineUnits(item));
   }
   for (const [productId, needed] of neededByProduct) {

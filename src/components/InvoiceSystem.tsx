@@ -5,6 +5,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { translations } from '../translations';
 import { Language, Invoice, InvoiceItem, Product, Currency } from '../types';
 import { formatPackStock, isPackLine, lineAsPack, lineKey, lineQuantityText, lineUnits, productPack, unitsInCart } from '../lib/packs';
+import { buildAdhocInvoiceItem, isAdhocLine, validateAdhocDraft } from '../lib/adhocLine';
 import { useFirebase } from './FirebaseProvider';
 import { usePreferredCurrency } from './CurrencyContext';
 import { toast } from 'sonner';
@@ -262,6 +263,7 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
   const [customerName, setCustomerName] = useState('');
   const [supplierName, setSupplierName] = useState('');
   const [invoiceItems, setInvoiceItems] = useState<InvoiceItem[]>([]);
+  const [adhocDraft, setAdhocDraft] = useState({ description: '', quantity: '1', unitPrice: '' });
   const [newInvoiceSuccess, setNewInvoiceSuccess] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [invoiceCurrency, setInvoiceCurrency] = useState<Currency>(settings?.currency || 'JOD');
@@ -531,6 +533,7 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
   /** Sale: this product's lines, with one line set to `qty`, must fit in stock. */
   const fitsStock = (product: Product | undefined, item: InvoiceItem, qty: number) => {
     if (invoiceType !== 'sale') return true;
+    if (isAdhocLine(item)) return true;
     if (!product) {
       toast.error(isRtl
         ? `الصنف «${item.description}» لم يعد في المخزون.`
@@ -1454,6 +1457,63 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
                     )}
 
                     <div className="bg-gray-50/50 dark:bg-gray-900/50 p-6 rounded-[2.5rem] space-y-4 min-h-[400px] border-2 border-dashed border-gray-100 dark:border-gray-700 overflow-y-auto">
+                      {invoiceType === 'sale' && (
+                        <div className="rounded-2xl border border-cyan-200/70 dark:border-cyan-500/20 bg-cyan-50/40 dark:bg-cyan-500/5 p-3 space-y-2">
+                          <p className="text-[11px] font-black text-cyan-800 dark:text-cyan-300">
+                            {isRtl ? 'بند حر / خدمة (بدون مخزون)' : 'Free item / service (no stock)'}
+                          </p>
+                          <div className="grid grid-cols-1 sm:grid-cols-[1.4fr_0.5fr_0.7fr_auto] gap-2">
+                            <input
+                              type="text"
+                              value={adhocDraft.description}
+                              onChange={(e) => setAdhocDraft((d) => ({ ...d, description: e.target.value }))}
+                              placeholder={isRtl ? 'الوصف' : 'Description'}
+                              className="px-3 py-2 rounded-xl bg-white dark:bg-gray-900 border border-cyan-100 dark:border-white/10 text-xs font-bold outline-none focus:border-cyan-500"
+                            />
+                            <input
+                              type="number"
+                              min="0.001"
+                              step="any"
+                              value={adhocDraft.quantity}
+                              onChange={(e) => setAdhocDraft((d) => ({ ...d, quantity: e.target.value }))}
+                              placeholder={isRtl ? 'كمية' : 'Qty'}
+                              className="px-3 py-2 rounded-xl bg-white dark:bg-gray-900 border border-cyan-100 dark:border-white/10 text-xs font-bold tabular-nums outline-none focus:border-cyan-500"
+                            />
+                            <input
+                              type="number"
+                              min="0"
+                              step="any"
+                              value={adhocDraft.unitPrice}
+                              onChange={(e) => setAdhocDraft((d) => ({ ...d, unitPrice: e.target.value }))}
+                              placeholder={isRtl ? 'السعر' : 'Price'}
+                              className="px-3 py-2 rounded-xl bg-white dark:bg-gray-900 border border-cyan-100 dark:border-white/10 text-xs font-bold tabular-nums outline-none focus:border-cyan-500"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const checked = validateAdhocDraft(adhocDraft);
+                                if (!checked.ok) {
+                                  toast.error(isRtl ? 'أكمل الوصف والكمية والسعر.' : 'Fill description, quantity and price.');
+                                  return;
+                                }
+                                setInvoiceItems((prev) => [
+                                  ...prev,
+                                  buildAdhocInvoiceItem({
+                                    description: checked.description,
+                                    quantity: checked.quantity,
+                                    unitPrice: checked.unitPrice,
+                                    currency: invoiceCurrency,
+                                  }),
+                                ]);
+                                setAdhocDraft({ description: '', quantity: '1', unitPrice: '' });
+                              }}
+                              className="px-3 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-black cursor-pointer"
+                            >
+                              {isRtl ? 'إضافة' : 'Add'}
+                            </button>
+                          </div>
+                        </div>
+                      )}
                       {invoiceItems.length === 0 ? (
                         <div className="h-full flex flex-col items-center justify-center text-gray-400 gap-4 mt-20 opacity-40">
                           <PlusCircle size={48} strokeWidth={1} />
@@ -1463,7 +1523,8 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
                         <div className="space-y-4">
                           {invoiceItems.map(item => {
                             const key = lineKey(item);
-                            const origin = products.find(p => p.id === item.productId);
+                            const free = isAdhocLine(item);
+                            const origin = free ? undefined : products.find(p => p.id === item.productId);
                             const pack = origin ? productPack(origin) : null;
                             const unitName = origin?.unitName?.trim() || (isRtl ? 'وحدة' : 'unit');
                             const packName = pack?.name || (isRtl ? 'عبوة' : 'pack');
@@ -1512,7 +1573,14 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
                               </div>
 
                               <div className="text-right flex-1 pr-4">
-                                <div className="font-black text-gray-900 dark:text-gray-100 leading-tight">{item.description}</div>
+                                <div className="font-black text-gray-900 dark:text-gray-100 leading-tight">
+                                  {item.description}
+                                  {free && (
+                                    <span className="ms-1.5 inline-flex px-1.5 py-0.5 rounded-md text-[9px] font-black bg-cyan-500/15 text-cyan-700 dark:text-cyan-300">
+                                      {isRtl ? 'حر' : 'Free'}
+                                    </span>
+                                  )}
+                                </div>
                                 <div className="text-[10px] font-black text-indigo-600 dark:text-indigo-400 mt-1 font-mono">{formatCurrency(item.total, invoiceCurrency)}</div>
                               </div>
                             </div>

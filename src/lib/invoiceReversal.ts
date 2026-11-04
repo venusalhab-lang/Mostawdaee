@@ -1,11 +1,13 @@
 import type { Invoice } from '../types';
+import { isAdhocLine } from './adhocLine';
 import { roundQty } from './stock';
 import { lineUnits } from './packs';
 
-/** Stock units each product moves on this invoice (pack lines count quantity × pack size). */
+/** Stock units each product moves on this invoice (pack lines count quantity × pack size). Ad-hoc lines are omitted. */
 export function quantitiesByProduct(items: Invoice['items']): Map<string, { qty: number; description: string }> {
   const totals = new Map<string, { qty: number; description: string }>();
   for (const item of items) {
+    if (isAdhocLine(item) || !item.productId) continue;
     const entry = totals.get(item.productId) || { qty: 0, description: item.description };
     entry.qty = roundQty(entry.qty + lineUnits(item));
     totals.set(item.productId, entry);

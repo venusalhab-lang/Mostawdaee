@@ -33,4 +33,13 @@ describe('planStockReversal', () => {
   it('aggregates quantities by product', () => {
     expect(quantitiesByProduct([line('a', 1), line('a', 2)]).get('a')?.qty).toBe(3);
   });
+
+  it('skips ad-hoc free lines so they never move stock', () => {
+    expect(
+      quantitiesByProduct([
+        line('a', 2),
+        { productId: 'adhoc:x', description: 'Fee', quantity: 9, unitPrice: 1, total: 9, adhoc: true },
+      ]).get('a')?.qty,
+    ).toBe(2);
+  });
 });

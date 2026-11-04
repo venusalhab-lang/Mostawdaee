@@ -258,6 +258,11 @@ export interface InvoiceItem {
    */
   packSize?: number;
   packName?: string;
+  /**
+   * Free/service line: description + price only. Never moves inventory.
+   * Older invoices omit this; treat as stock unless productId starts with `adhoc:`.
+   */
+  adhoc?: boolean;
   /** Return lines: index of the line on the original sale. */
   sourceLine?: number;
 }

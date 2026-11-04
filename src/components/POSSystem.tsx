@@ -72,6 +72,7 @@ import CurrencyPicker from './CurrencyPicker';
 import ShiftPanel from './ShiftPanel';
 import { openShiftOf } from '../lib/shifts';
 import { emptyQuickRegForm, parseQuickRegQuantity } from '../lib/posQuickReg';
+import { buildAdhocInvoiceItem, isAdhocLine, validateAdhocDraft } from '../lib/adhocLine';
 import { resolveProductCategory, resolveProductSku } from '../lib/productForm';
 import ShowMoreBar from './ui/ShowMoreBar';
 import { useProgressiveList } from '../hooks/useProgressiveList';
@@ -190,6 +191,8 @@ export default function POSSystem({ language }: POSSystemProps) {
   // Quick Product Registration state variables
   const [showQuickRegModal, setShowQuickRegModal] = useState(false);
   const [quickRegForm, setQuickRegForm] = useState(() => emptyQuickRegForm());
+  const [showAdhocModal, setShowAdhocModal] = useState(false);
+  const [adhocForm, setAdhocForm] = useState({ description: '', quantity: '1', unitPrice: '', unitCost: '' });
 
   // States
   const [posMode, setPosMode] = useState<'sale' | 'purchase'>('sale');
@@ -795,6 +798,11 @@ export default function POSSystem({ language }: POSSystemProps) {
         if (!canManageCatalog) return;
         setQuickRegForm(emptyQuickRegForm(warehouses?.[0]?.id || ''));
         setShowQuickRegModal(true);
+      } else if (e.key === 'F8') {
+        e.preventDefault();
+        if (posMode !== 'sale') return;
+        setAdhocForm({ description: '', quantity: '1', unitPrice: '', unitCost: '' });
+        setShowAdhocModal(true);
       } else if (e.key === 'Escape') {
         if (scannedItems.length > 0) {
           if (confirm(isRtl ? 'هل تريد بالتأكيد إفراغ المعاملة الحالية؟' : 'Are you sure you want to clear current items?')) {
@@ -1009,6 +1017,7 @@ export default function POSSystem({ language }: POSSystemProps) {
   /** Sale mode: the line at this quantity, plus the product's other lines, must fit in stock. */
   const fitsStock = (item: InvoiceItem, qty: number) => {
     if (posMode !== 'sale') return true;
+    if (isAdhocLine(item)) return true;
     const product = products.find(p => p.id === item.productId);
     if (!product) {
       toast.error(isRtl
@@ -1651,6 +1660,23 @@ export default function POSSystem({ language }: POSSystemProps) {
                 🔍 {isRtl ? 'البحث بالاسم' : 'Lookup Item'}
               </button>
 
+              {posMode === 'sale' && (
+                <>
+                  <span className="h-4 w-[1px] bg-slate-200 dark:bg-white/10" />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAdhocForm({ description: '', quantity: '1', unitPrice: '', unitCost: '' });
+                      setShowAdhocModal(true);
+                    }}
+                    className="text-xs font-bold text-cyan-700 dark:text-cyan-300 flex items-center gap-1.5 hover:text-cyan-600 transition cursor-pointer"
+                    title={isRtl ? 'بند حر أو خدمة بدون مخزون' : 'Free/service line without stock'}
+                  >
+                    {isRtl ? 'بند حر (F8)' : 'Free item (F8)'}
+                  </button>
+                </>
+              )}
+
               {canManageCatalog && <>
               <span className="h-4 w-[1px] bg-slate-200 dark:bg-white/10" />
 
@@ -1917,7 +1943,8 @@ export default function POSSystem({ language }: POSSystemProps) {
               </div>
             ) : (
               scannedItems.map((item) => {
-                const origin = products.find(p => p.id === item.productId);
+                const free = isAdhocLine(item);
+                const origin = free ? undefined : products.find(p => p.id === item.productId);
                 const key = lineKey(item);
                 const pack = origin ? productPack(origin) : null;
                 const unitName = origin?.unitName?.trim() || (isRtl ? 'وحدة' : 'unit');
@@ -1928,12 +1955,19 @@ export default function POSSystem({ language }: POSSystemProps) {
                     className={`flex flex-col p-3 rounded-xl border transition-all duration-300 w-full box-border ${
                       item.productId === lastScannedProductId
                         ? 'bg-emerald-500/10 border-emerald-500 ring-2 ring-emerald-500/30 shadow-md shadow-emerald-500/20'
-                        : 'border-slate-100 bg-slate-50 dark:border-white/5 dark:bg-white/[0.02] hover:border-slate-300 dark:hover:border-white/10'
+                        : free
+                          ? 'border-cyan-200/80 bg-cyan-50/50 dark:border-cyan-500/20 dark:bg-cyan-500/[0.06]'
+                          : 'border-slate-100 bg-slate-50 dark:border-white/5 dark:bg-white/[0.02] hover:border-slate-300 dark:hover:border-white/10'
                     }`}
                   >
                     <div className="flex justify-between items-start w-full gap-2">
                       <span className="font-semibold text-xs text-slate-800 dark:text-slate-200 line-clamp-2">
                         {item.description}
+                        {free && (
+                          <span className="ms-1.5 inline-flex align-middle px-1.5 py-0.5 rounded-md text-[9px] font-black bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 border border-cyan-500/20">
+                            {isRtl ? 'حر' : 'Free'}
+                          </span>
+                        )}
                       </span>
                       <span className="font-mono font-bold text-emerald-600 dark:text-emerald-400 shrink-0 text-xs">
                         {formatCurrencyValue(item.total)}
@@ -1944,9 +1978,13 @@ export default function POSSystem({ language }: POSSystemProps) {
                     <div className="flex justify-between items-center mt-3.5 w-full">
                       <span className="flex flex-col gap-1">
                         <span className="text-[10px] text-slate-400 font-mono">
-                          {formatCurrencyValue(item.unitPrice)} / {isPackLine(item) ? `${item.packName || packName} (${item.packSize})` : (pack ? unitName : (isRtl ? 'للوحدة' : 'unit'))}
+                          {formatCurrencyValue(item.unitPrice)} / {free
+                            ? (isRtl ? 'بدون مخزون' : 'no stock')
+                            : isPackLine(item)
+                              ? `${item.packName || packName} (${item.packSize})`
+                              : (pack ? unitName : (isRtl ? 'للوحدة' : 'unit'))}
                         </span>
-                        {pack && (
+                        {pack && !free && (
                           <span className="inline-flex w-fit rounded-md border border-slate-200 dark:border-white/10 overflow-hidden text-[10px] font-bold" role="group" aria-label={isRtl ? 'البيع بالوحدة أو بالعبوة' : 'Sell by unit or pack'}>
                             {[false, true].map((asPack) => {
                               const active = isPackLine(item) === asPack;
@@ -2570,6 +2608,128 @@ export default function POSSystem({ language }: POSSystemProps) {
         onConfirm={(received) => handleSubmitProcess(received, 'cash')}
         language={isRtl ? 'ar' : 'en'}
       />
+
+      {/* Free / service line — no inventory */}
+      <AnimatePresence>
+        {showAdhocModal && (
+          <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[250] flex items-center justify-center p-4 overflow-y-auto">
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0, y: 15 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.95, opacity: 0, y: 15 }}
+              className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl w-full max-w-md p-6 shadow-2xl space-y-4 my-8 text-slate-800 dark:text-slate-100"
+            >
+              <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
+                <div>
+                  <h3 className="text-lg font-extrabold tracking-tight text-cyan-700 dark:text-cyan-300">
+                    {isRtl ? 'بند حر / خدمة' : 'Free item / service'}
+                  </h3>
+                  <p className="text-[11px] text-slate-500 mt-1 font-semibold">
+                    {isRtl
+                      ? 'يُضاف للفاتورة والخزنة دون خصم من المخزون. لتسجيل صنف دائم استخدم F7.'
+                      : 'Adds to the invoice and vault without stock. Use F7 to register a lasting product.'}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowAdhocModal(false)}
+                  className="p-2 rounded-xl bg-slate-100 dark:bg-white/5 text-slate-500 cursor-pointer"
+                  aria-label={isRtl ? 'إغلاق' : 'Close'}
+                >
+                  <X size={16} />
+                </button>
+              </div>
+              <label className="block space-y-1">
+                <span className="text-xs font-bold text-slate-500">{isRtl ? 'الوصف' : 'Description'}</span>
+                <input
+                  autoFocus
+                  type="text"
+                  value={adhocForm.description}
+                  onChange={(e) => setAdhocForm((f) => ({ ...f, description: e.target.value }))}
+                  className="w-full rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-white/5 px-3 py-2.5 text-sm font-bold outline-none focus:border-cyan-500"
+                  placeholder={isRtl ? 'مثل: أجرة توصيل، تصليح، صنف لمرة واحدة' : 'e.g. delivery fee, repair, one-off item'}
+                />
+              </label>
+              <div className="grid grid-cols-2 gap-3">
+                <label className="block space-y-1">
+                  <span className="text-xs font-bold text-slate-500">{isRtl ? 'الكمية' : 'Qty'}</span>
+                  <input
+                    type="number"
+                    min="0.001"
+                    step="any"
+                    value={adhocForm.quantity}
+                    onChange={(e) => setAdhocForm((f) => ({ ...f, quantity: e.target.value }))}
+                    className="w-full rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-white/5 px-3 py-2.5 text-sm font-bold tabular-nums outline-none focus:border-cyan-500"
+                  />
+                </label>
+                <label className="block space-y-1">
+                  <span className="text-xs font-bold text-slate-500">{isRtl ? `السعر (${activeCurrency})` : `Price (${activeCurrency})`}</span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="any"
+                    value={adhocForm.unitPrice}
+                    onChange={(e) => setAdhocForm((f) => ({ ...f, unitPrice: e.target.value }))}
+                    className="w-full rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-white/5 px-3 py-2.5 text-sm font-bold tabular-nums outline-none focus:border-cyan-500"
+                  />
+                </label>
+              </div>
+              <label className="block space-y-1">
+                <span className="text-xs font-bold text-slate-500">{isRtl ? 'التكلفة (اختياري للأرباح)' : 'Cost (optional for profit)'}</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="any"
+                  value={adhocForm.unitCost}
+                  onChange={(e) => setAdhocForm((f) => ({ ...f, unitCost: e.target.value }))}
+                  className="w-full rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-white/5 px-3 py-2.5 text-sm font-bold tabular-nums outline-none focus:border-cyan-500"
+                  placeholder="0"
+                />
+              </label>
+              <button
+                type="button"
+                onClick={() => {
+                  const checked = validateAdhocDraft({
+                    description: adhocForm.description,
+                    quantity: adhocForm.quantity,
+                    unitPrice: adhocForm.unitPrice,
+                  });
+                  if (checked.ok === false) {
+                    const why = checked.reason;
+                    toast.error(
+                      why === 'description'
+                        ? (isRtl ? 'أدخل وصفاً للبند.' : 'Enter a description.')
+                        : why === 'quantity'
+                          ? (isRtl ? 'أدخل كمية صحيحة أكبر من صفر.' : 'Enter a quantity greater than zero.')
+                          : (isRtl ? 'أدخل سعراً صحيحاً (صفر أو أكثر).' : 'Enter a valid price (zero or more).'),
+                    );
+                    return;
+                  }
+                  const costRaw = adhocForm.unitCost.trim() === '' ? 0 : Number(adhocForm.unitCost);
+                  if (!Number.isFinite(costRaw) || costRaw < 0) {
+                    toast.error(isRtl ? 'التكلفة غير صحيحة.' : 'Cost is not valid.');
+                    return;
+                  }
+                  const line = buildAdhocInvoiceItem({
+                    description: checked.description,
+                    quantity: checked.quantity,
+                    unitPrice: checked.unitPrice,
+                    currency: activeCurrency as Currency,
+                    unitCost: costRaw,
+                  });
+                  setScannedItems((prev) => [...prev, line]);
+                  setShowAdhocModal(false);
+                  playBeep('success');
+                  toast.success(isRtl ? 'أُضيف البند الحر إلى السلة.' : 'Free item added to the cart.');
+                }}
+                className="w-full rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-black py-3 cursor-pointer"
+              >
+                {isRtl ? 'إضافة إلى السلة' : 'Add to cart'}
+              </button>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
 
       {/* Quick Product Registration Portal popup dialog */}
       <AnimatePresence>
