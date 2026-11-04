@@ -4,7 +4,7 @@ import {
   Sparkles, Palette, Zap, Moon, Sun, Monitor, 
   ShieldCheck, Bell, Database, Download, RefreshCw, Upload,
   Type, Volume2, Info, Copy, Check, FileText, DatabaseZap, CheckSquare, AlertTriangle,
-  Phone, MapPin, Mail, Crown, Users, LifeBuoy, UserCog, FileCheck2, Printer
+  Phone, MapPin, Mail, Crown, Users, LifeBuoy, UserCog, FileCheck2, Printer, Clock
 } from 'lucide-react';
 import SubscriptionSettings from './SubscriptionSettings';
 import EInvoiceSettings from './EInvoiceSettings';
@@ -74,6 +74,7 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
     primaryColor: settings.primaryColor || '#4f46e5',
     fontSize: settings.fontSize || 14,
     mandatorySerial: settings.mandatorySerial ?? false,
+    requireOpenShift: settings.requireOpenShift ?? false,
     lowStockThreshold: settings.lowStockThreshold ?? 5,
     soundEffects: settings.soundEffects ?? true,
     toastNotifications: settings.toastNotifications ?? true,
@@ -756,6 +757,31 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
                           />
                         </div>
                       </button>
+                    </div>
+
+                    <div className="space-y-4">
+                      <label className="text-sm font-black text-gray-400 uppercase ml-1">
+                        {isRtl ? 'إلزام فتح الوردية قبل البيع' : 'Require open shift before selling'}
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => setFormData({ ...formData, requireOpenShift: !formData.requireOpenShift })}
+                        className="w-full flex items-center justify-between p-6 bg-white/50 dark:bg-gray-800/50 rounded-[2rem] border border-white/20 hover:bg-white/80 transition-all"
+                      >
+                        <Clock size={32} className={formData.requireOpenShift ? 'text-indigo-600' : 'text-gray-300'} />
+                        <div className={`w-14 h-8 rounded-full border-2 transition-colors relative flex items-center ${formData.requireOpenShift ? 'bg-indigo-600 border-indigo-400' : 'bg-gray-200 border-gray-300'}`}>
+                          <motion.div
+                            animate={{ x: formData.requireOpenShift ? 24 : 4 }}
+                            className="w-5 h-5 bg-white rounded-full shadow-md"
+                          />
+                        </div>
+                      </button>
+                      <p className="text-xs text-gray-500 dark:text-gray-400 font-bold flex items-center gap-2">
+                        <Info size={14} />
+                        {isRtl
+                          ? 'عند التفعيل لا يبيع الكاشير قبل فتح عدّ الدرج. المالك والمدير يمكنهما البيع دون ذلك.'
+                          : 'When on, cashiers cannot sell until they open a drawer count. Owners and managers can still sell.'}
+                      </p>
                     </div>
                   </div>
 

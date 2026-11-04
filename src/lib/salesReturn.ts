@@ -48,6 +48,28 @@ export function canReturn(original: Invoice): boolean {
   return original.type === 'sale' && remainingQty(original).some((q) => q > 0);
 }
 
+/** Find returnable sales by invoice number or customer name (POS / invoice desk lookup). */
+export function findReturnableSales(
+  invoices: Invoice[],
+  query: string,
+  limit = 12,
+): Invoice[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return [];
+  const exact: Invoice[] = [];
+  const partial: Invoice[] = [];
+  for (const inv of invoices) {
+    if (!canReturn(inv)) continue;
+    const number = (inv.invoiceNumber || '').toLowerCase();
+    const customer = (inv.customerName || '').toLowerCase();
+    if (number === q) exact.push(inv);
+    else if (number.includes(q) || customer.includes(q)) partial.push(inv);
+  }
+  return [...exact, ...partial]
+    .sort((a, b) => b.date - a.date)
+    .slice(0, limit);
+}
+
 /** Value of `q` units of a line; the whole line is its stored total. */
 function lineAmount(item: InvoiceItem, q: number, currency: Currency): number {
   if (q <= 0) return 0;

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Invoice } from '../../types';
-import { canReturn, planSalesReturn, remainingQty, splitRefund } from '../salesReturn';
+import { canReturn, findReturnableSales, planSalesReturn, remainingQty, splitRefund } from '../salesReturn';
 import { computeInvoiceTotals } from '../invoiceTotals';
 
 function sale(overrides: Partial<Invoice> = {}): Invoice {
@@ -104,5 +104,14 @@ describe('refund split', () => {
     expect(splitRefund(split, full, 5)).toEqual({
       vault: 45, vaultCurrency: 'JOD', debt: 5, debtCurrency: 'JOD', external: 0,
     });
+  });
+
+  it('finds returnable sales by number or customer, newest first', () => {
+    const a = sale({ id: '1', invoiceNumber: 'POS-100', customerName: 'Ali', date: 10 });
+    const b = sale({ id: '2', invoiceNumber: 'POS-200', customerName: 'Sara', date: 20 });
+    const done = sale({ id: '3', invoiceNumber: 'POS-100b', date: 30, returnedQty: [3, 2] });
+    expect(findReturnableSales([a, b, done], 'POS-100').map((i) => i.id)).toEqual(['1']);
+    expect(findReturnableSales([a, b, done], 'sa').map((i) => i.id)).toEqual(['2']);
+    expect(findReturnableSales([a, b, done], '')).toEqual([]);
   });
 });

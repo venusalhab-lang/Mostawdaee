@@ -44,6 +44,11 @@ export interface AppSettings {
   businessEmail?: string;
   /** Epoch ms when the owner finished or skipped first-run setup. Absent on older stores. */
   onboardingCompletedAt?: number;
+  /**
+   * When true, POS sale checkout requires an open drawer/shift for the signed-in cashier.
+   * Managers/owners still sell without one so they can cover a busy counter.
+   */
+  requireOpenShift?: boolean;
 }
 
 export interface Product {

@@ -28,8 +28,11 @@ import {
   X,
   MonitorSmartphone,
   CalendarClock,
+  Undo2,
 } from 'lucide-react';
 import { useFirebase } from './FirebaseProvider';
+import ReturnModal from './ReturnModal';
+import { canReturn, findReturnableSales } from '../lib/salesReturn';
 import { migrateLegacyUserCache } from '../lib/userStorage';
 import {
   type HeldBill,
@@ -162,11 +165,17 @@ export default function POSSystem({ language }: POSSystemProps) {
   const [wedgeScannerMode, setWedgeScannerMode] = useState(false);
   const stickyScannerFocus = !touchPos || wedgeScannerMode;
   
-  const { products, saveInvoice, settings, saveProduct, warehouses, user, can, workspace, shifts, customers } = useFirebase();
+  const { products, invoices, saveInvoice, settings, saveProduct, warehouses, user, can, workspace, shifts, customers } = useFirebase();
   const myShift = openShiftOf(shifts, user?.uid);
   const [showShiftPanel, setShowShiftPanel] = useState(false);
   const [shiftPanelTab, setShiftPanelTab] = useState<'drawer' | 'day'>('drawer');
+  const [showReturnLookup, setShowReturnLookup] = useState(false);
+  const [returnQuery, setReturnQuery] = useState('');
+  const [returnTarget, setReturnTarget] = useState<Invoice | null>(null);
   const canManageCatalog = can('manage_catalog');
+  const canAdjustLinePrice = can('back_office');
+  const canProcessReturn = can('reverse_invoice');
+  const requireOpenShift = !!settings?.requireOpenShift;
   const storeCurrency = isPosCurrency(settings?.currency) ? settings.currency : 'JOD';
   const [posCurrency, setPosCurrency] = useState<PosCurrency>(() => {
     try {
@@ -803,6 +812,11 @@ export default function POSSystem({ language }: POSSystemProps) {
         if (posMode !== 'sale') return;
         setAdhocForm({ description: '', quantity: '1', unitPrice: '', unitCost: '' });
         setShowAdhocModal(true);
+      } else if (e.key === 'F6') {
+        e.preventDefault();
+        if (posMode !== 'sale' || !canProcessReturn) return;
+        setReturnQuery('');
+        setShowReturnLookup(true);
       } else if (e.key === 'Escape') {
         if (scannedItems.length > 0) {
           if (confirm(isRtl ? 'هل تريد بالتأكيد إفراغ المعاملة الحالية؟' : 'Are you sure you want to clear current items?')) {
@@ -1113,6 +1127,28 @@ export default function POSSystem({ language }: POSSystemProps) {
     toast.success(isRtl ? 'تم حذف الصنف من القائمة' : 'Item removed from bill');
   };
 
+  /** Managers/owners may change the line unit (or pack) price on the current cart. */
+  const setItemUnitPrice = (key: string, raw: string) => {
+    if (!canAdjustLinePrice || posMode !== 'sale') return;
+    const price = Number(raw);
+    if (!Number.isFinite(price) || price < 0) {
+      toast.error(isRtl ? 'سعر غير صالح.' : 'Invalid price.');
+      return;
+    }
+    const idx = scannedItems.findIndex((item) => lineKey(item) === key);
+    if (idx < 0) return;
+    const qty = Number(scannedItems[idx].quantity) || 0;
+    const next = [...scannedItems];
+    const rounded = roundMoney(price, activeCurrency);
+    next[idx] = { ...next[idx], unitPrice: rounded, total: roundMoney(qty * rounded, activeCurrency) };
+    setScannedItems(next);
+  };
+
+  const returnMatches = useMemo(
+    () => (showReturnLookup ? findReturnableSales(invoices, returnQuery) : []),
+    [showReturnLookup, invoices, returnQuery],
+  );
+
   // Calculations
   const totalPieces = scannedItems.reduce((acc, item) => acc + lineUnits(item), 0);
   const vatRate = resolveVatRate(settings?.defaultVatRate);
@@ -1249,6 +1285,15 @@ export default function POSSystem({ language }: POSSystemProps) {
     if (scannedItems.length === 0) {
       playBeep('error');
       toast.error(isRtl ? 'ليست هناك أي مواد ممسوحة في المعاملة!' : 'Cart is empty!');
+      return;
+    }
+    if (posMode === 'sale' && requireOpenShift && !myShift && !can('back_office')) {
+      playBeep('error');
+      toast.error(isRtl
+        ? 'يجب فتح عدّ الدرج قبل البيع. افتح الوردية ثم أعد المحاولة.'
+        : 'Open a drawer count before selling. Open your shift, then try again.');
+      setShiftPanelTab('drawer');
+      setShowShiftPanel(true);
       return;
     }
 
@@ -1497,6 +1542,20 @@ export default function POSSystem({ language }: POSSystemProps) {
             {isRtl ? 'شاشة العميل' : 'Customer display'}
           </button>
         )}
+        {posMode === 'sale' && canProcessReturn && (
+          <button
+            type="button"
+            onClick={() => {
+              setReturnQuery('');
+              setShowReturnLookup(true);
+            }}
+            className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-2.5 text-xs font-black text-slate-600 hover:text-slate-900 dark:border-slate-800 dark:bg-slate-900/60 dark:text-slate-300 cursor-pointer transition-colors"
+            title={isRtl ? 'مرتجع مبيعات (F6)' : 'Sales return (F6)'}
+          >
+            <Undo2 size={15} />
+            {isRtl ? 'مرتجع (F6)' : 'Return (F6)'}
+          </button>
+        )}
         {posMode === 'sale' && can('back_office') && (
           <button
             type="button"
@@ -1567,6 +1626,22 @@ export default function POSSystem({ language }: POSSystemProps) {
         defaultCurrency={activeCurrency}
         initialTab={shiftPanelTab}
       />
+
+      {posMode === 'sale' && requireOpenShift && !myShift && !can('back_office') && (
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs font-bold text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200">
+          <span>{isRtl ? 'البيع متوقف حتى فتح عدّ الدرج لهذه الجلسة.' : 'Selling is blocked until you open a drawer count for this session.'}</span>
+          <button
+            type="button"
+            onClick={() => {
+              setShiftPanelTab('drawer');
+              setShowShiftPanel(true);
+            }}
+            className="rounded-xl bg-amber-600 px-3 py-1.5 text-white cursor-pointer"
+          >
+            {isRtl ? 'فتح الوردية' : 'Open shift'}
+          </button>
+        </div>
+      )}
 
       {/* Main Grid Workspace */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-6 flex-1 items-stretch">
@@ -1977,12 +2052,40 @@ export default function POSSystem({ language }: POSSystemProps) {
                     {/* Quantity state controls */}
                     <div className="flex justify-between items-center mt-3.5 w-full">
                       <span className="flex flex-col gap-1">
-                        <span className="text-[10px] text-slate-400 font-mono">
-                          {formatCurrencyValue(item.unitPrice)} / {free
-                            ? (isRtl ? 'بدون مخزون' : 'no stock')
-                            : isPackLine(item)
-                              ? `${item.packName || packName} (${item.packSize})`
-                              : (pack ? unitName : (isRtl ? 'للوحدة' : 'unit'))}
+                        <span className="text-[10px] text-slate-400 font-mono flex items-center gap-1.5 flex-wrap">
+                          {canAdjustLinePrice && posMode === 'sale' ? (
+                            <input
+                              type="number"
+                              min={0}
+                              step={10 ** -currencyDecimals(activeCurrency)}
+                              defaultValue={item.unitPrice}
+                              key={`${key}-${item.unitPrice}`}
+                              onBlur={(e) => {
+                                const next = Number(e.target.value);
+                                if (Number.isFinite(next) && Math.abs(next - item.unitPrice) > 1e-9) {
+                                  setItemUnitPrice(key, e.target.value);
+                                }
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  e.preventDefault();
+                                  (e.target as HTMLInputElement).blur();
+                                }
+                              }}
+                              className="w-20 rounded-md border border-slate-200 dark:border-white/10 bg-white dark:bg-black/30 px-1.5 py-0.5 text-[11px] font-mono font-bold text-slate-800 dark:text-slate-100"
+                              title={isRtl ? 'تعديل سعر السطر' : 'Edit line price'}
+                              aria-label={isRtl ? 'سعر السطر' : 'Line price'}
+                            />
+                          ) : (
+                            formatCurrencyValue(item.unitPrice)
+                          )}
+                          <span>
+                            / {free
+                              ? (isRtl ? 'بدون مخزون' : 'no stock')
+                              : isPackLine(item)
+                                ? `${item.packName || packName} (${item.packSize})`
+                                : (pack ? unitName : (isRtl ? 'للوحدة' : 'unit'))}
+                          </span>
                         </span>
                         {pack && !free && (
                           <span className="inline-flex w-fit rounded-md border border-slate-200 dark:border-white/10 overflow-hidden text-[10px] font-bold" role="group" aria-label={isRtl ? 'البيع بالوحدة أو بالعبوة' : 'Sell by unit or pack'}>
@@ -3007,6 +3110,94 @@ export default function POSSystem({ language }: POSSystemProps) {
           </div>
         )}
       </AnimatePresence>
+
+      {/* Sales return lookup — managers/owners (server forbids cashier stock increases). */}
+      <AnimatePresence>
+        {showReturnLookup && !returnTarget && (
+          <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-[160] flex items-center justify-center p-4">
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-white dark:bg-slate-950 rounded-[2rem] border border-slate-200 dark:border-slate-800 p-6 max-w-lg w-full shadow-2xl space-y-4"
+            >
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <Undo2 className="text-rose-500" size={18} />
+                  <h3 className="font-black text-lg text-slate-900 dark:text-white">
+                    {isRtl ? 'مرتجع مبيعات' : 'Sales return'}
+                  </h3>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowReturnLookup(false)}
+                  className="p-1.5 rounded-full text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                  aria-label={isRtl ? 'إغلاق' : 'Close'}
+                >
+                  <X size={18} />
+                </button>
+              </div>
+              <p className="text-xs text-slate-500 font-semibold">
+                {isRtl
+                  ? 'ابحث برقم الفاتورة أو اسم العميل، ثم اختر الفاتورة لإرجاع الكميات.'
+                  : 'Search by invoice number or customer name, then pick the sale to return.'}
+              </p>
+              <input
+                autoFocus
+                type="text"
+                value={returnQuery}
+                onChange={(e) => setReturnQuery(e.target.value)}
+                placeholder={isRtl ? 'رقم الفاتورة أو اسم العميل…' : 'Invoice number or customer…'}
+                className="w-full rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900 px-4 py-3 text-sm font-semibold outline-none focus:border-rose-500"
+              />
+              <div className="max-h-64 overflow-y-auto space-y-2">
+                {returnQuery.trim() && returnMatches.length === 0 && (
+                  <p className="text-xs text-slate-400 text-center py-6">
+                    {isRtl ? 'لا توجد فاتورة قابلة للإرجاع بهذا البحث.' : 'No returnable sale matches this search.'}
+                  </p>
+                )}
+                {returnMatches.map((inv) => (
+                  <button
+                    key={inv.id}
+                    type="button"
+                    onClick={() => {
+                      setReturnTarget(inv);
+                      setShowReturnLookup(false);
+                    }}
+                    className="w-full text-start rounded-xl border border-slate-200 dark:border-slate-800 px-4 py-3 hover:border-rose-400 hover:bg-rose-50/60 dark:hover:bg-rose-500/10 transition cursor-pointer"
+                  >
+                    <div className="flex justify-between gap-2 text-xs font-black text-slate-800 dark:text-slate-100">
+                      <span>#{inv.invoiceNumber}</span>
+                      <span className="font-mono text-rose-600">{formatCurrencyValue(inv.totalAmount, inv.currency)}</span>
+                    </div>
+                    <div className="mt-1 text-[11px] text-slate-500 font-semibold">
+                      {(inv.customerName || (isRtl ? 'عميل نقدي' : 'Walk-in'))}
+                      {' · '}
+                      {new Date(inv.date).toLocaleString(isRtl ? 'ar-JO' : 'en-GB')}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {returnTarget && canReturn(returnTarget) && (
+        <ReturnModal
+          original={returnTarget}
+          isRtl={isRtl}
+          onClose={() => setReturnTarget(null)}
+          onSaved={(saved) => {
+            setReturnTarget(null);
+            toast.success(
+              isRtl
+                ? `تم تسجيل المرتجع #${saved.invoiceNumber}`
+                : `Return #${saved.invoiceNumber} recorded`,
+            );
+          }}
+        />
+      )}
     </div>
   );
 }
