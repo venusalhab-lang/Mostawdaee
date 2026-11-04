@@ -107,6 +107,19 @@ describe('offline queue', () => {
     expect(localSaleShortages(invoice(), [])).toHaveLength(1);
   });
 
+  it('ignores free/service lines in the local stock check', () => {
+    const mixed = invoice({
+      items: [
+        { productId: 'p1', description: 'شاي', quantity: 2, unitPrice: 1, total: 2 },
+        { productId: 'adhoc:fee', description: 'خدمة', quantity: 9, unitPrice: 5, total: 45, adhoc: true },
+      ],
+    });
+    expect(localSaleShortages(mixed, [product(2)])).toEqual([]);
+    expect(localSaleShortages(invoice({
+      items: [{ productId: 'adhoc:only', description: 'خدمة', quantity: 1, unitPrice: 10, total: 10, adhoc: true }],
+    }), [])).toEqual([]);
+  });
+
   it('keeps queued sales on top of a server snapshot so stock and invoices stay honest until sync', () => {
     enqueueInvoice('u1', invoice({ id: 'offline-1', invoiceNumber: 'POS-9' }), 'owner-1');
     const queue = readQueue('u1');

@@ -4,6 +4,7 @@ import { Undo2, X } from 'lucide-react';
 import type { Currency, Invoice } from '../types';
 import { useFirebase } from './FirebaseProvider';
 import { formatMoney } from '../lib/exchangeRates';
+import { isAdhocLine } from '../lib/adhocLine';
 import { isPackLine } from '../lib/packs';
 import { roundQty } from '../lib/stock';
 import { planSalesReturn, remainingQty, splitRefund, type ReturnLineRequest } from '../lib/salesReturn';
@@ -209,8 +210,12 @@ export default function ReturnModal({ original, isRtl, onClose, onSaved }: Retur
                 )}
                 <p className="text-slate-500 text-xs">
                   {isPurchase
-                    ? L('تخرج الكميات المرتجعة من المخزون ويُعاد احتساب متوسط التكلفة.', 'The returned quantities leave stock and the average cost is recalculated.')
-                    : L('تعود الكميات المرتجعة إلى المخزون.', 'The returned quantities go back into stock.')}
+                    ? (plan.items.some((item) => !isAdhocLine(item))
+                      ? L('تخرج الكميات المرتجعة من المخزون ويُعاد احتساب متوسط التكلفة.', 'The returned quantities leave stock and the average cost is recalculated.')
+                      : L('هذا المرتجع مالي فقط؛ لا حركة مخزون لبنود الخدمة.', 'This return is money-only; service lines do not move stock.'))
+                    : (plan.items.some((item) => !isAdhocLine(item))
+                      ? L('تعود الكميات المرتجعة إلى المخزون.', 'The returned quantities go back into stock.')
+                      : L('هذا المرتجع مالي فقط؛ بنود الخدمة لا تعيد مخزوناً.', 'This return is money-only; service lines do not restock.'))}
                 </p>
               </div>
             </div>

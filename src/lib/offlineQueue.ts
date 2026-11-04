@@ -1,4 +1,5 @@
 import type { Invoice, Product, VaultTransaction } from '../types';
+import { isAdhocLine } from './adhocLine';
 import { userCacheKey } from './userStorage';
 import { lineUnits } from './packs';
 import { computeStockStatus, roundQty } from './stock';
@@ -128,6 +129,7 @@ export function applyQueuedSalesToProducts(products: Product[], queue: QueuedInv
     let sold = 0;
     for (const entry of pending) {
       for (const item of entry.invoice.items) {
+        if (isAdhocLine(item)) continue;
         if (item.productId === product.id) sold += lineUnits(item);
       }
     }
@@ -258,6 +260,8 @@ export interface StockShortage {
 export function localSaleShortages(invoice: Invoice, products: Product[]): StockShortage[] {
   const requested = new Map<string, { qty: number; name: string }>();
   for (const item of invoice.items) {
+    // Free/service lines never touch inventory — same gate as quantitiesByProduct / online commit.
+    if (isAdhocLine(item) || !item.productId) continue;
     const entry = requested.get(item.productId) || { qty: 0, name: item.description };
     entry.qty += lineUnits(item);
     requested.set(item.productId, entry);

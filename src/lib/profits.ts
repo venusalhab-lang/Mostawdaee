@@ -1,4 +1,5 @@
 import type { Invoice, InvoiceItem, Product } from '../types';
+import { isAdhocLine } from './adhocLine';
 import { convertAmount, roundMoney } from './exchangeRates';
 import { lineUnits } from './packs';
 
@@ -153,6 +154,10 @@ export function summarizeProfits(
 export function snapshotLineCosts(items: InvoiceItem[], productsById: Map<string, Product>, defaultCurrency: string): InvoiceItem[] {
   return items.map((item) => {
     if (typeof item.unitCost === 'number') return item;
+    // Free/service lines have no catalog cost; pin 0 so profits never treat them as "unknown cost".
+    if (isAdhocLine(item)) {
+      return { ...item, adhoc: true, unitCost: 0, costCurrency: item.costCurrency || defaultCurrency };
+    }
     const product = productsById.get(item.productId);
     if (!product) return item;
     const cost = num(product.unitCost ?? product.costPrice);

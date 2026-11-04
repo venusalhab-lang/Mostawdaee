@@ -134,6 +134,26 @@ describe('snapshotLineCosts without a cost', () => {
     const p = saleInvoiceProfit({ ...sale({}), items: [line] }, byId, {}, 'JOD');
     expect(p.unknownCostLines).toBe(1);
   });
+
+  it('pins free/service lines at zero cost so profits do not warn', () => {
+    const [line] = snapshotLineCosts(
+      [{ productId: 'adhoc:x', description: 'Fee', quantity: 1, unitPrice: 10, total: 10, adhoc: true }],
+      new Map(),
+      'JOD',
+    );
+    expect(line.unitCost).toBe(0);
+    expect(line.costCurrency).toBe('JOD');
+    const p = saleInvoiceProfit(
+      { ...sale({}), items: [line], subtotal: 10, discount: 0, taxAmount: 0, totalAmount: 10, vatRate: 0 },
+      new Map(),
+      {},
+      'JOD',
+    );
+    expect(p.unknownCostLines).toBe(0);
+    expect(p.revenue).toBe(10);
+    expect(p.cost).toBe(0);
+    expect(p.profit).toBe(10);
+  });
 });
 
 describe('stockValueByCurrency', () => {
