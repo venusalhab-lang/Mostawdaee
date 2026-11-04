@@ -596,9 +596,16 @@ async function commitInvoiceOnce(uid: string, requested: Invoice, opts: CommitIn
     const linesTotal = invoice.items.reduce((sum, i) => sum + (Number(i.total) || 0), 0);
     const purchaseDiscount = invoice.type === 'purchase' ? Math.min(Math.max(Number(invoice.discount) || 0, 0), linesTotal) : 0;
     const costScale = purchaseDiscount > 0 && linesTotal > 0 ? (linesTotal - purchaseDiscount) / linesTotal : 1;
-    for (const [productId, { qty: movedQty, description }] of qtyByProduct) {
-      const productRef = doc(db, 'users', uid, 'inventory', productId);
-      const productSnap = await transaction.get(productRef);
+    const productEntries = [...qtyByProduct.entries()];
+    const productRefs = productEntries.map(([productId]) => doc(db, 'users', uid, 'inventory', productId));
+    // Batched OCC reads — one round-trip for the whole cart instead of one per SKU.
+    const productSnaps = productRefs.length
+      ? await transaction.getMany(productRefs)
+      : [];
+    for (let i = 0; i < productEntries.length; i += 1) {
+      const [productId, { qty: movedQty, description }] = productEntries[i];
+      const productRef = productRefs[i];
+      const productSnap = productSnaps[i];
       if (!productSnap.exists()) {
         if (opts.allowMissingProducts && invoice.type === 'sale') {
           (result.missingProducts ||= []).push(description || productId);
@@ -623,8 +630,8 @@ async function commitInvoiceOnce(uid: string, requested: Invoice, opts: CommitIn
       let adoptPurchaseCurrency = false;
       if (invoice.type === 'purchase') {
         const receivedTotal = invoice.items
-          .filter((i) => i.productId === productId)
-          .reduce((sum, i) => sum + (Number(i.total) || 0), 0) * costScale;
+          .filter((line) => line.productId === productId)
+          .reduce((sum, line) => sum + (Number(line.total) || 0), 0) * costScale;
         newCost = weightedAverageCost(productData, movedQty, receivedTotal, invoice.currency, opts.defaultCurrency);
         if (newCost === null && productCurrency !== invoice.currency && currentQty > 0 && (Number(productData.unitCost ?? productData.costPrice) || 0) > 0) {
           throw Object.assign(
@@ -1915,9 +1922,9 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
     try {
       await runTransaction(db, async (transaction) => {
-        // All reads first (required by the doc transaction model).
-        const snaps = await Promise.all(
-          lines.map((line) => transaction.get(doc(db, 'users', uid, 'inventory', line.productId))),
+        // All reads first (required by the doc transaction model) — batched per collection.
+        const snaps = await transaction.getMany(
+          lines.map((line) => doc(db, 'users', uid, 'inventory', line.productId)),
         );
 
         for (let i = 0; i < lines.length; i++) {

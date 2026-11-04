@@ -174,20 +174,56 @@ async function requireUid(): Promise<string> {
   return workspace.ownerId;
 }
 
-async function fetchDoc(ref: DocRef) {
-  const uid = await requireUid();
+type DocRow = { data: Record<string, unknown>; updated_at: string };
+type CollectionRow = { doc_id: string; data: Record<string, unknown>; updated_at: string };
+
+/** Ids handed to `in (...)` per request, so the URL stays short. */
+const ID_CHUNK = 150;
+
+async function fetchDoc(ref: DocRef, uid?: string) {
+  const ownerId = uid ?? await requireUid();
   const { data, error } = await supabase
     .from('merchant_documents')
     .select('data, updated_at')
-    .eq('user_id', uid)
+    .eq('user_id', ownerId)
     .eq('collection', ref.collection)
     .eq('doc_id', ref.id)
     .maybeSingle();
   if (error) throw schemaError(error);
-  return data as { data: Record<string, unknown>; updated_at: string } | null;
+  return data as DocRow | null;
 }
 
-type CollectionRow = { doc_id: string; data: Record<string, unknown>; updated_at: string };
+/** One (or few) PostgREST round-trips per collection instead of one GET per document. */
+async function fetchDocs(uid: string, refs: DocRef[]): Promise<Map<string, DocRow | null>> {
+  const out = new Map<string, DocRow | null>();
+  if (refs.length === 0) return out;
+  const byCollection = new Map<string, string[]>();
+  for (const ref of refs) {
+    const key = `${ref.collection}/${ref.id}`;
+    if (out.has(key)) continue;
+    out.set(key, null);
+    const ids = byCollection.get(ref.collection) || [];
+    ids.push(ref.id);
+    byCollection.set(ref.collection, ids);
+  }
+  await Promise.all([...byCollection.entries()].map(async ([collection, ids]) => {
+    const uniqueIds = [...new Set(ids)];
+    for (let i = 0; i < uniqueIds.length; i += ID_CHUNK) {
+      const chunk = uniqueIds.slice(i, i + ID_CHUNK);
+      const { data, error } = await supabase
+        .from('merchant_documents')
+        .select('doc_id, data, updated_at')
+        .eq('user_id', uid)
+        .eq('collection', collection)
+        .in('doc_id', chunk);
+      if (error) throw schemaError(error);
+      for (const row of (data || []) as Array<CollectionRow>) {
+        out.set(`${collection}/${row.doc_id}`, { data: row.data, updated_at: row.updated_at });
+      }
+    }
+  }));
+  return out;
+}
 
 /** Last full read of each collection, kept current row by row so a write never re-downloads everything. */
 const collectionCache = new Map<string, Map<string, CollectionRow>>();
@@ -237,21 +273,31 @@ async function restoreSaved(name: string): Promise<void> {
   collectionCache.set(name, new Map(saved.map((row) => [row.doc_id, row])));
 }
 
-/** After a successful commit, refresh only the documents it touched. */
-async function applyCommitted(ops: Array<{ op: 'set' | 'delete'; collection: string; id: string }>) {
-  const unique = new Map(ops.map((op) => [`${op.collection}/${op.id}`, op]));
-  await Promise.all([...unique.values()].map(async (op) => {
-    if (op.op === 'delete') {
-      applyRow(op.collection, op.id, null);
-      return;
+/**
+ * After a successful commit, refresh only the documents it touched.
+ * Deletes apply locally; sets are re-read in one batched query per collection (not N singles).
+ */
+async function applyCommitted(
+  ops: Array<{ op: 'set' | 'delete'; collection: string; id: string }>,
+  uid: string,
+) {
+  const unique = [...new Map(ops.map((op) => [`${op.collection}/${op.id}`, op])).values()];
+  const toFetch: DocRef[] = [];
+  for (const op of unique) {
+    if (op.op === 'delete') applyRow(op.collection, op.id, null);
+    else toFetch.push({ kind: 'doc', collection: op.collection, id: op.id });
+  }
+  if (toFetch.length === 0) return;
+  try {
+    const rows = await fetchDocs(uid, toFetch);
+    for (const ref of toFetch) {
+      const row = rows.get(`${ref.collection}/${ref.id}`) ?? null;
+      applyRow(ref.collection, ref.id, row ? { doc_id: ref.id, ...row } : null);
     }
-    try {
-      const row = await fetchDoc({ kind: 'doc', collection: op.collection, id: op.id });
-      applyRow(op.collection, op.id, row ? { doc_id: op.id, ...row } : null);
-    } catch {
-      notify(op.collection, 'fetch');
-    }
-  }));
+  } catch {
+    const collections = new Set(toFetch.map((ref) => ref.collection));
+    for (const name of collections) notify(name, 'fetch');
+  }
 }
 
 /** PostgREST caps a response (1000 rows by default), so a collection is read page by page. */
@@ -306,9 +352,6 @@ async function fetchPaged<T>(page: (from: number, to: number) => PromiseLike<{ d
     if (rows.length < COLLECTION_PAGE_SIZE) return out;
   }
 }
-
-/** Ids handed to `in (...)` per request, so the URL stays short. */
-const ID_CHUNK = 150;
 
 /**
  * Brings a collection already in memory up to date by downloading only what changed: rows written since the newest one held,
@@ -526,6 +569,7 @@ async function rpcWithTimeout(fn: () => PromiseLike<{ error: any }>): Promise<{ 
 }
 
 async function writeOne(ref: DocRef, op: 'set' | 'delete', data?: Record<string, unknown>, merge = false) {
+  const uid = await requireUid();
   let error: any;
   try {
     ({ error } = await rpcWithTimeout(() => supabase.rpc('merchant_commit', {
@@ -542,7 +586,7 @@ async function writeOne(ref: DocRef, op: 'set' | 'delete', data?: Record<string,
     reportProblem(wrapped);
     throw wrapped;
   }
-  await applyCommitted([{ op, collection: ref.collection, id: ref.id }]);
+  await applyCommitted([{ op, collection: ref.collection, id: ref.id }], uid);
 }
 
 export async function setDoc(ref: DocRef, data: any, options?: { merge?: boolean }) {
@@ -573,10 +617,28 @@ interface WriteOp {
 
 export async function runTransaction(_db: unknown, work: (transaction: any) => Promise<void>) {
   for (let attempt = 0; attempt < 3; attempt += 1) {
+    const uid = await requireUid();
     const expected: ExpectedRow[] = [];
     const seen = new Set<string>();
     const ops: WriteOp[] = [];
     const pending = new Map<string, { deleted?: boolean; data?: Record<string, unknown> }>();
+    const readCache = new Map<string, DocRow | null>();
+
+    const registerExpected = (ref: DocRef, row: DocRow | null) => {
+      const key = `${ref.collection}/${ref.id}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      expected.push({ collection: ref.collection, id: ref.id, updated_at: row?.updated_at ?? null });
+    };
+
+    const snapshotFor = (ref: DocRef, row: DocRow | null) => {
+      const key = `${ref.collection}/${ref.id}`;
+      const staged = pending.get(key);
+      if (staged?.deleted) return new DocumentSnapshot(null);
+      if (staged?.data) return new DocumentSnapshot({ data: staged.data, updated_at: '' });
+      registerExpected(ref, row);
+      return new DocumentSnapshot(row);
+    };
 
     const transaction = {
       async get(ref: DocRef) {
@@ -584,12 +646,46 @@ export async function runTransaction(_db: unknown, work: (transaction: any) => P
         const staged = pending.get(key);
         if (staged?.deleted) return new DocumentSnapshot(null);
         if (staged?.data) return new DocumentSnapshot({ data: staged.data, updated_at: '' });
-        const row = await fetchDoc(ref);
-        if (!seen.has(key)) {
-          seen.add(key);
-          expected.push({ collection: ref.collection, id: ref.id, updated_at: row?.updated_at ?? null });
+        if (readCache.has(key)) return snapshotFor(ref, readCache.get(key) ?? null);
+        const row = await fetchDoc(ref, uid);
+        readCache.set(key, row);
+        return snapshotFor(ref, row);
+      },
+      /** Batched OCC reads — one PostgREST round-trip per collection for the unread refs. */
+      async getMany(refs: DocRef[]) {
+        const results: DocumentSnapshot[] = new Array(refs.length);
+        const need: DocRef[] = [];
+        const needAt: number[] = [];
+        for (let i = 0; i < refs.length; i += 1) {
+          const ref = refs[i];
+          const key = `${ref.collection}/${ref.id}`;
+          const staged = pending.get(key);
+          if (staged?.deleted) {
+            results[i] = new DocumentSnapshot(null);
+            continue;
+          }
+          if (staged?.data) {
+            results[i] = new DocumentSnapshot({ data: staged.data, updated_at: '' });
+            continue;
+          }
+          if (readCache.has(key)) {
+            results[i] = snapshotFor(ref, readCache.get(key) ?? null);
+            continue;
+          }
+          need.push(ref);
+          needAt.push(i);
         }
-        return new DocumentSnapshot(row);
+        if (need.length > 0) {
+          const fetched = await fetchDocs(uid, need);
+          for (let j = 0; j < need.length; j += 1) {
+            const ref = need[j];
+            const key = `${ref.collection}/${ref.id}`;
+            const row = fetched.get(key) ?? null;
+            readCache.set(key, row);
+            results[needAt[j]] = snapshotFor(ref, row);
+          }
+        }
+        return results;
       },
       set(ref: DocRef, data: Record<string, unknown>, options?: { merge?: boolean }) {
         const key = `${ref.collection}/${ref.id}`;
@@ -619,7 +715,7 @@ export async function runTransaction(_db: unknown, work: (transaction: any) => P
       throw wrapped;
     }
     if (!error) {
-      await applyCommitted(ops);
+      await applyCommitted(ops, uid);
       return;
     }
     const wrapped = schemaError(error);

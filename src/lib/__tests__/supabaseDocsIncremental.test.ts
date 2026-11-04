@@ -8,9 +8,10 @@ const server = new Map<string, Record<string, unknown>>([
 
 vi.mock('../../supabaseClient', () => {
   const query: any = {
-    filters: {} as Record<string, string>,
+    filters: {} as Record<string, any>,
     select: () => query,
     eq: (column: string, value: string) => { query.filters[column] = value; return query; },
+    in: (column: string, ids: string[]) => { query.filters.in = { column, ids }; return query; },
     order: () => query,
     range: () => {
       calls.ranges += 1;
@@ -21,6 +22,17 @@ vi.mock('../../supabaseClient', () => {
       calls.singles += 1;
       const data = server.get(query.filters.doc_id);
       return Promise.resolve({ data: data ? { data, updated_at: 't2' } : null, error: null });
+    },
+    then: (resolve: any, reject: any) => {
+      // Batched post-commit refresh uses `.in('doc_id', …)` then awaits the builder.
+      if (query.filters.in) {
+        calls.singles += 1;
+        const data = query.filters.in.ids
+          .filter((id: string) => server.has(id))
+          .map((doc_id: string) => ({ doc_id, data: server.get(doc_id), updated_at: 't2' }));
+        return Promise.resolve({ data, error: null }).then(resolve, reject);
+      }
+      return Promise.resolve({ data: null, error: null }).then(resolve, reject);
     },
   };
   return {
