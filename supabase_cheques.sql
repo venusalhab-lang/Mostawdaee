@@ -11,9 +11,12 @@ CREATE TABLE IF NOT EXISTS public.cheques (
     bank_name TEXT NOT NULL CHECK (length(btrim(bank_name)) BETWEEN 1 AND 120),
     amount NUMERIC(18, 3) NOT NULL CHECK (amount > 0),
     currency TEXT NOT NULL DEFAULT 'ILS' CHECK (currency IN ('JOD', 'ILS', 'USD', 'IQD', 'SAR', 'AED', 'LYD', 'EGP')),
+    -- issue_date / payee_or_drawer are kept for stores that first created this table with an older shape.
+    issue_date DATE NOT NULL DEFAULT CURRENT_DATE,
     due_date DATE NOT NULL,
     type TEXT NOT NULL CHECK (type IN ('incoming', 'outgoing')),
     status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'cashed', 'bounced', 'endorsed', 'returned')),
+    payee_or_drawer TEXT NOT NULL DEFAULT '',
     drawer_name TEXT NOT NULL DEFAULT '',
     -- Customers live in the app's sync store (ids like CUST_2026_1234) and suppliers are names only,
     -- so the contact is a reference plus a name snapshot rather than a foreign key.
@@ -35,9 +38,11 @@ ALTER TABLE public.cheques ADD COLUMN IF NOT EXISTS cheque_number TEXT;
 ALTER TABLE public.cheques ADD COLUMN IF NOT EXISTS bank_name TEXT;
 ALTER TABLE public.cheques ADD COLUMN IF NOT EXISTS amount NUMERIC(18, 3);
 ALTER TABLE public.cheques ADD COLUMN IF NOT EXISTS currency TEXT DEFAULT 'ILS';
+ALTER TABLE public.cheques ADD COLUMN IF NOT EXISTS issue_date DATE DEFAULT CURRENT_DATE;
 ALTER TABLE public.cheques ADD COLUMN IF NOT EXISTS due_date DATE;
 ALTER TABLE public.cheques ADD COLUMN IF NOT EXISTS type TEXT;
 ALTER TABLE public.cheques ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'pending';
+ALTER TABLE public.cheques ADD COLUMN IF NOT EXISTS payee_or_drawer TEXT DEFAULT '';
 ALTER TABLE public.cheques ADD COLUMN IF NOT EXISTS drawer_name TEXT DEFAULT '';
 ALTER TABLE public.cheques ADD COLUMN IF NOT EXISTS contact_type TEXT;
 ALTER TABLE public.cheques ADD COLUMN IF NOT EXISTS contact_id TEXT;
@@ -47,6 +52,69 @@ ALTER TABLE public.cheques ADD COLUMN IF NOT EXISTS notes TEXT DEFAULT '';
 ALTER TABLE public.cheques ADD COLUMN IF NOT EXISTS status_changed_at TIMESTAMPTZ;
 ALTER TABLE public.cheques ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT TIMEZONE('utc', NOW());
 ALTER TABLE public.cheques ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT TIMEZONE('utc', NOW());
+
+-- Older installs required issue_date / payee_or_drawer; the app now uses due_date + drawer_name.
+-- Keep the legacy columns filled so NOT NULL constraints (if still present) do not block writes.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = 'cheques' AND column_name = 'issue_date'
+    ) THEN
+        EXECUTE $sql$
+            UPDATE public.cheques
+               SET issue_date = COALESCE(issue_date, due_date, (created_at AT TIME ZONE 'utc')::date, CURRENT_DATE)
+             WHERE issue_date IS NULL
+        $sql$;
+        EXECUTE 'ALTER TABLE public.cheques ALTER COLUMN issue_date SET DEFAULT CURRENT_DATE';
+        BEGIN
+            EXECUTE 'ALTER TABLE public.cheques ALTER COLUMN issue_date SET NOT NULL';
+        EXCEPTION WHEN others THEN
+            NULL;
+        END;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = 'cheques' AND column_name = 'payee_or_drawer'
+    ) THEN
+        EXECUTE $sql$
+            UPDATE public.cheques
+               SET payee_or_drawer = COALESCE(
+                    NULLIF(btrim(payee_or_drawer), ''),
+                    NULLIF(btrim(drawer_name), ''),
+                    NULLIF(btrim(contact_name), ''),
+                    '—'
+               )
+             WHERE payee_or_drawer IS NULL OR btrim(payee_or_drawer) = ''
+        $sql$;
+        EXECUTE $sql$
+            ALTER TABLE public.cheques ALTER COLUMN payee_or_drawer SET DEFAULT ''
+        $sql$;
+        BEGIN
+            EXECUTE 'ALTER TABLE public.cheques ALTER COLUMN payee_or_drawer SET NOT NULL';
+        EXCEPTION WHEN others THEN
+            NULL;
+        END;
+    END IF;
+
+    -- Prefer drawer_name going forward; copy from the legacy label when empty.
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = 'cheques' AND column_name = 'drawer_name'
+    ) AND EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = 'cheques' AND column_name = 'payee_or_drawer'
+    ) THEN
+        EXECUTE $sql$
+            UPDATE public.cheques
+               SET drawer_name = btrim(payee_or_drawer)
+             WHERE (drawer_name IS NULL OR btrim(drawer_name) = '')
+               AND payee_or_drawer IS NOT NULL
+               AND btrim(payee_or_drawer) <> ''
+        $sql$;
+    END IF;
+END $$;
 
 -- Legacy tables sometimes used owner_id instead of user_id.
 DO $$
@@ -108,6 +176,15 @@ BEGIN
         NEW.status_changed_at := NULL;
         NEW.created_at := TIMEZONE('utc', NOW());
         NEW.updated_at := NEW.created_at;
+        IF NEW.issue_date IS NULL THEN
+            NEW.issue_date := COALESCE(NEW.due_date, (NEW.created_at AT TIME ZONE 'utc')::date, CURRENT_DATE);
+        END IF;
+        IF NEW.payee_or_drawer IS NULL OR btrim(NEW.payee_or_drawer) = '' THEN
+            NEW.payee_or_drawer := COALESCE(NULLIF(btrim(NEW.drawer_name), ''), NULLIF(btrim(NEW.contact_name), ''), '—');
+        END IF;
+        IF NEW.drawer_name IS NULL OR btrim(NEW.drawer_name) = '' THEN
+            NEW.drawer_name := COALESCE(NULLIF(btrim(NEW.payee_or_drawer), ''), '');
+        END IF;
         RETURN NEW;
     END IF;
 

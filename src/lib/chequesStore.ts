@@ -23,9 +23,11 @@ export class ChequeStoreError extends Error {
 
 const GUEST_KEY = 'mustawdae_cheques_v1_guest';
 const COLUMNS =
-  'id, cheque_number, bank_name, amount, currency, due_date, type, status, drawer_name, contact_type, contact_id, contact_name, endorsed_to, notes, status_changed_at, created_at';
+  'id, cheque_number, bank_name, amount, currency, due_date, type, status, drawer_name, payee_or_drawer, contact_type, contact_id, contact_name, endorsed_to, notes, status_changed_at, created_at';
 
 function fromRow(row: Record<string, any>): Cheque {
+  // Production once had payee_or_drawer before drawer_name; keep reading both.
+  const drawer = String(row.drawer_name || row.payee_or_drawer || '');
   return {
     id: String(row.id),
     chequeNumber: String(row.cheque_number || ''),
@@ -35,7 +37,7 @@ function fromRow(row: Record<string, any>): Cheque {
     dueDate: String(row.due_date || '').slice(0, 10),
     type: row.type === 'outgoing' ? 'outgoing' : 'incoming',
     status: (row.status || 'pending') as ChequeStatus,
-    drawerName: String(row.drawer_name || ''),
+    drawerName: drawer,
     contactType: row.contact_type === 'customer' || row.contact_type === 'supplier' ? row.contact_type : null,
     contactId: row.contact_id ? String(row.contact_id) : null,
     contactName: String(row.contact_name || ''),
@@ -47,14 +49,18 @@ function fromRow(row: Record<string, any>): Cheque {
 }
 
 function toRow(input: ChequeInput) {
+  const drawer = input.drawerName.trim();
+  // Legacy NOT NULL columns (issue_date, payee_or_drawer) still exist on some stores.
   return {
     cheque_number: input.chequeNumber.trim(),
     bank_name: input.bankName.trim(),
     amount: roundMoney(input.amount, input.currency),
     currency: input.currency,
     due_date: input.dueDate,
+    issue_date: input.dueDate,
     type: input.type,
-    drawer_name: input.drawerName.trim(),
+    drawer_name: drawer,
+    payee_or_drawer: drawer || input.contactName.trim() || '—',
     contact_type: input.contactType,
     contact_id: input.contactType === 'customer' ? input.contactId : null,
     contact_name: input.contactName.trim(),
@@ -64,12 +70,21 @@ function toRow(input: ChequeInput) {
 
 function mapError(error: { code?: string; message?: string; details?: string }): ChequeStoreError {
   const text = `${error.message || ''} ${error.details || ''}`;
-  if (error.code === 'PGRST205' || error.code === '42P01' || (/cheques/.test(text) && /schema cache|does not exist/.test(text))) {
+  if (
+    error.code === 'PGRST205' ||
+    error.code === '42P01' ||
+    (/cheques/.test(text) && /schema cache|does not exist/.test(text)) ||
+    (/permission denied for (table )?cheques/i.test(text) && /GRANT/i.test(text))
+  ) {
     return new ChequeStoreError('schema_missing', text);
   }
   if (error.code === '23505') return new ChequeStoreError('duplicate', text);
   if (/invalid cheque status change|locked after/i.test(text)) return new ChequeStoreError('invalid_transition', text);
   if (error.code === '23514' || error.code === '22P02' || error.code === '22007') return new ChequeStoreError('invalid', text);
+  // Missing column on a half-migrated cheques table — treat as register not ready.
+  if (error.code === 'PGRST204' || /Could not find the '.+' column of 'cheques'/i.test(text)) {
+    return new ChequeStoreError('schema_missing', text);
+  }
   if (error.code === '42501' || /JWT|not authenticated/i.test(text)) return new ChequeStoreError('no_session', text);
   return new ChequeStoreError('failed', text);
 }
