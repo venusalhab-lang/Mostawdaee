@@ -1,4 +1,5 @@
 import type { Invoice } from '../types';
+import { appReceiptPromo } from './brand';
 import { escapeHtml, paymentMethodLabel } from './invoiceDocument';
 import { lineQuantityText } from './packs';
 
@@ -102,6 +103,7 @@ export function buildReceiptHtml(o: ReceiptInput): string {
   .total { font-size: ${base + 3}px; font-weight: 700; border-top: 1px dashed #000; margin-top: 1mm; padding-top: 1mm; }
   .bold { font-weight: 700; }
   .footer { text-align: center; margin-top: 3mm; }
+  .brand-foot { text-align: center; margin-top: 1.5mm; font-size: ${Math.max(8, base - 2)}px; color: #64748b; }
 </style>
 </head>
 <body>
@@ -132,6 +134,7 @@ export function buildReceiptHtml(o: ReceiptInput): string {
   ${inv.cashReceived !== undefined && !(inv.paymentMethod === 'credit' && Number(inv.paidAmount) > 0) ? row(L('المستلم', 'Received'), m(inv.cashReceived), 'bold') : ''}
   ${inv.changeDue !== undefined && Number(inv.changeDue) > 0 ? row(L('الباقي', 'Change'), m(inv.changeDue), 'bold') : ''}
   <div class="footer">${L('شكراً لزيارتكم', 'Thank you')}</div>
+  <div class="brand-foot">${escapeHtml(appReceiptPromo(isRtl))}</div>
 </body>
 </html>`;
 }

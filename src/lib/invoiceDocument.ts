@@ -436,7 +436,7 @@ export function buildInvoicePrintHtml(ctx: InvoicePrintContext): string {
       font-size: 9.5px;
       line-height: 1.5;
     }
-    .foot .promo { color: #64748b; }
+    .foot .promo { color: #94a3b8; font-weight: 500; }
     @media print {
       thead th, .brand-bar, .logo-fallback, tr.even td {
         -webkit-print-color-adjust: exact;

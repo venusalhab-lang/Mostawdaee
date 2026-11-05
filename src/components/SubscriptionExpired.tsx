@@ -126,47 +126,47 @@ export default function SubscriptionExpired({ language, onLanguageToggle, reason
     ? new Date(expiryDate).toLocaleDateString(isRtl ? 'ar' : 'en-US', { day: 'numeric', month: 'long', year: 'numeric' })
     : null;
 
-  const secondary = 'py-3 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-slate-200 font-bold text-xs rounded-xl border border-slate-800 transition flex items-center justify-center gap-2 cursor-pointer';
+  const secondary = 'py-3 bg-slate-950 hover:bg-slate-800 disabled:opacity-50 text-slate-200 font-semibold text-xs rounded-2xl border border-slate-800 transition flex items-center justify-center gap-2 cursor-pointer';
 
   return (
     <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center p-4 sm:p-6 text-slate-100" dir={isRtl ? 'rtl' : 'ltr'}>
       <header className="absolute top-4 inset-x-4 sm:inset-x-6 flex justify-between items-center">
         <div className="flex items-center gap-2">
-          <ShieldCheck size={20} className="text-indigo-400" />
-          <span className="text-xs font-black text-slate-300">{isRtl ? 'مستودعي' : 'Mostawdaee'}</span>
+          <ShieldCheck size={18} className="text-slate-400" />
+          <span className="text-xs font-semibold text-slate-300 tracking-tight">{isRtl ? 'مستودعي' : 'Mostawdaee'}</span>
         </div>
         <button
           type="button"
           onClick={onLanguageToggle}
-          className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-900 border border-slate-800 hover:bg-slate-800 rounded-xl text-xs font-bold transition cursor-pointer"
+          className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-900 border border-slate-800 hover:bg-slate-800 rounded-xl text-xs font-medium transition cursor-pointer"
         >
-          <Globe2 size={13} className="text-indigo-400" />
+          <Globe2 size={13} className="text-slate-400" />
           <span>{isRtl ? 'English' : 'العربية'}</span>
         </button>
       </header>
 
-      <main className="w-full max-w-lg bg-slate-900/80 border border-slate-800 rounded-3xl p-6 sm:p-8 space-y-6">
+      <main className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-3xl p-6 sm:p-8 space-y-6 shadow-2xl">
         <div className="text-center space-y-3">
-          <div className="inline-flex p-4 bg-slate-950 rounded-2xl border border-slate-800 text-indigo-400">
-            {reason === 'unverified' ? <WifiOff size={30} /> : <Lock size={30} />}
+          <div className="inline-flex p-3.5 bg-slate-950 rounded-2xl border border-slate-800 text-slate-400">
+            {reason === 'unverified' ? <WifiOff size={26} /> : <Lock size={26} />}
           </div>
-          <h1 className="text-2xl font-black text-white">{title}</h1>
-          <p className="text-sm text-slate-300 leading-relaxed">{subtitle}</p>
+          <h1 className="text-xl sm:text-2xl font-bold text-white tracking-tight">{title}</h1>
+          <p className="text-sm text-slate-400 leading-relaxed">{subtitle}</p>
           {formattedExpiry && reason !== 'unverified' && (
-            <p className="text-xs text-slate-400">
-              {isRtl ? 'تاريخ الانتهاء: ' : 'Ended on: '}<span className="font-bold text-slate-200">{formattedExpiry}</span>
+            <p className="text-xs text-slate-500">
+              {isRtl ? 'تاريخ الانتهاء: ' : 'Ended on: '}<span className="font-semibold text-slate-300">{formattedExpiry}</span>
             </p>
           )}
         </div>
 
         {reason !== 'unverified' && !member && (
           isNative ? (
-            <div className="space-y-3">
+            <div className="space-y-2.5">
               <button
                 type="button"
                 onClick={buy}
                 disabled={busy !== null}
-                className="w-full py-4 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white font-black text-sm rounded-xl transition flex items-center justify-center gap-2 cursor-pointer"
+                className="w-full py-3.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 text-white font-bold text-sm rounded-2xl transition flex items-center justify-center gap-2 cursor-pointer"
               >
                 <Smartphone size={16} />
                 <span>{busy === 'buy' ? (isRtl ? 'جارٍ الاتصال بـ Google Play...' : 'Connecting to Google Play...') : (isRtl ? 'الاشتراك السنوي عبر Google Play' : 'Annual subscription via Google Play')}</span>
@@ -175,14 +175,16 @@ export default function SubscriptionExpired({ language, onLanguageToggle, reason
                 <RotateCw size={13} className={busy === 'restore' ? 'animate-spin' : ''} />
                 <span>{isRtl ? 'استعادة مشترياتي' : 'Restore purchases'}</span>
               </button>
-              <p className="text-[11px] text-slate-500 text-center">
-                {isRtl ? 'السعر النهائي بعملتك يظهر في نافذة Google Play قبل التأكيد.' : 'The final price in your currency is shown by Google Play before you confirm.'}
+              <p className="text-[11px] text-slate-500 text-center leading-relaxed pt-1">
+                {isRtl
+                  ? 'السعر النهائي بعملتك يظهر في Google Play قبل التأكيد. الدفع عبر Google ولا نخزّن بيانات بطاقة.'
+                  : 'Google Play shows the final price before you confirm. Payment is via Google; we never store card details.'}
               </p>
             </div>
           ) : (
             <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 flex items-start gap-3">
-              <Smartphone className="w-5 h-5 text-indigo-400 shrink-0 mt-0.5" />
-              <p className="text-xs text-slate-300 leading-relaxed">
+              <Smartphone className="w-4 h-4 text-slate-400 shrink-0 mt-0.5" />
+              <p className="text-xs text-slate-400 leading-relaxed">
                 {isRtl
                   ? 'الاشتراك يتم من تطبيق مستودعي على أندرويد عبر Google Play بنفس الحساب. بعد الاشتراك اضغط «إعادة التحقق».'
                   : 'Subscribe in the Mostawdaee Android app through Google Play with the same account, then press "Check again".'}
@@ -191,7 +193,7 @@ export default function SubscriptionExpired({ language, onLanguageToggle, reason
           )
         )}
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
           <button type="button" onClick={recheck} disabled={busy !== null} className={secondary}>
             <RotateCw size={13} className={busy === 'check' ? 'animate-spin' : ''} />
             <span>{busy === 'check' ? (isRtl ? 'جارٍ التحقق...' : 'Checking...') : (isRtl ? 'إعادة التحقق' : 'Check again')}</span>
@@ -212,10 +214,10 @@ export default function SubscriptionExpired({ language, onLanguageToggle, reason
           </button>
         )}
 
-        <div className="text-center">
+        <div className="text-center pt-1 border-t border-slate-800/80">
           <a
             href="mailto:venusalhab@gmail.com?subject=Subscription"
-            className="text-[11px] text-indigo-400 hover:underline font-bold inline-flex items-center gap-1"
+            className="text-[11px] text-slate-400 hover:text-slate-200 transition inline-flex items-center gap-1.5 pt-4 font-medium"
           >
             <HelpCircle size={12} />
             <span>{isRtl ? 'التواصل مع الدعم' : 'Contact support'}</span>

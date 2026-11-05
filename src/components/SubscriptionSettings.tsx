@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Crown, Sparkles, CalendarClock, ExternalLink, UserRound, X } from 'lucide-react';
+import { BadgeCheck, CalendarClock, ExternalLink, UserRound, X } from 'lucide-react';
 import { Capacitor } from '@capacitor/core';
 import { Browser } from '@capacitor/browser';
 import { useSubscriptionSync } from '../hooks/useSubscriptionSync';
@@ -88,16 +88,16 @@ export default function SubscriptionSettings({ language }: Props) {
   return (
     <div className="space-y-8">
       <div className="flex items-center gap-3">
-        <Crown className="text-amber-500" />
+        <BadgeCheck className="text-slate-500 dark:text-slate-400" size={22} />
         <h2 className="text-2xl font-black text-gray-900 dark:text-white uppercase tracking-wider">
           {isRtl ? 'الاشتراك' : 'Subscription'}
         </h2>
       </div>
 
       {showExpiryNotice && (
-        <div className="p-4 rounded-2xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/50 flex items-start gap-3">
-          <CalendarClock size={18} className="text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
-          <p className="flex-1 text-sm font-semibold text-amber-900 dark:text-amber-200 leading-relaxed">
+        <div className="p-4 rounded-2xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200/80 dark:border-amber-800/40 flex items-start gap-3">
+          <CalendarClock size={18} className="text-amber-700 dark:text-amber-400 shrink-0 mt-0.5" />
+          <p className="flex-1 text-sm font-medium text-amber-950 dark:text-amber-100 leading-relaxed">
             {isPremiumActive
               ? (isRtl
                   ? `ينتهي اشتراكك خلال ${arCount(daysRemaining, WITHIN_DAYS)}. جدّده الآن حتى لا يتوقف العمل.`
@@ -109,7 +109,7 @@ export default function SubscriptionSettings({ language }: Props) {
           <button
             type="button"
             onClick={dismissNotice}
-            className="p-1 rounded-lg text-amber-700 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/40 cursor-pointer"
+            className="p-1 rounded-lg text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/40 cursor-pointer"
             title={isRtl ? 'إخفاء' : 'Dismiss'} aria-label={isRtl ? 'إخفاء' : 'Dismiss'}
           >
             <X size={16} />
@@ -117,15 +117,15 @@ export default function SubscriptionSettings({ language }: Props) {
         </div>
       )}
 
-      <div className="p-8 bg-gray-50 dark:bg-gray-800/50 rounded-[2.5rem] border border-gray-200 dark:border-gray-700/50 space-y-6">
+      <div className="p-6 sm:p-8 bg-gray-50 dark:bg-gray-800/50 rounded-[2.5rem] border border-gray-200 dark:border-gray-700/50 space-y-6">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3">
-            <span className={`px-3 py-1.5 rounded-xl text-xs font-black ${toneClasses[status.tone]}`}>{status.label}</span>
+            <span className={`px-3 py-1.5 rounded-xl text-xs font-bold ${toneClasses[status.tone]}`}>{status.label}</span>
             {loading && <span className="text-xs text-gray-400">{isRtl ? 'جارٍ التحقق...' : 'Checking...'}</span>}
           </div>
           {!isGuest && (isPremiumActive || isTrialActive) && (
-            <div className="text-sm font-bold text-gray-700 dark:text-gray-300 flex items-center gap-2">
-              <CalendarClock size={16} className="text-indigo-500" />
+            <div className="text-sm font-medium text-gray-700 dark:text-gray-300 flex items-center gap-2">
+              <CalendarClock size={16} className="text-slate-400" />
               <span>
                 {isRtl ? arCount(daysRemaining, DAYS_LEFT) : `${daysRemaining} days left`}
                 {expiryLabel ? ` · ${expiryLabel}` : ''}
@@ -150,8 +150,8 @@ export default function SubscriptionSettings({ language }: Props) {
                   ? 'اشتراكك السنوي فعّال. يتجدد تلقائياً عبر Google Play ما لم تلغِه.'
                   : 'Your annual subscription is active. It renews automatically through Google Play unless you cancel it.')
               : (isRtl
-                  ? 'الاشتراك السنوي يفتح كامل المزايا: المزامنة السحابية، وتطبيق الهاتف، وتعدد العملات، والتقارير.'
-                  : 'The annual plan unlocks everything: cloud sync, the mobile app, multi-currency and reports.')}
+                  ? 'الاشتراك السنوي يبقي البيع والمخزون والخزنة متاحة، مع المزامنة السحابية وتطبيق الهاتف وتعدد العملات والتقارير.'
+                  : 'The annual plan keeps sales, stock and vault available, with cloud sync, the mobile app, multi-currency and reports.')}
           </p>
         )}
 
@@ -162,17 +162,17 @@ export default function SubscriptionSettings({ language }: Props) {
               <button
                 type="button"
                 onClick={() => { sounds?.playClick(); setModalOpen(true); }}
-                className="px-5 py-3 rounded-2xl bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-black text-sm flex items-center gap-2 cursor-pointer shadow-lg"
+                className="px-5 py-3 rounded-2xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-sm flex items-center gap-2 cursor-pointer transition"
               >
-                <Sparkles size={16} />
-                {isRtl ? 'ترقية للنسخة الكاملة' : 'Upgrade to Premium'}
+                <BadgeCheck size={16} />
+                {isRtl ? 'تفعيل الاشتراك السنوي' : 'Activate annual subscription'}
               </button>
             )}
             {isPremiumActive && (
               <button
                 type="button"
                 onClick={openManage}
-                className="px-5 py-3 rounded-2xl bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-300 font-bold text-sm flex items-center gap-2 cursor-pointer"
+                className="px-5 py-3 rounded-2xl bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-300 font-semibold text-sm flex items-center gap-2 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800 transition"
               >
                 <ExternalLink size={16} />
                 {isRtl ? 'إدارة الاشتراك في Google Play' : 'Manage in Google Play'}

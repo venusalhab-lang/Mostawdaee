@@ -102,6 +102,6 @@ describe('buildInvoicePrintHtml', () => {
     expect(html).toContain('Paid now');
     expect(html).toContain('Balance due');
     expect(html).toContain('SKU: TEA-1');
-    expect(html).toContain('Mostawdaee — warehouse &amp; POS');
+    expect(html).toContain('Issued with Mostawdaee · mostawdaee.com');
   });
 });

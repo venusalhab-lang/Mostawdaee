@@ -98,6 +98,7 @@ describe('receipt html', () => {
     expect(html).toContain('width: 48mm');
     expect(html).toContain('Tea &lt;script&gt;');
     expect(html).toContain('Shop &amp; Co');
+    expect(html).toContain('مستودعي · mostawdaee.com');
     expect(html).not.toContain('<script>');
     expect(buildReceiptHtml({ ...base, paper: 80 })).toContain('width: 72mm');
   });
