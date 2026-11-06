@@ -1,6 +1,6 @@
 import type { Invoice } from '../types';
 import { appReceiptPromo } from './brand';
-import { formatReceiptMoney, roundMoney } from './exchangeRates';
+import { currencyDecimals, formatReceiptMoney, roundMoney } from './exchangeRates';
 import { escapeHtml, invoiceVatRate, paymentMethodLabel } from './invoiceDocument';
 import { computeInvoiceTotals } from './invoiceTotals';
 import { lineQuantityText } from './packs';
@@ -32,21 +32,42 @@ function receiptTitle(inv: Invoice, isRtl: boolean): string {
   return isRtl ? 'إيصال بيع' : 'Sales receipt';
 }
 
+/** Amount only (ASCII, fixed decimals) — currency is printed once on the slip to avoid bidi/clipping. */
+export function formatReceiptAmount(value: number, code: string): string {
+  const d = currencyDecimals(code);
+  return roundMoney(Number(value) || 0, code).toFixed(d);
+}
+
 /**
- * Totals shown on the slip: always recompute from line totals + discount + VAT so the
- * printed math matches the items even if a stored header drifted.
+ * Totals shown on the slip: recompute from line totals + discount + VAT so the printed
+ * math matches the items. Prefer the checkout header when it already matches that math
+ * (avoids 0.001 drift surprises on reprint).
  */
 export function receiptFigures(inv: Invoice) {
   const currency = inv.currency;
   const linesSubtotal = inv.items.reduce((sum, item) => sum + (Number(item.total) || 0), 0);
   const vatRate = invoiceVatRate(inv);
-  const totals = computeInvoiceTotals({
+  const computed = computeInvoiceTotals({
     subtotal: linesSubtotal,
     discount: Number(inv.discount) || 0,
     vatRate,
     taxEnabled: vatRate > 0,
     currency,
   });
+
+  const storedSub = roundMoney(Number(inv.subtotal) || 0, currency);
+  const storedDisc = roundMoney(Number(inv.discount) || 0, currency);
+  const storedTax = roundMoney(Number(inv.taxAmount) || 0, currency);
+  const storedTotal = roundMoney(Number(inv.totalAmount) || 0, currency);
+  const headerMatches =
+    Math.abs(storedSub - computed.subtotal) < 1e-6
+    && Math.abs(storedDisc - computed.discount) < 1e-6
+    && Math.abs(storedTax - computed.taxAmount) < 1e-6
+    && Math.abs(storedTotal - computed.total) < 1e-6;
+
+  const totals = headerMatches
+    ? { subtotal: storedSub, discount: storedDisc, net: roundMoney(storedSub - storedDisc, currency), taxAmount: storedTax, total: storedTotal }
+    : computed;
 
   const creditPartial = inv.paymentMethod === 'credit' && Number(inv.paidAmount) > 0;
   const showReceived = inv.cashReceived !== undefined && !creditPartial;
@@ -95,13 +116,12 @@ export function buildTestPageHtml(paper: PaperWidth, isRtl: boolean, printerName
 export function buildReceiptHtml(o: ReceiptInput): string {
   const { invoice: inv, isRtl } = o;
   const L = (ar: string, en: string) => (isRtl ? ar : en);
-  const moneyFn = o.money || ((amount: number, currency: string) => formatReceiptMoney(amount, currency));
-  const m = (v: number | undefined, currency?: string) =>
-    escapeHtml(moneyFn(Number(v) || 0, currency || inv.currency));
+  const code = inv.currency;
+  const amt = (v: number | undefined) => escapeHtml(formatReceiptAmount(Number(v) || 0, code));
   const start = isRtl ? 'right' : 'left';
   const end = isRtl ? 'left' : 'right';
   const width = printableMm(o.paper);
-  const base = o.paper === 58 ? 10 : 11;
+  const base = o.paper === 58 ? 11 : 12;
   const sign = inv.type === 'return' || inv.type === 'purchase_return' ? '-' : '';
   const figures = receiptFigures(inv);
 
@@ -109,18 +129,17 @@ export function buildReceiptHtml(o: ReceiptInput): string {
     const qty = Number(item.quantity) || 0;
     const unit = Number(item.unitPrice) || 0;
     const unitLine = qty > 0
-      ? `<div class="unit" dir="ltr">${escapeHtml(String(qty))} × ${m(unit)}</div>`
+      ? `<div class="unit" dir="ltr">${escapeHtml(String(qty))} x ${escapeHtml(formatReceiptAmount(unit, code))}</div>`
       : '';
-    return `
-      <tr>
+    return `<tr>
         <td class="name">${escapeHtml(item.description)}${unitLine}</td>
-        <td class="qty">${escapeHtml(lineQuantityText(item, isRtl))}</td>
-        <td class="amt" dir="ltr">${m(item.total)}</td>
+        <td class="qty" dir="ltr">${escapeHtml(lineQuantityText(item, isRtl))}</td>
+        <td class="amt" dir="ltr">${amt(item.total)}</td>
       </tr>`;
   }).join('');
 
-  const row = (label: string, value: string, cls = '') =>
-    `<div class="row ${cls}"><span>${label}</span><span dir="ltr">${value}</span></div>`;
+  const totalRow = (label: string, value: string, strong = false) =>
+    `<tr class="${strong ? 'grand' : ''}"><td class="lbl">${escapeHtml(label)}</td><td class="val" dir="ltr">${value}</td></tr>`;
 
   const contact = [o.businessAddress, o.businessPhone].filter((v) => v && v.trim()).map((v) => escapeHtml(v!.trim()));
 
@@ -133,24 +152,39 @@ export function buildReceiptHtml(o: ReceiptInput): string {
   @page { margin: 0; size: ${o.paper}mm auto; }
   * { box-sizing: border-box; }
   html, body { background: #fff; color: #000; }
-  body { font-family: Tahoma, Arial, sans-serif; font-size: ${base}px; line-height: 1.4; margin: 0 auto; padding: 3mm 0; width: ${width}mm; direction: ${isRtl ? 'rtl' : 'ltr'}; }
+  body {
+    font-family: "Courier New", Courier, monospace;
+    font-size: ${base}px;
+    line-height: 1.35;
+    margin: 0 auto;
+    padding: 3mm 0;
+    width: ${width}mm;
+    direction: ${isRtl ? 'rtl' : 'ltr'};
+  }
   .center { text-align: center; }
-  .store { font-size: ${base + 4}px; font-weight: 700; }
-  .muted { font-size: ${base - 1}px; }
-  .title { font-weight: 700; margin-top: 2mm; }
+  .store { font-size: ${base + 3}px; font-weight: 700; font-family: Tahoma, Arial, sans-serif; }
+  .muted { font-size: ${base - 1}px; font-family: Tahoma, Arial, sans-serif; }
+  .title { font-weight: 700; margin-top: 2mm; font-family: Tahoma, Arial, sans-serif; }
   .rule { border-top: 1px dashed #000; margin: 2mm 0; }
-  table { width: 100%; border-collapse: collapse; }
-  th { font-size: ${base - 1}px; text-align: ${start}; border-bottom: 1px solid #000; padding-bottom: 1mm; }
-  td { padding: 1mm 0; vertical-align: top; }
-  .name { text-align: ${start}; word-break: break-word; }
-  .unit { font-size: ${Math.max(8, base - 2)}px; opacity: 0.85; margin-top: 0.5mm; }
-  .qty { text-align: center; white-space: nowrap; padding: 1mm 1.5mm; }
-  .amt { text-align: ${end}; white-space: nowrap; }
-  .row { display: flex; justify-content: space-between; gap: 2mm; }
-  .total { font-size: ${base + 3}px; font-weight: 700; border-top: 1px dashed #000; margin-top: 1mm; padding-top: 1mm; }
-  .bold { font-weight: 700; }
-  .footer { text-align: center; margin-top: 3mm; }
-  .brand-foot { text-align: center; margin-top: 1.5mm; font-size: ${Math.max(8, base - 2)}px; color: #64748b; }
+  table.items, table.sums { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  table.items th {
+    font-size: ${base - 1}px;
+    text-align: ${start};
+    border-bottom: 1px solid #000;
+    padding-bottom: 1mm;
+    font-family: Tahoma, Arial, sans-serif;
+  }
+  table.items td { padding: 1.2mm 0; vertical-align: top; }
+  .name { width: 52%; text-align: ${start}; word-break: break-word; font-family: Tahoma, Arial, sans-serif; }
+  .unit { font-size: ${Math.max(9, base - 2)}px; margin-top: 0.4mm; opacity: 0.9; }
+  .qty { width: 18%; text-align: center; white-space: nowrap; font-size: ${Math.max(9, base - 1)}px; }
+  .amt { width: 30%; text-align: ${end}; white-space: nowrap; font-weight: 700; }
+  table.sums td { padding: 1.2mm 0; vertical-align: baseline; }
+  table.sums .lbl { text-align: ${start}; font-family: Tahoma, Arial, sans-serif; padding-${end}: 2mm; }
+  table.sums .val { text-align: ${end}; white-space: nowrap; width: 42%; font-weight: 700; }
+  table.sums tr.grand td { font-size: ${base + 2}px; border-top: 1px dashed #000; padding-top: 2mm; }
+  .footer { text-align: center; margin-top: 3mm; font-family: Tahoma, Arial, sans-serif; }
+  .brand-foot { text-align: center; margin-top: 1.5mm; font-size: ${Math.max(8, base - 2)}px; font-family: Tahoma, Arial, sans-serif; }
 </style>
 </head>
 <body>
@@ -161,25 +195,33 @@ export function buildReceiptHtml(o: ReceiptInput): string {
     <div class="title">${receiptTitle(inv, isRtl)}</div>
     <div class="muted"><span dir="ltr">#${escapeHtml(inv.invoiceNumber)}</span></div>
     <div class="muted">${escapeHtml(o.formatDate(inv.date))}</div>
+    <div class="muted" dir="ltr">${L('العملة', 'Currency')}: ${escapeHtml(code)}</div>
     ${inv.type === 'return' && inv.returnOfNumber ? `<div class="muted">${L('عن الفاتورة', 'For invoice')} <span dir="ltr">#${escapeHtml(inv.returnOfNumber)}</span></div>` : ''}
     ${inv.customerName?.trim() ? `<div class="muted">${L('العميل', 'Customer')}: ${escapeHtml(inv.customerName.trim())}</div>` : ''}
   </div>
   <div class="rule"></div>
-  <table>
-    <thead><tr><th>${L('الصنف', 'Item')}</th><th style="text-align:center">${L('الكمية', 'Qty')}</th><th style="text-align:${end}">${L('المبلغ', 'Amount')}</th></tr></thead>
-    <tbody>${items}
-    </tbody>
+  <table class="items">
+    <thead>
+      <tr>
+        <th>${L('الصنف', 'Item')}</th>
+        <th style="text-align:center">${L('كمية', 'Qty')}</th>
+        <th style="text-align:${end}">${L('المبلغ', 'Amt')}</th>
+      </tr>
+    </thead>
+    <tbody>${items}</tbody>
   </table>
   <div class="rule"></div>
-  ${row(L('المجموع الفرعي', 'Subtotal'), m(figures.subtotal))}
-  ${figures.discount > 0 ? row(L('الخصم', 'Discount'), `-${m(figures.discount)}`) : ''}
-  ${figures.taxAmount > 0 ? row(L('الضريبة', 'VAT'), m(figures.taxAmount)) : ''}
-  ${row(L('الإجمالي', 'Total'), `${sign}${m(figures.totalAmount)}`, 'total')}
-  ${row(L('طريقة الدفع', 'Payment'), escapeHtml(paymentMethodLabel(inv.paymentMethod, isRtl, inv.paidAmount, figures.totalAmount)))}
-  ${inv.paymentMethod === 'credit' && Number(inv.paidAmount) > 0 ? row(L('المدفوع الآن', 'Paid now'), m(inv.paidAmount), 'bold') : ''}
-  ${inv.paymentMethod === 'credit' && Number(inv.debtAmount) > 0 ? row(L('المتبقي آجل', 'On account'), m(inv.debtAmount, inv.debtCurrency || inv.currency), 'bold') : ''}
-  ${figures.showReceived ? row(L('المستلم', 'Received'), m(figures.cashReceived), 'bold') : ''}
-  ${figures.changeDue > 0 ? row(L('الباقي', 'Change'), m(figures.changeDue), 'bold') : ''}
+  <table class="sums">
+    ${totalRow(L('المجموع الفرعي', 'Subtotal'), amt(figures.subtotal))}
+    ${figures.discount > 0 ? totalRow(L('الخصم', 'Discount'), `-${amt(figures.discount)}`) : ''}
+    ${figures.taxAmount > 0 ? totalRow(L('الضريبة', 'VAT'), amt(figures.taxAmount)) : ''}
+    ${totalRow(L('الإجمالي', 'Total'), `${sign}${amt(figures.totalAmount)}`, true)}
+    ${totalRow(L('الدفع', 'Payment'), escapeHtml(paymentMethodLabel(inv.paymentMethod, isRtl, inv.paidAmount, figures.totalAmount)))}
+    ${inv.paymentMethod === 'credit' && Number(inv.paidAmount) > 0 ? totalRow(L('المدفوع', 'Paid'), amt(inv.paidAmount)) : ''}
+    ${inv.paymentMethod === 'credit' && Number(inv.debtAmount) > 0 ? totalRow(L('آجل', 'Credit'), escapeHtml(formatReceiptAmount(Number(inv.debtAmount) || 0, inv.debtCurrency || code)) + ' ' + escapeHtml(inv.debtCurrency || code)) : ''}
+    ${figures.showReceived ? totalRow(L('المستلم', 'Received'), amt(figures.cashReceived)) : ''}
+    ${figures.changeDue > 0 ? totalRow(L('الباقي', 'Change'), amt(figures.changeDue)) : ''}
+  </table>
   <div class="footer">${L('شكراً لزيارتكم', 'Thank you')}</div>
   <div class="brand-foot">${escapeHtml(appReceiptPromo(isRtl))}</div>
 </body>
