@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { convertMoney, safeConvertMoney, convertAmount, formatMoney, currencyDecimals, buildUsdUnitRates, POS_CURRENCY_CODES, roundMoney, conversionBasis, DEBT_RATE_MAX_AGE_MS } from '../exchangeRates';
+import { convertMoney, safeConvertMoney, convertAmount, formatMoney, formatReceiptDate, formatReceiptMoney, currencyDecimals, buildUsdUnitRates, POS_CURRENCY_CODES, roundMoney, conversionBasis, DEBT_RATE_MAX_AGE_MS } from '../exchangeRates';
 import { roundForCurrency } from '../vaultMath';
 
 describe('conversionBasis', () => {
@@ -91,6 +91,13 @@ describe('exchangeRates', () => {
   it('formats with the currency own symbol', () => {
     expect(formatMoney(10, 'ILS')).toContain('₪');
     expect(formatMoney(10, 'SAR')).toContain('ر.س');
+  });
+
+  it('formats thermal money with ASCII digits and no grouping', () => {
+    expect(formatReceiptMoney(1234.5, 'JOD')).toBe('1234.500 د.أ');
+    expect(formatReceiptMoney(10, 'IQD')).toBe('10 د.ع');
+    expect(formatReceiptDate(Date.UTC(2026, 0, 15, 12, 0), true)).toMatch(/2026/);
+    expect(formatReceiptDate(Date.UTC(2026, 0, 15, 12, 0), true)).not.toMatch(/[٠-٩]/);
   });
 
   it('converts Egyptian pounds from a live USD rate', () => {

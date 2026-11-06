@@ -56,6 +56,8 @@ import {
   safeConvertMoney,
   roundMoney,
   formatMoney,
+  formatReceiptDate,
+  formatReceiptMoney,
   currencyDecimals,
   fetchLiveUsdRates,
   readCachedLiveRates,
@@ -1255,8 +1257,8 @@ export default function POSSystem({ language }: POSSystemProps) {
       businessAddress: settings?.businessAddress,
       businessPhone: settings?.businessPhone,
       taxRegistrationNumber: settings?.taxRegistrationNumber,
-      money: (amount, currency) => formatMoney(amount, currency || activeCurrency),
-      formatDate: (ms) => new Date(ms).toLocaleString(isRtl ? 'ar-JO' : 'en-US'),
+      money: (amount, currency) => formatReceiptMoney(amount, currency || activeCurrency),
+      formatDate: (ms) => formatReceiptDate(ms, isRtl),
     });
     printReceipt(html, invoiceObj.invoiceNumber, { cashSale }).catch((err) => {
       toast.error(printerErrorMessage(err, isRtl), {

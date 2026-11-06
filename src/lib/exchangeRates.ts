@@ -86,6 +86,29 @@ export function formatMoney(value: number, code: string, locale?: string): strin
   return symbol === '$' ? `$${num}` : `${num} ${symbol}`;
 }
 
+/**
+ * Thermal / ESC/POS money: always ASCII digits, fixed decimals, no thousands grouping.
+ * Device locales (e.g. ar-JO) would otherwise emit Eastern digits or Arabic separators that
+ * rasterize poorly on cheap printers and look like wrong amounts.
+ */
+export function formatReceiptMoney(value: number, code: string): string {
+  const d = currencyDecimals(code);
+  const num = roundMoney(Number(value) || 0, code).toFixed(d);
+  const symbol = CURRENCY_SYMBOLS[code] || code;
+  return symbol === '$' ? `$${num}` : `${num} ${symbol}`;
+}
+
+/** Receipt timestamps with Latin digits so they match the money line on thermal paper. */
+export function formatReceiptDate(ms: number, isRtl: boolean): string {
+  return new Date(ms).toLocaleString(isRtl ? 'ar-JO-u-nu-latn' : 'en-US', {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
 interface CachedRates {
   ts: number;
   rates: Record<string, number>;

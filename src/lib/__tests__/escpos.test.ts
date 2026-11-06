@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { Invoice } from '../../types';
 import { DRAWER_PULSE, buildRasterJob, bytesToBase64, paperDots, toMonochrome, trimBottom } from '../escpos';
-import { buildReceiptHtml, buildTestPageHtml, printableMm } from '../receipt';
+import { formatReceiptMoney } from '../exchangeRates';
+import { buildReceiptHtml, buildTestPageHtml, printableMm, receiptFigures } from '../receipt';
 
 function rgba(width: number, height: number, black: (x: number, y: number) => boolean, alpha = 255): Uint8ClampedArray {
   const px = new Uint8ClampedArray(width * height * 4);
@@ -86,10 +87,11 @@ describe('receipt html', () => {
   const sale: Invoice = {
     id: 's1', invoiceNumber: 'POS-1', date: 0, type: 'sale', currency: 'JOD',
     items: [{ productId: 'p', description: 'Tea <script>', quantity: 2, unitPrice: 1.5, total: 3 }],
-    subtotal: 3, discount: 0.5, taxAmount: 0, totalAmount: 2.5, paymentMethod: 'cash', cashReceived: 5, changeDue: 2.5,
+    subtotal: 9, discount: 0.5, taxAmount: 0, totalAmount: 99, paymentMethod: 'cash', cashReceived: 5, changeDue: 0,
+    vatRate: 0,
   };
   const base = {
-    invoice: sale, isRtl: true, businessName: 'Shop & Co', money: (v: number, c: string) => `${v.toFixed(3)} ${c}`, formatDate: () => 'today',
+    invoice: sale, isRtl: true, businessName: 'Shop & Co', formatDate: () => 'today',
   };
 
   it('sizes the page to the paper and escapes user text', () => {
@@ -103,20 +105,47 @@ describe('receipt html', () => {
     expect(buildReceiptHtml({ ...base, paper: 80 })).toContain('width: 72mm');
   });
 
-  it('shows discount, change and a minus on returns; hides empty VAT', () => {
+  it('recomputes totals from lines and prints ASCII money without locale digits', () => {
+    expect(formatReceiptMoney(12.5, 'JOD')).toBe('12.500 د.أ');
+    expect(formatReceiptMoney(1234.5, 'AED')).toBe('1234.50 د.إ');
+    // Stored header totals are wrong on purpose — receipt must follow the lines.
+    expect(receiptFigures(sale)).toMatchObject({
+      subtotal: 3, discount: 0.5, taxAmount: 0, totalAmount: 2.5, cashReceived: 5, changeDue: 2.5,
+    });
     const html = buildReceiptHtml({ ...base, paper: 80 });
-    expect(html).toContain('-0.500 JOD');
-    expect(html).toContain('2.500 JOD');
+    expect(html).toContain('-0.500 د.أ');
+    expect(html).toContain('2.500 د.أ');
+    expect(html).toContain('2 × 1.500 د.أ');
     expect(html).not.toContain('الضريبة');
+    expect(html).not.toContain('٩'); // no Eastern Arabic digits
     const ret = buildReceiptHtml({ ...base, paper: 80, invoice: { ...sale, type: 'return', returnOfNumber: 'POS-0' } });
     expect(ret).toContain('مرتجع مبيعات');
-    expect(ret).toContain('-2.500 JOD');
+    expect(ret).toContain('-2.500 د.أ');
     expect(ret).toContain('#POS-0');
+  });
+
+  it('charges VAT on the net after discount when printing', () => {
+    const taxed: Invoice = {
+      ...sale,
+      currency: 'USD',
+      items: [{ productId: 'p', description: 'Tea', quantity: 1, unitPrice: 10, total: 10 }],
+      discount: 1,
+      vatRate: 16,
+      subtotal: 0,
+      taxAmount: 0,
+      totalAmount: 0,
+      cashReceived: 20,
+      changeDue: 0,
+    };
+    expect(receiptFigures(taxed)).toMatchObject({
+      subtotal: 10, discount: 1, taxAmount: 1.44, totalAmount: 10.44, changeDue: 9.56,
+    });
   });
 
   it('builds a test page for the chosen width', () => {
     const html = buildTestPageHtml(58, false, 'BT-58 <x>');
     expect(html).toContain('size: 58mm auto');
     expect(html).toContain('BT-58 &lt;x&gt;');
+    expect(html).toContain('12.500 د.أ');
   });
 });

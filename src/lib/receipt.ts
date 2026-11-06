@@ -1,6 +1,8 @@
 import type { Invoice } from '../types';
 import { appReceiptPromo } from './brand';
-import { escapeHtml, paymentMethodLabel } from './invoiceDocument';
+import { formatReceiptMoney, roundMoney } from './exchangeRates';
+import { escapeHtml, invoiceVatRate, paymentMethodLabel } from './invoiceDocument';
+import { computeInvoiceTotals } from './invoiceTotals';
 import { lineQuantityText } from './packs';
 
 export type PaperWidth = 58 | 80;
@@ -18,7 +20,8 @@ export interface ReceiptInput {
   businessAddress?: string;
   businessPhone?: string;
   taxRegistrationNumber?: string;
-  money: (amount: number, currency: string) => string;
+  /** Optional override; thermal receipts default to ASCII {@link formatReceiptMoney}. */
+  money?: (amount: number, currency: string) => string;
   formatDate: (ms: number) => string;
 }
 
@@ -27,6 +30,39 @@ function receiptTitle(inv: Invoice, isRtl: boolean): string {
   if (inv.type === 'purchase') return isRtl ? 'فاتورة شراء' : 'Purchase';
   if (inv.type === 'purchase_return') return isRtl ? 'مرتجع مشتريات' : 'Purchase return';
   return isRtl ? 'إيصال بيع' : 'Sales receipt';
+}
+
+/**
+ * Totals shown on the slip: always recompute from line totals + discount + VAT so the
+ * printed math matches the items even if a stored header drifted.
+ */
+export function receiptFigures(inv: Invoice) {
+  const currency = inv.currency;
+  const linesSubtotal = inv.items.reduce((sum, item) => sum + (Number(item.total) || 0), 0);
+  const vatRate = invoiceVatRate(inv);
+  const totals = computeInvoiceTotals({
+    subtotal: linesSubtotal,
+    discount: Number(inv.discount) || 0,
+    vatRate,
+    taxEnabled: vatRate > 0,
+    currency,
+  });
+
+  const creditPartial = inv.paymentMethod === 'credit' && Number(inv.paidAmount) > 0;
+  const showReceived = inv.cashReceived !== undefined && !creditPartial;
+  const changeDue = showReceived
+    ? roundMoney(Math.max(0, Number(inv.cashReceived) - totals.total), currency)
+    : Number(inv.changeDue) > 0
+      ? roundMoney(Number(inv.changeDue), currency)
+      : 0;
+
+  return {
+    ...totals,
+    totalAmount: totals.total,
+    showReceived,
+    cashReceived: showReceived ? roundMoney(Number(inv.cashReceived) || 0, currency) : undefined,
+    changeDue,
+  };
 }
 
 /** A short page to check the printer, the paper width and Arabic text. */
@@ -50,6 +86,7 @@ export function buildTestPageHtml(paper: PaperWidth, isRtl: boolean, printerName
   ${printerName ? `<div dir="ltr">${escapeHtml(printerName)}</div>` : ''}
   <div class="edge">${isRtl ? 'يجب أن يظهر هذا الإطار كاملاً من الجهتين' : 'This frame should be fully visible on both sides'}</div>
   <div dir="ltr">0123456789 ABC abc</div>
+  <div dir="ltr">${escapeHtml(formatReceiptMoney(12.5, 'JOD'))}</div>
 </body>
 </html>`;
 }
@@ -58,20 +95,29 @@ export function buildTestPageHtml(paper: PaperWidth, isRtl: boolean, printerName
 export function buildReceiptHtml(o: ReceiptInput): string {
   const { invoice: inv, isRtl } = o;
   const L = (ar: string, en: string) => (isRtl ? ar : en);
+  const moneyFn = o.money || ((amount: number, currency: string) => formatReceiptMoney(amount, currency));
   const m = (v: number | undefined, currency?: string) =>
-    escapeHtml(o.money(Number(v) || 0, currency || inv.currency));
+    escapeHtml(moneyFn(Number(v) || 0, currency || inv.currency));
   const start = isRtl ? 'right' : 'left';
   const end = isRtl ? 'left' : 'right';
   const width = printableMm(o.paper);
   const base = o.paper === 58 ? 10 : 11;
   const sign = inv.type === 'return' || inv.type === 'purchase_return' ? '-' : '';
+  const figures = receiptFigures(inv);
 
-  const items = inv.items.map((item) => `
+  const items = inv.items.map((item) => {
+    const qty = Number(item.quantity) || 0;
+    const unit = Number(item.unitPrice) || 0;
+    const unitLine = qty > 0
+      ? `<div class="unit" dir="ltr">${escapeHtml(String(qty))} × ${m(unit)}</div>`
+      : '';
+    return `
       <tr>
-        <td class="name">${escapeHtml(item.description)}</td>
+        <td class="name">${escapeHtml(item.description)}${unitLine}</td>
         <td class="qty">${escapeHtml(lineQuantityText(item, isRtl))}</td>
         <td class="amt" dir="ltr">${m(item.total)}</td>
-      </tr>`).join('');
+      </tr>`;
+  }).join('');
 
   const row = (label: string, value: string, cls = '') =>
     `<div class="row ${cls}"><span>${label}</span><span dir="ltr">${value}</span></div>`;
@@ -97,6 +143,7 @@ export function buildReceiptHtml(o: ReceiptInput): string {
   th { font-size: ${base - 1}px; text-align: ${start}; border-bottom: 1px solid #000; padding-bottom: 1mm; }
   td { padding: 1mm 0; vertical-align: top; }
   .name { text-align: ${start}; word-break: break-word; }
+  .unit { font-size: ${Math.max(8, base - 2)}px; opacity: 0.85; margin-top: 0.5mm; }
   .qty { text-align: center; white-space: nowrap; padding: 1mm 1.5mm; }
   .amt { text-align: ${end}; white-space: nowrap; }
   .row { display: flex; justify-content: space-between; gap: 2mm; }
@@ -124,15 +171,15 @@ export function buildReceiptHtml(o: ReceiptInput): string {
     </tbody>
   </table>
   <div class="rule"></div>
-  ${row(L('المجموع الفرعي', 'Subtotal'), m(inv.subtotal))}
-  ${Number(inv.discount) > 0 ? row(L('الخصم', 'Discount'), `-${m(inv.discount)}`) : ''}
-  ${Number(inv.taxAmount) > 0 ? row(L('الضريبة', 'VAT'), m(inv.taxAmount)) : ''}
-  ${row(L('الإجمالي', 'Total'), `${sign}${m(inv.totalAmount)}`, 'total')}
-  ${row(L('طريقة الدفع', 'Payment'), escapeHtml(paymentMethodLabel(inv.paymentMethod, isRtl, inv.paidAmount, inv.totalAmount)))}
+  ${row(L('المجموع الفرعي', 'Subtotal'), m(figures.subtotal))}
+  ${figures.discount > 0 ? row(L('الخصم', 'Discount'), `-${m(figures.discount)}`) : ''}
+  ${figures.taxAmount > 0 ? row(L('الضريبة', 'VAT'), m(figures.taxAmount)) : ''}
+  ${row(L('الإجمالي', 'Total'), `${sign}${m(figures.totalAmount)}`, 'total')}
+  ${row(L('طريقة الدفع', 'Payment'), escapeHtml(paymentMethodLabel(inv.paymentMethod, isRtl, inv.paidAmount, figures.totalAmount)))}
   ${inv.paymentMethod === 'credit' && Number(inv.paidAmount) > 0 ? row(L('المدفوع الآن', 'Paid now'), m(inv.paidAmount), 'bold') : ''}
   ${inv.paymentMethod === 'credit' && Number(inv.debtAmount) > 0 ? row(L('المتبقي آجل', 'On account'), m(inv.debtAmount, inv.debtCurrency || inv.currency), 'bold') : ''}
-  ${inv.cashReceived !== undefined && !(inv.paymentMethod === 'credit' && Number(inv.paidAmount) > 0) ? row(L('المستلم', 'Received'), m(inv.cashReceived), 'bold') : ''}
-  ${inv.changeDue !== undefined && Number(inv.changeDue) > 0 ? row(L('الباقي', 'Change'), m(inv.changeDue), 'bold') : ''}
+  ${figures.showReceived ? row(L('المستلم', 'Received'), m(figures.cashReceived), 'bold') : ''}
+  ${figures.changeDue > 0 ? row(L('الباقي', 'Change'), m(figures.changeDue), 'bold') : ''}
   <div class="footer">${L('شكراً لزيارتكم', 'Thank you')}</div>
   <div class="brand-foot">${escapeHtml(appReceiptPromo(isRtl))}</div>
 </body>

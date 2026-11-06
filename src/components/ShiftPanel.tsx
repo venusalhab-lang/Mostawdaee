@@ -5,7 +5,7 @@ import { toast } from 'sonner';
 import { useFirebase } from './FirebaseProvider';
 import { CurrencySelect } from './CurrencyPicker';
 import type { Cheque, Currency, Shift, ShiftCurrencyTotals } from '../types';
-import { formatMoney, isPosCurrency, roundMoney } from '../lib/exchangeRates';
+import { formatMoney, formatReceiptDate, formatReceiptMoney, isPosCurrency, roundMoney } from '../lib/exchangeRates';
 import { cashDifference, openShiftOf, summarizeShift } from '../lib/shifts';
 import { buildShiftReportHtml } from '../lib/shiftReport';
 import { buildDayCloseSnapshot } from '../lib/dayClose';
@@ -146,8 +146,8 @@ export default function ShiftPanel({ isOpen, onClose, language, defaultCurrency,
       businessName: settings?.businessName || '',
       shift,
       totals,
-      money,
-      formatDate,
+      money: (value, code) => formatReceiptMoney(value, code),
+      formatDate: (time) => formatReceiptDate(time, isRtl),
       paper: readReceiptPrinter().paper,
     });
     const job = shift.status === 'closed' ? 'Z-report' : 'X-report';
