@@ -22,6 +22,7 @@ import { findSupplierByName, owedBalances, purchaseDeleteRequiresSupplierLedger,
 import { lineUnits } from '../lib/packs';
 import { canOpenShift, cashDifference, openShiftOf, summarizeShift } from '../lib/shifts';
 import {
+  OFFLINE_QUEUE_EVENT,
   QueuedInvoice,
   applyQueuedSalesToProducts,
   applyQueuedSalesToVault,
@@ -37,6 +38,7 @@ import {
   withQueueLock,
   writeQueue,
 } from '../lib/offlineQueue';
+import { assertRestoreIdle } from '../lib/restoreGuard';
 import { type Workspace, currentWorkspace, ensureWorkspace, refreshWorkspace, subscribeWorkspace } from '../lib/workspace';
 import { type WorkspaceAction, can as roleCan, canOpenScreen as roleCanOpenScreen } from '../lib/roles';
 import type { PlatformRole } from '../lib/platformStaff';
@@ -1196,9 +1198,10 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       if (!isMounted) return;
       const items: Invoice[] = [];
       snap.forEach(doc => items.push({ ...doc.data() } as Invoice));
-      const sorted = mergeQueuedInvoices(items.sort((a,b) => b.date - a.date), readQueue(uid), currentWorkspace()?.ownerId);
-      setInvoices(sorted);
-      writeUserCache(uid, 'invoices', sorted);
+      const serverRows = items.sort((a, b) => b.date - a.date);
+      setInvoices(mergeQueuedInvoices(serverRows, readQueue(uid), currentWorkspace()?.ownerId));
+      // Cache server rows only — boot/queue merge applies pending offline sales once.
+      writeUserCache(uid, 'invoices', serverRows);
     }, (error) => {
       console.error(`[FirebaseProvider] Invoices stream error:`, error);
       if (isMounted) setLoading(false);
@@ -1433,6 +1436,28 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       }
     });
 
+    // Re-apply the pending queue on top of raw caches whenever the queue changes (sync prune, enqueue).
+    const reprojectQueuedBooks = () => {
+      if (!isMounted) return;
+      const ownerId = currentWorkspace()?.ownerId;
+      const queue = readQueue(uid);
+      const rawProducts = readUserCache<Product[]>(uid, 'products', []);
+      setProducts(applyQueuedSalesToProducts(rawProducts, queue, ownerId));
+      const rawVault = readUserCache(uid, 'vault', null);
+      if (rawVault) {
+        setVault(applyQueuedSalesToVault(rawVault, queue, ownerId) as Vault);
+      }
+      const serverVaultRows = readUserCache<VaultTransaction[]>(uid, 'vault_records', []);
+      setVaultTransactions(mergeQueuedVaultRecords(serverVaultRows, queue, ownerId, rawVault));
+      setInvoices(mergeQueuedInvoices(readUserCache<Invoice[]>(uid, 'invoices', []), queue, ownerId));
+    };
+    const onQueueChanged = (ev: Event) => {
+      const detail = (ev as CustomEvent<{ uid?: string }>).detail;
+      if (detail?.uid && detail.uid !== uid) return;
+      reprojectQueuedBooks();
+    };
+    window.addEventListener(OFFLINE_QUEUE_EVENT, onQueueChanged);
+
     // Sends sales taken offline. Idempotent: an invoice that already reached the server is skipped.
     let syncing = false;
     const syncOfflineInvoices = async () => {
@@ -1453,6 +1478,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         await withQueueLock(uid, async () => {
           const queue = readQueue(uid);
           if (queue.length === 0) return;
+          const startIds = new Set(queue.map((q) => q.invoice.id));
           const remaining: QueuedInvoice[] = [];
           for (let i = 0; i < queue.length; i++) {
             let entry = queue[i];
@@ -1477,6 +1503,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
               sent += 1;
               r.negativeStock.forEach((name) => negative.add(name));
               r.missingProducts?.forEach((name) => missing.add(name));
+              // Drop immediately so any inventory/vault snapshot cannot double-apply this sale.
+              writeQueue(uid, readQueue(uid).filter((q) => q.invoice.id !== entry.invoice.id));
             } catch (err: any) {
               if (canDeferSaleToQueue(err)) {
                 remaining.push(...queue.slice(i));
@@ -1493,10 +1521,10 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
               needsReview.push(entry.invoice.invoiceNumber);
             }
           }
-          const processed = new Set(queue.map((q) => q.invoice.id));
-          const addedMeanwhile = readQueue(uid).filter((q) => !processed.has(q.invoice.id));
+          const addedMeanwhile = readQueue(uid).filter((q) => !startIds.has(q.invoice.id));
           writeQueue(uid, [...remaining, ...addedMeanwhile]);
         }, { required: true });
+        if (sent > 0) reprojectQueuedBooks();
       } catch (err: any) {
         if (err?.code !== 'queue-locked') console.warn('[offline sync] unexpected error:', err);
       } finally {
@@ -1537,6 +1565,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     return () => {
       isMounted = false;
       window.removeEventListener(SYNC_PROBLEM_EVENT, onSyncProblem);
+      window.removeEventListener(OFFLINE_QUEUE_EVENT, onQueueChanged);
       clearTimeout(safetyTimeout);
       clearTimeout(syncTimer);
       clearInterval(syncInterval);
@@ -2040,6 +2069,18 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
 
     const ar = settings?.defaultLanguage !== 'en';
+    try {
+      assertRestoreIdle(uid);
+    } catch (error: any) {
+      if (error?.code === 'restore-incomplete') {
+        const message = ar
+          ? 'توقفت استعادة سابقة قبل اكتمالها. أكمل الاستعادة من نسخة سليمة قبل تسجيل فواتير جديدة.'
+          : 'A previous restore did not finish. Complete a full restore before recording new invoices.';
+        toast.error(message, { duration: 10000 });
+        throw Object.assign(new Error(message), { code: 'restore-incomplete', notified: true });
+      }
+      throw error;
+    }
     const defaultCurrency = settings?.currency || 'JOD';
     const notify = (message: string, extra: Record<string, unknown> = {}) => {
       toast.error(message, { duration: 7000 });
@@ -2129,13 +2170,6 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         ? 'انقطع الاتصال بالإنترنت قبل تأكيد الحفظ. فواتير الشراء والبيع الآجل تحتاج اتصالاً لأنها تمسّ الخزنة أو ديون الزبائن. أعد المحاولة عند عودة الاتصال؛ لن تُسجَّل الفاتورة مرتين.'
         : 'The connection dropped before the save was confirmed. Purchases and credit sales need a connection because they touch the vault or customer debt. Try again when you are back online; the invoice will not be recorded twice.', { code: 'offline' });
     }
-    const shortages = localSaleShortages(invoice, products);
-    if (shortages.length > 0) {
-      const s = shortages[0];
-      throw notify(ar
-        ? `الكمية المتوفرة من «${s.name}» هي ${s.available} فقط. لم تُسجَّل العملية.`
-        : `Insufficient stock for ${s.name}. Available: ${s.available}`, { code: 'insufficient-stock' });
-    }
     const productsById = new Map(products.map((p) => [p.id, p]));
     const queuedInvoice: Invoice = { ...invoice, items: snapshotLineCosts(invoice.items, productsById, defaultCurrency) };
     const ownerId = currentWorkspace()?.ownerId;
@@ -2146,8 +2180,26 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
     let queued: boolean;
     try {
-      queued = await withQueueLock(uid, () => enqueueInvoice(uid, queuedInvoice, ownerId), { required: true });
+      // Shortage check + enqueue under one lock so two tabs cannot both sell the last unit.
+      queued = await withQueueLock(uid, () => {
+        const rawProducts = readUserCache<Product[]>(uid, 'products', []);
+        const projected = applyQueuedSalesToProducts(rawProducts, readQueue(uid), ownerId);
+        const shortages = localSaleShortages(queuedInvoice, projected);
+        if (shortages.length > 0) {
+          const s = shortages[0];
+          throw Object.assign(
+            new Error(ar
+              ? `الكمية المتوفرة من «${s.name}» هي ${s.available} فقط. لم تُسجَّل العملية.`
+              : `Insufficient stock for ${s.name}. Available: ${s.available}`),
+            { code: 'insufficient-stock', productName: s.name, available: s.available },
+          );
+        }
+        return enqueueInvoice(uid, queuedInvoice, ownerId);
+      }, { required: true });
     } catch (lockErr: any) {
+      if (lockErr?.code === 'insufficient-stock') {
+        throw notify(lockErr.message, { code: 'insufficient-stock', productName: lockErr.productName, available: lockErr.available });
+      }
       if (lockErr?.code === 'queue-locked') {
         throw notify(ar
           ? 'جهاز آخر على نفس الحساب يحفظ بيعاً الآن. أعد المحاولة بعد لحظات؛ لم تُسجَّل العملية.'
@@ -2161,30 +2213,26 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         : 'No connection, and this device has no storage space left to keep the sale. Nothing was recorded.', { code: 'storage-full' });
     }
 
-    const updatedProducts = products.map((p) => {
-      const sold = invoice.items.filter((i) => i.productId === p.id).reduce((sum, i) => sum + lineUnits(i), 0);
-      if (!sold) return p;
-      const newQty = roundQty((Number(p.quantity) || 0) - sold);
-      return { ...p, quantity: newQty, status: computeStockStatus(newQty, p.lowStockThreshold, settings?.lowStockThreshold) };
-    });
-    setProducts(updatedProducts);
-    // Do not write deducted stock into the product cache — the queue is the source of pending
-    // deductions and boot applies it on top of the last server snapshot.
-
-    let nextVaultTxs = vaultTransactions;
+    // Display-only: queue event also reprojects from raw caches; do not persist merged books.
+    const rawProducts = readUserCache<Product[]>(uid, 'products', []);
+    setProducts(applyQueuedSalesToProducts(rawProducts, readQueue(uid), ownerId));
     const plan = planInvoiceVaultEntry(invoice);
     if (plan) {
-      const { doc: nextDoc, balanceAfter } = applyVaultDelta(vault, plan.currency, plan.type === 'income' ? plan.amount : -plan.amount);
-      const localVaultTx: VaultTransaction = { ...plan, id: `inv-${invoice.id}`, timestamp: Date.now(), balanceAfter };
-      nextVaultTxs = [localVaultTx, ...vaultTransactions.filter((tx) => tx.id !== localVaultTx.id)];
-      setVault(nextDoc as Vault);
-      setVaultTransactions(nextVaultTxs);
-      // Same rule as products: keep vault cache as last server doc; queue re-applies on boot.
-      writeUserCache(uid, 'vault_records', nextVaultTxs);
+      const rawVault = readUserCache(uid, 'vault', null) ?? vault;
+      const nextDoc = applyQueuedSalesToVault(rawVault, readQueue(uid), ownerId) as Vault;
+      setVault(nextDoc);
+      setVaultTransactions(mergeQueuedVaultRecords(
+        readUserCache<VaultTransaction[]>(uid, 'vault_records', []),
+        readQueue(uid),
+        ownerId,
+        rawVault,
+      ));
     }
-    const nextInvoices = [queuedInvoice, ...invoices.filter((i) => i.id !== invoice.id)].sort((a, b) => b.date - a.date);
-    setInvoices(nextInvoices);
-    writeUserCache(uid, 'invoices', nextInvoices);
+    setInvoices(mergeQueuedInvoices(
+      readUserCache<Invoice[]>(uid, 'invoices', []).filter((inv) => inv.id !== queuedInvoice.id),
+      readQueue(uid),
+      ownerId,
+    ));
 
     toast.warning(ar
       ? 'تعذّر الوصول للسحابة: حُفظ البيع على هذا الجهاز وسيُرسل تلقائياً عند عودة الاتصال. لا تسجّل الخروج قبل ذلك.'

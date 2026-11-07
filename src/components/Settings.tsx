@@ -24,6 +24,7 @@ import { db } from '../lib/supabaseDocs';
 import { assertCanRestore, backupDownloadName, buildLiveBooks, makeRestoreActions, restoreBlockedMessage } from '../lib/backupIo';
 import { loadChequesForBackup, loadChequesForRestore } from '../lib/chequesStore';
 import { buildStoreBackup, isLegacyTableBackup, isStoreBackup, restoreStoreBackup, type RestoreMode } from '../lib/storeBackup';
+import { can as roleCan } from '../lib/roles';
 
 interface Props {
   language: Language;
@@ -65,8 +66,10 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
     savePayrollRecord,
     saveCustomer,
     saveCustomerTransaction,
-    user
+    user,
+    workspace,
   } = useFirebase();
+  const canStoreBackup = roleCan(workspace?.role || 'cashier', 'store_backup');
   
   const [activeSection, setActiveSection] = useState<SettingsSection>('visuals');
   const [formData, setFormData] = useState<AppSettings>({
@@ -177,6 +180,10 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
   ];
 
   const handleExportData = async () => {
+    if (!canStoreBackup) {
+      toast.error(isRtl ? 'النسخ الاحتياطي متاح لصاحب المتجر فقط.' : 'Backup is available to the store owner only.');
+      return;
+    }
     try {
       const cheques = await loadChequesForBackup(user?.uid);
       const payload = buildStoreBackup({
@@ -203,6 +210,11 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
   const handleLocalFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    if (!canStoreBackup) {
+      toast.error(isRtl ? 'الاستعادة متاحة لصاحب المتجر فقط.' : 'Restore is available to the store owner only.');
+      e.target.value = '';
+      return;
+    }
 
     const reader = new FileReader();
     reader.onload = (event) => {
@@ -231,6 +243,10 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
 
   const handleConfirmLocalRestore = async () => {
     if (!selectedBackupForLocalRestore || !user) return;
+    if (!canStoreBackup) {
+      toast.error(isRtl ? 'الاستعادة متاحة لصاحب المتجر فقط.' : 'Restore is available to the store owner only.');
+      return;
+    }
     if (localRestoreMode === 'replace' && !localReplaceAck) return;
     setIsLocalRestoreInProgress(true);
     try {
@@ -247,7 +263,7 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
           invoices, vaultTransactions, customerTransactions, supplierTransactions, stockMovements,
           cheques: liveCheques, vault, products, customers, suppliers, employees, payrollRecords, warehouses, orders, shifts,
         }),
-        { mode: localRestoreMode },
+        { mode: localRestoreMode, uid: user.uid },
       );
       if (selectedBackupForLocalRestore.settings) setFormData(selectedBackupForLocalRestore.settings);
 
@@ -1050,7 +1066,8 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
                     <p className="text-[10px] text-gray-500 mt-2 italic">{t.recalibrateDescription}</p>
                   </div>
 
-                  {/* Local Backup & Restore Hub */}
+                  {/* Local Backup & Restore Hub — owner only (defense in depth; App already gates Settings). */}
+                  {canStoreBackup && (
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                     {/* Backup Panel */}
                     <div className="flex flex-col p-8 bg-gradient-to-br from-indigo-950 to-slate-900 rounded-[2.5rem] shadow-xl text-white border border-indigo-500/20">
@@ -1114,6 +1131,7 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
                       </label>
                     </div>
                   </div>
+                  )}
                   {/* Language Toggle */}
                   <div className="flex items-center justify-between p-6 bg-white dark:bg-gray-800 rounded-[2rem] border border-gray-100 dark:border-gray-700">
                     <div className="flex items-center gap-4">

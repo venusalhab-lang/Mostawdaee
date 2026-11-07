@@ -107,23 +107,41 @@ export function enqueueInvoice(uid: string, invoice: Invoice, storeId?: string, 
 }
 
 /** Sales still waiting for this store (or every entry when the owner is not known yet). */
-export function queueForStore(queue: QueuedInvoice[], ownerId?: string | null): QueuedInvoice[] {
-  if (!ownerId) return queue;
-  return queue.filter((entry) => belongsToStore(entry, ownerId));
+export function queueForStore(
+  queue: QueuedInvoice[],
+  ownerId?: string | null,
+  /** Invoice ids already on the server — never re-apply their stock/vault locally. */
+  excludeIds?: Iterable<string> | null,
+): QueuedInvoice[] {
+  const skip = excludeIds ? new Set(excludeIds) : null;
+  return queue.filter((entry) => {
+    if (skip?.has(entry.invoice.id)) return false;
+    if (!ownerId) return true;
+    return belongsToStore(entry, ownerId);
+  });
 }
 
 /** Keeps server invoices and any queued sale that has not reached the server yet. */
-export function mergeQueuedInvoices(server: Invoice[], queue: QueuedInvoice[], ownerId?: string | null): Invoice[] {
+export function mergeQueuedInvoices(
+  server: Invoice[],
+  queue: QueuedInvoice[],
+  ownerId?: string | null,
+): Invoice[] {
   const byId = new Map(server.map((invoice) => [invoice.id, invoice]));
-  for (const entry of queueForStore(queue, ownerId)) {
-    if (!byId.has(entry.invoice.id)) byId.set(entry.invoice.id, entry.invoice);
+  for (const entry of queueForStore(queue, ownerId, byId.keys())) {
+    byId.set(entry.invoice.id, entry.invoice);
   }
   return Array.from(byId.values()).sort((a, b) => b.date - a.date);
 }
 
 /** Re-applies stock deductions from sales still in the queue on top of a server/cache snapshot. */
-export function applyQueuedSalesToProducts(products: Product[], queue: QueuedInvoice[], ownerId?: string | null): Product[] {
-  const pending = queueForStore(queue, ownerId);
+export function applyQueuedSalesToProducts(
+  products: Product[],
+  queue: QueuedInvoice[],
+  ownerId?: string | null,
+  excludeIds?: Iterable<string> | null,
+): Product[] {
+  const pending = queueForStore(queue, ownerId, excludeIds);
   if (pending.length === 0) return products;
   return products.map((product) => {
     let sold = 0;
@@ -140,9 +158,14 @@ export function applyQueuedSalesToProducts(products: Product[], queue: QueuedInv
 }
 
 /** Re-applies cash-vault movements from sales still in the queue on top of a server vault snapshot. */
-export function applyQueuedSalesToVault(vault: unknown, queue: QueuedInvoice[], ownerId?: string | null): unknown {
+export function applyQueuedSalesToVault(
+  vault: unknown,
+  queue: QueuedInvoice[],
+  ownerId?: string | null,
+  excludeIds?: Iterable<string> | null,
+): unknown {
   let doc = vault;
-  for (const entry of queueForStore(queue, ownerId)) {
+  for (const entry of queueForStore(queue, ownerId, excludeIds)) {
     const plan = planInvoiceVaultEntry(entry.invoice);
     if (!plan) continue;
     doc = applyVaultDelta(doc, plan.currency, plan.type === 'income' ? plan.amount : -plan.amount).doc;
@@ -157,9 +180,10 @@ export function mergeQueuedVaultRecords(
   ownerId?: string | null,
   /** Optional live vault: when set, each queued row gets a real running balanceAfter. */
   vaultSnapshot?: unknown,
+  excludeIds?: Iterable<string> | null,
 ): VaultTransaction[] {
   const byId = new Map(server.map((row) => [row.id, row]));
-  const pending = queueForStore(queue, ownerId)
+  const pending = queueForStore(queue, ownerId, excludeIds)
     .map((entry) => {
       const plan = planInvoiceVaultEntry(entry.invoice);
       if (!plan) return null;

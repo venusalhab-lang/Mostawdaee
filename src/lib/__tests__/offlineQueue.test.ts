@@ -157,4 +157,14 @@ describe('offline queue', () => {
     expect(applyQueuedSalesToProducts([product(10)], readQueue('u1'), 'owner-1')[0].quantity).toBe(10);
     expect(mergeQueuedInvoices([], readQueue('u1'), 'owner-1')).toEqual([]);
   });
+
+  it('skips queue entries already on the server so sync snapshots cannot double-apply stock', () => {
+    enqueueInvoice('u1', invoice({ id: 'synced' }), 'owner-1');
+    enqueueInvoice('u1', invoice({ id: 'still-offline', items: [{ productId: 'p1', description: 'شاي', quantity: 1, unitPrice: 1, total: 1 }], totalAmount: 1 }), 'owner-1');
+    const queue = readQueue('u1');
+    // Server already deducted `synced`; exclude it when re-applying the queue.
+    expect(applyQueuedSalesToProducts([product(10)], queue, 'owner-1', ['synced'])[0].quantity).toBe(9);
+    expect(mergeQueuedInvoices([invoice({ id: 'synced' })], queue, 'owner-1').map((i) => i.id).sort())
+      .toEqual(['still-offline', 'synced']);
+  });
 });

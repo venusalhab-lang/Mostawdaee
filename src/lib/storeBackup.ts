@@ -2,6 +2,7 @@ import type {
   AppSettings, Cheque, Customer, CustomerTransaction, Employee, Invoice, PayrollRecord, Product, Shift, Supplier, TradeOrder, SupplierTransaction, Vault,
   VaultTransaction, Warehouse,
 } from '../types';
+import { clearIncompleteRestore, markRestoreIncomplete } from './restoreGuard';
 
 export const BACKUP_APP = 'Mostawdaee System';
 
@@ -250,7 +251,7 @@ export async function restoreStoreBackup(
   data: Partial<StoreBackup>,
   actions: RestoreActions,
   live: LiveBooks,
-  options?: { mode?: RestoreMode },
+  options?: { mode?: RestoreMode; /** When set, marks books incomplete until this restore finishes. */ uid?: string },
 ): Promise<void> {
   if (!isStoreBackup(data)) {
     throw Object.assign(new Error('This file is not a Mostawdaee backup'), { code: 'invalid-backup' });
@@ -266,85 +267,96 @@ export async function restoreStoreBackup(
   );
   if (mode === 'replace') assertReplaceAllowed(data, live);
 
-  // Sequential writes: any throw aborts the rest. Callers must not toast success on failure.
-  if (data.settings) await actions.saveSettings(data.settings);
-  for (const wh of list<Warehouse>(data.warehouses)) await actions.saveWarehouse(wh);
-  for (const p of list<Product>(data.products)) await actions.saveProduct(p, { skipMovement: true });
-  for (const inv of list<Invoice>(data.invoices)) await actions.saveInvoice(inv, { restoreOnly: true });
-  for (const e of list<Employee>(data.employees)) await actions.saveEmployee(e);
-  for (const pr of list<PayrollRecord>(data.payrollRecords)) {
-    try {
-      await actions.savePayrollRecord(pr);
-    } catch (error: any) {
-      // A salary already paid in the live books is final (its vault expense exists); keep it and go on.
-      if (error?.code !== 'payroll-already-paid' && error?.message !== 'Payroll already paid') throw error;
-    }
-  }
-  for (const c of list<Customer>(data.customers)) await actions.saveCustomer(c, { restore: true });
-  for (const tx of list<CustomerTransaction>(data.customerTransactions)) await actions.saveCustomerTransaction(tx);
-  for (const s of list<Supplier>(data.suppliers)) {
-    if (s?.id) await actions.saveSupplierRecord(s);
-  }
-  for (const tx of list<SupplierTransaction>(data.supplierTransactions)) {
-    if (tx?.id) await actions.saveSupplierTransaction(tx);
-  }
-  for (const shift of list<Shift>(data.shifts)) {
-    if (!shift?.id) continue;
-    try {
-      await actions.saveShift(shift);
-    } catch (error: any) {
-      // A closed shift already in the live books is final; keep it and go on.
-      if (error?.code !== 'shift-closed') throw error;
-    }
-  }
-  for (const order of list<TradeOrder>(data.orders)) {
-    if (order?.id) await actions.saveOrder(order);
-  }
-  for (const cheque of list<Cheque>(data.cheques)) {
-    if (!cheque?.id) continue;
-    try {
-      await actions.saveCheque(cheque);
-    } catch (error: any) {
-      // Live cheque already past what the backup can reach — keep it and go on.
-      if (error?.code !== 'cheque-already-final') throw error;
-    }
-  }
-  for (const tx of list<VaultTransaction>(data.vaultTransactions)) {
-    if (tx?.id) await actions.saveVaultRecord(tx);
-  }
+  const uid = typeof options?.uid === 'string' ? options.uid : '';
+  if (uid) markRestoreIncomplete(uid, mode);
 
-  if (mode === 'replace') {
-    await deleteOrphans(actions, 'warehouses', live.warehouses, list(data.warehouses));
-    await deleteOrphans(actions, 'inventory', live.products, list(data.products));
-    await deleteOrphans(actions, 'invoices', live.invoices, list(data.invoices));
-    await deleteOrphans(actions, 'employees', live.employees, list(data.employees));
-    await deleteOrphans(actions, 'payroll', live.payrollRecords, list(data.payrollRecords));
-    await deleteOrphans(actions, 'customers', live.customers, list(data.customers));
-    await deleteOrphans(actions, 'customer_transactions', live.customerTransactions, list(data.customerTransactions));
-    await deleteOrphans(actions, 'suppliers', live.suppliers, list(data.suppliers));
-    await deleteOrphans(actions, 'supplier_transactions', live.supplierTransactions, list(data.supplierTransactions));
-    await deleteOrphans(actions, 'shifts', live.shifts, list(data.shifts));
-    await deleteOrphans(actions, 'orders', live.orders, list(data.orders));
-    await deleteOrphans(actions, 'vault_records', live.vaultTransactions, list(data.vaultTransactions));
-
-    const backupChequeIds = new Set(list<Cheque>(data.cheques).map((c) => c.id).filter(Boolean));
-    for (const cheque of live.chequeRows || []) {
-      if (!cheque?.id || backupChequeIds.has(cheque.id)) continue;
-      if (cheque.status !== 'pending') {
-        throw Object.assign(new Error('A finalized cheque cannot be deleted during replace'), {
-          code: 'replace-undeletable',
-          kind: 'cheque',
-          id: cheque.id,
-        });
+  // Sequential writes: any throw aborts the rest and leaves the incomplete flag set.
+  // Callers must not toast success on failure. Vault balance is last so a mid-failure
+  // never reports a restored cash drawer while stock/debts are still half-applied.
+  try {
+    if (data.settings) await actions.saveSettings(data.settings);
+    for (const wh of list<Warehouse>(data.warehouses)) await actions.saveWarehouse(wh);
+    for (const p of list<Product>(data.products)) await actions.saveProduct(p, { skipMovement: true });
+    for (const inv of list<Invoice>(data.invoices)) await actions.saveInvoice(inv, { restoreOnly: true });
+    for (const e of list<Employee>(data.employees)) await actions.saveEmployee(e);
+    for (const pr of list<PayrollRecord>(data.payrollRecords)) {
+      try {
+        await actions.savePayrollRecord(pr);
+      } catch (error: any) {
+        // A salary already paid in the live books is final (its vault expense exists); keep it and go on.
+        if (error?.code !== 'payroll-already-paid' && error?.message !== 'Payroll already paid') throw error;
       }
-      if (!actions.deletePendingCheque) {
-        throw Object.assign(new Error('Replace restore is not wired for cheques'), { code: 'replace-unavailable' });
-      }
-      await actions.deletePendingCheque(cheque);
     }
-  }
+    for (const c of list<Customer>(data.customers)) await actions.saveCustomer(c, { restore: true });
+    for (const tx of list<CustomerTransaction>(data.customerTransactions)) await actions.saveCustomerTransaction(tx);
+    for (const s of list<Supplier>(data.suppliers)) {
+      if (s?.id) await actions.saveSupplierRecord(s);
+    }
+    for (const tx of list<SupplierTransaction>(data.supplierTransactions)) {
+      if (tx?.id) await actions.saveSupplierTransaction(tx);
+    }
+    for (const shift of list<Shift>(data.shifts)) {
+      if (!shift?.id) continue;
+      try {
+        await actions.saveShift(shift);
+      } catch (error: any) {
+        // A closed shift already in the live books is final; keep it and go on.
+        if (error?.code !== 'shift-closed') throw error;
+      }
+    }
+    for (const order of list<TradeOrder>(data.orders)) {
+      if (order?.id) await actions.saveOrder(order);
+    }
+    for (const cheque of list<Cheque>(data.cheques)) {
+      if (!cheque?.id) continue;
+      try {
+        await actions.saveCheque(cheque);
+      } catch (error: any) {
+        // Live cheque already past what the backup can reach — keep it and go on.
+        if (error?.code !== 'cheque-already-final') throw error;
+      }
+    }
+    for (const tx of list<VaultTransaction>(data.vaultTransactions)) {
+      if (tx?.id) await actions.saveVaultRecord(tx);
+    }
 
-  if (data.vault && typeof data.vault === 'object') await actions.restoreVault(data.vault);
+    if (mode === 'replace') {
+      await deleteOrphans(actions, 'warehouses', live.warehouses, list(data.warehouses));
+      await deleteOrphans(actions, 'inventory', live.products, list(data.products));
+      await deleteOrphans(actions, 'invoices', live.invoices, list(data.invoices));
+      await deleteOrphans(actions, 'employees', live.employees, list(data.employees));
+      await deleteOrphans(actions, 'payroll', live.payrollRecords, list(data.payrollRecords));
+      await deleteOrphans(actions, 'customers', live.customers, list(data.customers));
+      await deleteOrphans(actions, 'customer_transactions', live.customerTransactions, list(data.customerTransactions));
+      await deleteOrphans(actions, 'suppliers', live.suppliers, list(data.suppliers));
+      await deleteOrphans(actions, 'supplier_transactions', live.supplierTransactions, list(data.supplierTransactions));
+      await deleteOrphans(actions, 'shifts', live.shifts, list(data.shifts));
+      await deleteOrphans(actions, 'orders', live.orders, list(data.orders));
+      await deleteOrphans(actions, 'vault_records', live.vaultTransactions, list(data.vaultTransactions));
+
+      const backupChequeIds = new Set(list<Cheque>(data.cheques).map((c) => c.id).filter(Boolean));
+      for (const cheque of live.chequeRows || []) {
+        if (!cheque?.id || backupChequeIds.has(cheque.id)) continue;
+        if (cheque.status !== 'pending') {
+          throw Object.assign(new Error('A finalized cheque cannot be deleted during replace'), {
+            code: 'replace-undeletable',
+            kind: 'cheque',
+            id: cheque.id,
+          });
+        }
+        if (!actions.deletePendingCheque) {
+          throw Object.assign(new Error('Replace restore is not wired for cheques'), { code: 'replace-unavailable' });
+        }
+        await actions.deletePendingCheque(cheque);
+      }
+    }
+
+    if (data.vault && typeof data.vault === 'object') await actions.restoreVault(data.vault);
+    if (uid) clearIncompleteRestore(uid);
+  } catch (error) {
+    // Incomplete flag stays until a later restore finishes — sales refuse meanwhile.
+    throw error;
+  }
 }
 
 const csvCell = (value: unknown) => `"${String(value ?? '').replace(/"/g, '""')}"`;

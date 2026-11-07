@@ -42,6 +42,16 @@ export function restoreBlockedMessage(
       ? 'استبدال الدفاتر غير متاح في هذا المسار. لم يتغيّر شيء.'
       : 'Replace restore is not available on this path. Nothing was changed.';
   }
+  if (error?.code === 'restore-incomplete') {
+    return isRtl
+      ? 'توقفت استعادة سابقة قبل اكتمالها. أكمل الاستعادة من نسخة سليمة قبل تسجيل مبيعات جديدة.'
+      : 'A previous restore did not finish. Complete a full restore from a good backup before recording new sales.';
+  }
+  if (error?.code === 'backup-forbidden') {
+    return isRtl
+      ? 'النسخ والاستعادة متاحة لصاحب المتجر فقط.'
+      : 'Backup and restore are available to the store owner only.';
+  }
   return vaultRestoreMessage(error, isRtl);
 }
 

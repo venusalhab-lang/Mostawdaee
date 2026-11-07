@@ -197,7 +197,7 @@ export default function GoogleDriveBackup({ language }: Props) {
           invoices, vaultTransactions, customerTransactions, supplierTransactions, stockMovements,
           cheques: liveCheques, vault, products, customers, suppliers, employees, payrollRecords, warehouses, orders, shifts,
         }),
-        { mode: driveRestoreMode },
+        { mode: driveRestoreMode, uid },
       );
 
       toast.success(

@@ -28,6 +28,7 @@ export type WorkspaceAction =
   | 'manage_team'
   | 'business_settings'
   | 'billing'
+  | 'store_backup'
   | 'back_office'
   | 'delete_records'
   | 'reverse_invoice'
@@ -35,7 +36,7 @@ export type WorkspaceAction =
   | 'manage_catalog'
   | 'see_costs';
 
-const OWNER_ONLY_ACTIONS = new Set<WorkspaceAction>(['manage_team', 'business_settings', 'billing']);
+const OWNER_ONLY_ACTIONS = new Set<WorkspaceAction>(['manage_team', 'business_settings', 'billing', 'store_backup']);
 
 export function can(role: WorkspaceRole, action: WorkspaceAction): boolean {
   if (role === 'owner') return true;

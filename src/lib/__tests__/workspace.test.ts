@@ -141,6 +141,8 @@ describe('role permissions', () => {
     expect(can('manager', 'manage_team')).toBe(false);
     expect(can('manager', 'billing')).toBe(false);
     expect(can('manager', 'business_settings')).toBe(false);
+    expect(can('manager', 'store_backup')).toBe(false);
+    expect(can('owner', 'store_backup')).toBe(true);
   });
 
   it('cashiers only sell and look up invoices', () => {

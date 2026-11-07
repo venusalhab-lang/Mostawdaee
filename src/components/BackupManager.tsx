@@ -4,6 +4,7 @@ import { db } from '../lib/supabaseDocs';
 import { assertCanRestore, backupDownloadName, buildLiveBooks, makeRestoreActions, restoreBlockedMessage } from '../lib/backupIo';
 import { loadChequesForBackup, loadChequesForRestore } from '../lib/chequesStore';
 import { backupCounts, buildStoreBackup, isLegacyTableBackup, isStoreBackup, restoreStoreBackup, stockCsv, type RestoreMode } from '../lib/storeBackup';
+import { can as roleCan } from '../lib/roles';
 import { 
   Download, Upload, AlertTriangle, CheckCircle, Database, FileSpreadsheet
 } from 'lucide-react';
@@ -29,10 +30,11 @@ function downloadFile(content: BlobPart, type: string, filename: string) {
 export default function BackupManager({ language }: BackupManagerProps) {
   const isRtl = language === 'ar';
   const {
-    user, settings, products, invoices, employees, payrollRecords, customers, customerTransactions,
+    user, workspace, settings, products, invoices, employees, payrollRecords, customers, customerTransactions,
     suppliers, supplierTransactions, shifts, orders, vaultTransactions, stockMovements, warehouses, vault,
     saveSettings, saveWarehouse, saveProduct, saveInvoice, saveEmployee, savePayrollRecord, saveCustomer, saveCustomerTransaction,
   } = useFirebase();
+  const canStoreBackup = roleCan(workspace?.role || 'cashier', 'store_backup');
 
   const [loading, setLoading] = useState(false);
   const [dragActive, setDragActive] = useState(false);
@@ -82,6 +84,10 @@ export default function BackupManager({ language }: BackupManagerProps) {
 
   const handleExportBackup = async () => {
     if (loading) return;
+    if (!canStoreBackup) {
+      toast.error(isRtl ? 'النسخ الاحتياطي متاح لصاحب المتجر فقط.' : 'Backup is available to the store owner only.');
+      return;
+    }
     sounds.playClick();
     setStatus({ type: '', message: '' });
     setLoading(true);
@@ -114,6 +120,10 @@ export default function BackupManager({ language }: BackupManagerProps) {
 
   const executeFileImport = (file: File) => {
     if (!file || loading || importingRef.current) return;
+    if (!canStoreBackup) {
+      toast.error(isRtl ? 'الاستعادة متاحة لصاحب المتجر فقط.' : 'Restore is available to the store owner only.');
+      return;
+    }
     importingRef.current = true;
     setStatus({ type: '', message: '' });
     setBackupStats(null);
@@ -174,7 +184,7 @@ export default function BackupManager({ language }: BackupManagerProps) {
           invoices, vaultTransactions, customerTransactions, supplierTransactions, stockMovements,
           cheques: liveCheques, vault, products, customers, suppliers, employees, payrollRecords, warehouses, orders, shifts,
         }),
-        { mode },
+        { mode, uid: user.uid },
       );
       sounds.playSuccess();
       setStatus({ type: 'success', message: isRtl ? 'تمت استعادة السجلات من الملف.' : 'Records were restored from the file.' });

@@ -1,8 +1,16 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import {
   BACKUP_APP, assertReplaceAllowed, assertVaultRestoreAllowed, backupCounts, buildStoreBackup, isLegacyTableBackup, isStoreBackup, newerLiveActivity, orphanIds, restoreStoreBackup, stockCsv,
   type RestoreActions,
 } from '../storeBackup';
+import { readIncompleteRestore } from '../restoreGuard';
+
+class MemoryStorage {
+  private map = new Map<string, string>();
+  getItem(k: string) { return this.map.has(k) ? this.map.get(k)! : null; }
+  setItem(k: string, v: string) { this.map.set(k, String(v)); }
+  removeItem(k: string) { this.map.delete(k); }
+}
 
 const noLive = { invoices: [], vaultTransactions: [], customerTransactions: [] };
 
@@ -18,6 +26,44 @@ const bak = (over: Record<string, unknown> = {}) => ({
 }) as any;
 
 describe('store backup', () => {
+  beforeEach(() => {
+    (globalThis as any).localStorage = new MemoryStorage();
+  });
+
+  it('marks restore incomplete on mid-failure and clears on success', async () => {
+    const actions: RestoreActions = {
+      saveSettings: async () => {},
+      saveWarehouse: async () => {},
+      saveProduct: async () => { throw Object.assign(new Error('boom'), { code: 'aborted' }); },
+      saveInvoice: async () => {},
+      saveEmployee: async () => {},
+      savePayrollRecord: async () => {},
+      saveCustomer: async () => {},
+      saveCustomerTransaction: async () => {},
+      saveSupplierRecord: async () => {},
+      saveSupplierTransaction: async () => {},
+      saveShift: async () => {},
+      saveOrder: async () => {},
+      saveCheque: async () => {},
+      saveVaultRecord: async () => {},
+      restoreVault: async () => {},
+    };
+    await expect(restoreStoreBackup(
+      bak({ products: [product()], settings: { storeName: 'S' } as any }),
+      actions,
+      noLive,
+      { uid: 'owner-1', mode: 'merge' },
+    )).rejects.toMatchObject({ code: 'aborted' });
+    expect(readIncompleteRestore('owner-1')?.mode).toBe('merge');
+
+    const ok: RestoreActions = {
+      ...actions,
+      saveProduct: async () => {},
+    };
+    await restoreStoreBackup(bak({ products: [product()] }), ok, noLive, { uid: 'owner-1' });
+    expect(readIncompleteRestore('owner-1')).toBeNull();
+  });
+
   it('builds one shape with empty lists for missing books', () => {
     const b = buildStoreBackup({ creator: null, settings: null, products: [product()] } as any, 42);
     expect(b.app).toBe(BACKUP_APP);
