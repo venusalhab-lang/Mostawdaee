@@ -281,6 +281,112 @@ function ProductRow({
   );
 }
 
+/** Phone layout: full product card so qty/actions stay on-screen without horizontal scroll. */
+function ProductMobileCard({
+  product,
+  t,
+  isRtl,
+  statusStyles,
+  statusLabels,
+  formatCurrency,
+  lowStockDefault,
+  onQuickAdjust,
+  onShowContextMenu,
+  onEdit,
+  onDelete,
+  warehouses = [],
+}: ProductRowProps) {
+  const longPressProps = useLongPress(() => onShowContextMenu(product));
+  const liveStatus: StockStatus = computeStockStatus(product.quantity, product.lowStockThreshold, lowStockDefault);
+  const wh = warehouses.find((w) => w.id === product.warehouseId);
+  const packs = formatPackStock(product.quantity, product, isRtl);
+
+  return (
+    <motion.article
+      {...longPressProps}
+      layout
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      className="p-4 space-y-3 border-b border-slate-200/40 dark:border-white/5 last:border-b-0 select-none"
+    >
+      <div className="flex items-start gap-3">
+        <div className={`w-11 h-11 shrink-0 border border-slate-200/20 dark:border-white/10 rounded-xl flex items-center justify-center shadow-inner ${productVisualTone(product.category, product.name)}`}>
+          <ProductVisualIcon category={product.category} name={product.name} className="w-5 h-5" />
+        </div>
+        <div className="min-w-0 flex-1 space-y-1">
+          <p className="text-sm font-black text-slate-900 dark:text-slate-100 leading-snug break-words">{product.name}</p>
+          <div className="flex flex-wrap gap-1.5">
+            <span className="text-[10px] px-2 py-0.5 bg-cyan-500/10 text-cyan-500 dark:text-cyan-400 rounded-md font-mono font-black tracking-wide">
+              SKU: {product.sku}
+            </span>
+            <span className="text-[10px] px-2 py-0.5 bg-slate-100 dark:bg-white/5 text-slate-600 dark:text-slate-300 rounded-md font-black">
+              {product.category || (isRtl ? 'عام' : 'General')}
+            </span>
+            {wh && (
+              <span className="text-[9px] px-1.5 py-0.5 bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 rounded-md font-black">
+                {wh.name}
+              </span>
+            )}
+          </div>
+        </div>
+        <span className={`shrink-0 inline-flex items-center px-2.5 py-1 rounded-full text-[10px] font-black border ${statusStyles[liveStatus]}`}>
+          {statusLabels[liveStatus]}
+        </span>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2 text-xs">
+        <div className="rounded-xl bg-slate-50 dark:bg-white/[0.03] border border-slate-200/40 dark:border-white/5 px-3 py-2">
+          <p className="text-[10px] font-bold text-slate-400">{isRtl ? 'التكلفة' : (t.unitCost || 'Cost')}</p>
+          <p className="font-black text-slate-700 dark:text-slate-200 font-mono mt-0.5 break-all">{formatCurrency(product.unitCost, product.currency)}</p>
+        </div>
+        <div className="rounded-xl bg-slate-50 dark:bg-white/[0.03] border border-slate-200/40 dark:border-white/5 px-3 py-2">
+          <p className="text-[10px] font-bold text-slate-400">{isRtl ? 'البيع' : t.sellPrice}</p>
+          <p className="font-black text-slate-900 dark:text-white font-mono mt-0.5 break-all">{formatCurrency(product.sellingPrice, product.currency)}</p>
+        </div>
+      </div>
+
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2.5">
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); onQuickAdjust(product, -1); }}
+            disabled={product.quantity <= 0}
+            className="disabled:opacity-30 w-9 h-9 rounded-lg bg-slate-100 dark:bg-white/5 text-slate-500 border border-slate-200/50 dark:border-white/5 flex items-center justify-center active:scale-95 cursor-pointer"
+            aria-label={t.decrement}
+          >
+            <Minus size={14} strokeWidth={2.5} />
+          </button>
+          <div className="text-center min-w-[2.5rem]">
+            <p className={`text-base font-black tabular-nums ${
+              product.quantity <= 0 ? 'text-rose-500' : liveStatus === 'Low Stock' ? 'text-amber-500' : 'text-slate-800 dark:text-slate-200'
+            }`}>{product.quantity}</p>
+            {packs && <p className="text-[10px] font-bold text-slate-400">{packs}</p>}
+          </div>
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); onQuickAdjust(product, 1); }}
+            className="w-9 h-9 rounded-lg bg-slate-100 dark:bg-white/5 text-slate-500 border border-slate-200/50 dark:border-white/5 flex items-center justify-center active:scale-95 cursor-pointer"
+            aria-label={t.increment}
+          >
+            <Plus size={14} strokeWidth={2.5} />
+          </button>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <button type="button" onClick={(e) => { e.stopPropagation(); onEdit(product); }} className="w-9 h-9 rounded-lg border border-slate-200/60 dark:border-white/5 text-slate-500 flex items-center justify-center cursor-pointer" aria-label={t.editProduct}>
+            <Edit2 size={14} />
+          </button>
+          <button type="button" onClick={(e) => { e.stopPropagation(); onDelete(product.id); }} className="w-9 h-9 rounded-lg border border-slate-200/60 dark:border-white/5 text-slate-500 flex items-center justify-center cursor-pointer" aria-label={t.delete}>
+            <Trash2 size={14} />
+          </button>
+          <button type="button" onClick={(e) => { e.stopPropagation(); onShowContextMenu(product); }} className="w-9 h-9 rounded-lg border border-slate-200/60 dark:border-white/5 text-slate-500 flex items-center justify-center cursor-pointer" aria-label={t.productDetails}>
+            <MoreVertical size={14} />
+          </button>
+        </div>
+      </div>
+    </motion.article>
+  );
+}
+
 export default function InventoryManagement({ 
   language, 
   products, 
@@ -1125,7 +1231,7 @@ export default function InventoryManagement({
   }, [transactions, logTarget, stockMovements]);
 
   return (
-    <div className={`max-w-7xl mx-auto p-4 md:p-6 space-y-6 notranslate ${isRtl ? 'font-arabic' : ''}`} dir={isRtl ? 'rtl' : 'ltr'}>
+    <div className={`max-w-7xl mx-auto px-0 sm:px-2 md:px-4 py-2 sm:py-4 md:p-6 space-y-5 sm:space-y-6 notranslate ${isRtl ? 'font-arabic' : ''}`} dir={isRtl ? 'rtl' : 'ltr'}>
       <SuccessVisual show={showSuccessVisual} />
       
       {/* Product Detail Modal / Context Menu */}
@@ -1162,22 +1268,22 @@ export default function InventoryManagement({
       )}
 
       {/* Page Header (ترويسة الصفحة وزر الإضافة الرئيسي) */}
-      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border-b border-slate-200/40 dark:border-white/5 pb-5">
-        <div className="space-y-1">
-          <h1 className="text-2xl font-black text-slate-900 dark:text-white flex items-center gap-2.5">
-            <div className="w-9 h-9 bg-cyan-500 rounded-xl flex items-center justify-center text-black shadow-lg shadow-cyan-500/10">
+      <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 sm:gap-4 border-b border-slate-200/40 dark:border-white/5 pb-4 sm:pb-5 px-1 sm:px-0">
+        <div className="space-y-1 min-w-0">
+          <h1 className="text-xl sm:text-2xl font-black text-slate-900 dark:text-white flex items-center gap-2.5">
+            <div className="w-9 h-9 shrink-0 bg-cyan-500 rounded-xl flex items-center justify-center text-black shadow-lg shadow-cyan-500/10">
               <Package size={18} />
             </div>
-            {isRtl ? 'المخزون والأصول' : t.inventory}
+            <span className="truncate">{isRtl ? 'المخزون والأصول' : t.inventory}</span>
           </h1>
-          <p className="text-xs font-bold text-slate-400 max-w-xl">
+          <p className="text-xs font-bold text-slate-400 max-w-xl leading-relaxed">
             {isRtl ? 'إدارة وتتبع جميع المنتجات والمعدات في مستودعك بسهولة وسرعة.' : 'Manage and track all products and equipment in your warehouse with ease.'}
           </p>
         </div>
         
         <TactileButton 
           onClick={openCreateProduct}
-          className="px-6 py-3 rounded-xl bg-cyan-400 text-black hover:bg-cyan-300 transition-all font-black text-xs flex items-center gap-2 shadow-[0_4px_15px_rgba(6,182,212,0.25)] hover:-translate-y-0.5"
+          className="w-full sm:w-auto justify-center px-6 py-3 rounded-xl bg-cyan-400 text-black hover:bg-cyan-300 transition-all font-black text-xs flex items-center gap-2 shadow-[0_4px_15px_rgba(6,182,212,0.25)] sm:hover:-translate-y-0.5"
         >
           <Plus size={15} strokeWidth={2.5} />
           {isRtl ? 'إضافة منتج جديد' : t.addProduct}
@@ -1496,8 +1602,36 @@ export default function InventoryManagement({
           )}
         </AnimatePresence>
 
-        {/* Table View (جدول الأصول والمخزون المرتب) */}
-        <div className="overflow-x-auto custom-scrollbar">
+        {/* Phone cards — full controls without horizontal scroll */}
+        <div className="md:hidden">
+          {filteredProducts.length > 0 ? (
+            visibleProducts.map((product) => (
+              <ProductMobileCard
+                key={product.id}
+                product={product}
+                t={t}
+                isRtl={isRtl}
+                statusStyles={statusStyles}
+                statusLabels={statusLabels}
+                formatCurrency={formatCurrency}
+                onQuickAdjust={handleQuickAdjust}
+                onShowContextMenu={setContextMenuTarget}
+                onEdit={handleEdit}
+                onDelete={handleDelete}
+                lowStockDefault={lowStockDefault}
+                warehouses={warehouses}
+              />
+            ))
+          ) : (
+            <div className="text-center py-16 text-slate-400 text-xs font-bold uppercase tracking-widest">
+              <Boxes size={40} className="mx-auto mb-3 text-slate-300 dark:text-slate-700" />
+              {isRtl ? 'لا توجد منتجات مطابقة لخيارات التصفية' : 'No matching items found'}
+            </div>
+          )}
+        </div>
+
+        {/* Desktop / tablet table */}
+        <div className="hidden md:block overflow-x-auto custom-scrollbar">
           <table className="w-full text-right min-w-[850px] border-collapse">
             <thead>
               <tr className="bg-slate-50/10 dark:bg-slate-950/25 border-b border-slate-200/30 dark:border-white/5">
@@ -1552,7 +1686,7 @@ export default function InventoryManagement({
                 ))
               ) : (
                 <tr>
-                  <td colSpan={6} className="text-center py-20 text-slate-400 text-xs font-bold uppercase tracking-widest bg-slate-500/[0.02]">
+                  <td colSpan={7} className="text-center py-20 text-slate-400 text-xs font-bold uppercase tracking-widest bg-slate-500/[0.02]">
                     <Boxes size={40} className="mx-auto mb-3 text-slate-300 dark:text-slate-700 animate-bounce" />
                     {isRtl ? 'لا توجد منتجات مطابقة لخيارات التصفية' : 'No matching items found'}
                   </td>

@@ -172,83 +172,92 @@ export default function NotificationCenter({ isRtl, subscriptionDaysRemaining = 
       </button>
 
       {open && (
-        <div
-          role="dialog"
-          aria-label={isRtl ? 'مركز التنبيهات' : 'Notice centre'}
-          className={`absolute top-full mt-2 w-[min(22rem,calc(100vw-1.5rem))] bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-xl overflow-hidden z-50 ${
-            isRtl ? 'left-0' : 'right-0'
-          }`}
-        >
-          <div className="px-4 py-3.5 border-b border-slate-100 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-950/50">
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <h2 className="text-sm font-bold text-slate-900 dark:text-white tracking-tight">
-                  {isRtl ? 'التنبيهات' : 'Notices'}
-                </h2>
-                <p className="text-[11px] text-slate-500 dark:text-slate-400 font-medium mt-0.5 leading-snug">
-                  {isRtl
-                    ? 'ملخص قابل للتحقق من دفاتر المتجر على هذا الجهاز'
-                    : 'Verifiable summary from this store’s books on this device'}
-                </p>
+        <>
+          {/* Full-width sheet on phones so titles/details are never clipped by the header edge. */}
+          <button
+            type="button"
+            aria-label={isRtl ? 'إغلاق' : 'Close'}
+            className="fixed inset-0 z-[55] bg-slate-900/35 sm:hidden cursor-default"
+            onClick={() => setOpen(false)}
+          />
+          <div
+            role="dialog"
+            aria-label={isRtl ? 'مركز التنبيهات' : 'Notice centre'}
+            className={`fixed z-[60] left-3 right-3 top-[calc(env(safe-area-inset-top)+3.75rem)] max-h-[min(70vh,32rem)] sm:absolute sm:left-auto sm:right-0 sm:top-full sm:mt-2 sm:w-[min(22rem,calc(100vw-1.5rem))] sm:max-h-[min(24rem,60vh)] bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-xl overflow-hidden flex flex-col ${
+              isRtl ? 'sm:left-0 sm:right-auto' : ''
+            }`}
+          >
+            <div className="px-4 py-3.5 border-b border-slate-100 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-950/50 shrink-0">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <h2 className="text-sm font-bold text-slate-900 dark:text-white tracking-tight">
+                    {isRtl ? 'التنبيهات' : 'Notices'}
+                  </h2>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400 font-medium mt-0.5 leading-snug break-words">
+                    {isRtl
+                      ? 'ملخص قابل للتحقق من دفاتر المتجر على هذا الجهاز'
+                      : 'Verifiable summary from this store’s books on this device'}
+                  </p>
+                </div>
+                <span className="shrink-0 text-[10px] font-bold text-slate-500 dark:text-slate-400 tabular-nums border border-slate-200 dark:border-slate-700 rounded-md px-1.5 py-0.5 bg-white dark:bg-slate-900">
+                  {badge}
+                </span>
               </div>
-              <span className="shrink-0 text-[10px] font-bold text-slate-500 dark:text-slate-400 tabular-nums border border-slate-200 dark:border-slate-700 rounded-md px-1.5 py-0.5 bg-white dark:bg-slate-900">
-                {badge}
-              </span>
             </div>
-          </div>
 
-          <div className="max-h-[min(24rem,60vh)] overflow-y-auto">
-            {notices.length === 0 ? (
-              <div className="px-5 py-11 text-center space-y-1.5">
-                <p className="text-sm font-bold text-slate-800 dark:text-slate-100">
-                  {isRtl ? 'لا توجد تنبيهات الآن' : 'No notices right now'}
-                </p>
-                <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed max-w-[16rem] mx-auto">
-                  {isRtl
-                    ? 'المخزون والشيكات والمزامنة ضمن الحدود المعتادة.'
-                    : 'Stock, cheques and sync are within the usual limits.'}
-                </p>
+            <div className="overflow-y-auto overscroll-contain flex-1 min-h-0">
+              {notices.length === 0 ? (
+                <div className="px-5 py-11 text-center space-y-1.5">
+                  <p className="text-sm font-bold text-slate-800 dark:text-slate-100">
+                    {isRtl ? 'لا توجد تنبيهات الآن' : 'No notices right now'}
+                  </p>
+                  <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed break-words px-1">
+                    {isRtl
+                      ? 'المخزون والشيكات والمزامنة ضمن الحدود المعتادة.'
+                      : 'Stock, cheques and sync are within the usual limits.'}
+                  </p>
+                </div>
+              ) : (
+                <ul className="divide-y divide-slate-100 dark:divide-slate-800">
+                  {notices.map((item) => {
+                    const Icon = kindIcon(item.kind);
+                    const tone = severityTone(item.severity);
+                    return (
+                      <li key={item.id}>
+                        <button
+                          type="button"
+                          onClick={() => openItem(item)}
+                          className="w-full text-start px-4 py-3.5 flex gap-3 hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors cursor-pointer bg-transparent"
+                        >
+                          <span className="relative mt-0.5 shrink-0">
+                            <span className={`absolute -top-0.5 ${isRtl ? '-left-0.5' : '-right-0.5'} w-2 h-2 rounded-full ring-2 ring-white dark:ring-slate-900 ${tone.dot}`} />
+                            <span className={`w-9 h-9 rounded-lg flex items-center justify-center ${tone.icon}`}>
+                              <Icon className="w-4 h-4" strokeWidth={2.25} />
+                            </span>
+                          </span>
+                          <span className="min-w-0 flex-1 space-y-0.5">
+                            <span className="block text-sm font-bold text-slate-900 dark:text-white leading-snug break-words whitespace-normal">
+                              {noticeTitle(item, isRtl)}
+                            </span>
+                            <span className="block text-xs text-slate-500 dark:text-slate-400 leading-relaxed break-words whitespace-normal">
+                              {noticeDetail(item, isRtl)}
+                            </span>
+                          </span>
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
+
+            {notices.length > 0 && (
+              <div className="px-4 py-2.5 border-t border-slate-100 dark:border-slate-800 text-[10px] text-slate-400 dark:text-slate-500 font-medium bg-slate-50/60 dark:bg-slate-950/40 shrink-0 break-words">
+                {isRtl ? 'اضغط عنصراً للانتقال إلى الشاشة المعنية.' : 'Tap an item to open the related screen.'}
               </div>
-            ) : (
-              <ul className="divide-y divide-slate-100 dark:divide-slate-800">
-                {notices.map((item) => {
-                  const Icon = kindIcon(item.kind);
-                  const tone = severityTone(item.severity);
-                  return (
-                    <li key={item.id}>
-                      <button
-                        type="button"
-                        onClick={() => openItem(item)}
-                        className="w-full text-start px-4 py-3.5 flex gap-3 hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors cursor-pointer bg-transparent"
-                      >
-                        <span className="relative mt-0.5 shrink-0">
-                          <span className={`absolute -top-0.5 ${isRtl ? '-left-0.5' : '-right-0.5'} w-2 h-2 rounded-full ring-2 ring-white dark:ring-slate-900 ${tone.dot}`} />
-                          <span className={`w-9 h-9 rounded-lg flex items-center justify-center ${tone.icon}`}>
-                            <Icon className="w-4 h-4" strokeWidth={2.25} />
-                          </span>
-                        </span>
-                        <span className="min-w-0 flex-1 space-y-0.5">
-                          <span className="block text-sm font-bold text-slate-900 dark:text-white leading-snug">
-                            {noticeTitle(item, isRtl)}
-                          </span>
-                          <span className="block text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
-                            {noticeDetail(item, isRtl)}
-                          </span>
-                        </span>
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
             )}
           </div>
-
-          {notices.length > 0 && (
-            <div className="px-4 py-2.5 border-t border-slate-100 dark:border-slate-800 text-[10px] text-slate-400 dark:text-slate-500 font-medium bg-slate-50/60 dark:bg-slate-950/40">
-              {isRtl ? 'اضغط عنصراً للانتقال إلى الشاشة المعنية.' : 'Tap an item to open the related screen.'}
-            </div>
-          )}
-        </div>
+        </>
       )}
     </div>
   );

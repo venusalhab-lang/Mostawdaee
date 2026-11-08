@@ -215,13 +215,13 @@ export default function Header({
   return (
     <>
       <div 
-        className="app-header bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 px-4 sm:px-6 py-3.5 pt-[max(0.875rem,env(safe-area-inset-top))] flex items-center justify-between gap-3 sm:gap-4 z-30 sticky top-0 shadow-sm min-w-0"
+        className="app-header bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 px-2.5 sm:px-6 py-2.5 sm:py-3.5 pt-[max(0.625rem,env(safe-area-inset-top))] flex items-center justify-between gap-2 sm:gap-4 z-30 sticky top-0 shadow-sm min-w-0"
         id="top-navigation-row"
         dir={isRtl ? 'rtl' : 'ltr'}
         style={style}
       >
       {/* 1. Left Section: Hamburger Menu (for smaller screens) & Branding */}
-      <div className="flex items-center gap-3">
+      <div className="flex items-center gap-2 sm:gap-3 min-w-0 flex-1">
         {/* Hamburger Trigger Button */}
         <button
           type="button"
@@ -269,8 +269,8 @@ export default function Header({
               className={`shrink-0 text-slate-900 dark:text-cyan-400 font-black transition-transform ${isPressing ? 'scale-95 rotate-12' : ''}`} 
             />
           </div>
-          <div>
-            <h1 className="text-xs sm:text-sm md:text-base lg:text-lg font-extrabold text-slate-900 dark:text-white tracking-normal leading-relaxed [padding-inline:0.08em]">
+          <div className="min-w-0">
+            <h1 className="text-xs sm:text-sm md:text-base lg:text-lg font-extrabold text-slate-900 dark:text-white tracking-normal leading-relaxed [padding-inline:0.08em] truncate max-w-[6.5rem] min-[380px]:max-w-[9rem] sm:max-w-none">
               <span className="font-arabic">{isRtl ? 'مستودعي' : 'Mostawdaee'}</span>
             </h1>
             {/* Visual synchronization status indicator */}
@@ -306,13 +306,13 @@ export default function Header({
         </div>
       </div>
 
-      {/* 2. Right Section: Quick Circular Access Controls */}
-      <div className="flex items-center gap-1.5 sm:gap-3 shrink-0">
+      {/* 2. Right Section: keep mute + dark mode visible on narrow phones */}
+      <div className="flex items-center gap-1 sm:gap-2.5 shrink-0 max-w-[62%] sm:max-w-none flex-wrap justify-end">
         {/* Direct Quick POS Launcher Action (As requested by Scaffold actions) */}
         <button
           type="button"
           onClick={handleQuickPOSClick}
-          className="flex items-center gap-1 sm:gap-2 bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white rounded-full pl-2.5 pr-3 sm:pl-3.5 sm:pr-4 py-1 sm:py-2 transition-all shadow-md shadow-indigo-600/10 hover:shadow-indigo-600/20 cursor-pointer select-none shrink-0 border border-indigo-500/20 text-xs font-black font-arabic"
+          className="flex items-center justify-center gap-1 sm:gap-2 bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white rounded-full w-8 h-8 sm:w-auto sm:pl-3.5 sm:pr-4 sm:py-2 transition-all shadow-md shadow-indigo-600/10 hover:shadow-indigo-600/20 cursor-pointer select-none shrink-0 border border-indigo-500/20 text-xs font-black font-arabic"
           title={isRtl ? 'بيع' : 'Sell'} aria-label={isRtl ? 'بيع' : 'Sell'}
         >
           <ShoppingCart className="w-3.5 h-3.5 sm:w-4.5 sm:h-4.5 stroke-[2.5]" />
@@ -327,15 +327,59 @@ export default function Header({
           onNavigate={onChangeScreen}
         />
 
-        {/* Control 2: REDESIGNED highly professional floating currency controller */}
-        <div className="relative" ref={dropdownRef}>
+        {/* Mute + dark first on the trailing edge so they are never clipped off-screen */}
+        <button
+          type="button"
+          onClick={onToggleMute}
+          className={`w-8 h-8 sm:w-10 sm:h-10 rounded-full flex items-center justify-center border transition-all active:scale-95 cursor-pointer shrink-0 order-10 sm:order-none ${
+            isMuted 
+              ? 'bg-slate-100 hover:bg-slate-200 border-slate-200 text-slate-400 dark:bg-slate-950 dark:border-slate-800 dark:text-slate-600' 
+              : 'bg-emerald-50 hover:bg-emerald-100 border-emerald-200 text-emerald-600 dark:bg-emerald-500/10 dark:border-emerald-500/20 dark:text-emerald-400'
+          }`}
+          title={isRtl ? 'كتم/تفعيل صوت التنبيهات' : 'Toggle Audio System'} aria-label={isRtl ? 'كتم/تفعيل صوت التنبيهات' : 'Toggle Audio System'}
+        >
+          {isMuted ? (
+            <svg className="w-4 h-4 sm:w-4.5 sm:h-4.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M17 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2" />
+            </svg>
+          ) : (
+            <svg className="w-4 h-4 sm:w-4.5 sm:h-4.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M15.536 8.464a5 5 0 010 7.072M18.364 5.636a9 9 0 010 12.728M12 18.75V5.25L7.75 9.5H4.5v5h3.25L12 18.75z" />
+            </svg>
+          )}
+        </button>
+
+        <button
+          type="button"
+          onClick={onToggleDarkMode}
+          className={`w-8 h-8 sm:w-10 sm:h-10 rounded-full flex items-center justify-center border transition-all active:scale-95 cursor-pointer shrink-0 order-11 sm:order-none ${
+            isClassDarkMode 
+              ? 'bg-amber-500/10 border-amber-500/30 text-amber-400 hover:bg-amber-500/20' 
+              : 'bg-slate-100 hover:bg-slate-200 border-slate-200 text-slate-500 dark:bg-slate-950 dark:border-slate-800 dark:text-slate-500'
+          }`}
+          title={isRtl ? 'الوضع الداكن' : 'Night Mode'} aria-label={isRtl ? 'الوضع الداكن' : 'Night Mode'}
+        >
+          {isClassDarkMode ? (
+            <svg className="w-4 h-4 sm:w-4.5 sm:h-4.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364-6.364l-.707.707M6.343 17.657l-.707.707m0-12.728l.707.707m12.728 12.728l.707-.707M12 8a4 4 0 100 8 4 4 0 000-8z" />
+            </svg>
+          ) : (
+            <svg className="w-4 h-4 sm:w-4.5 sm:h-4.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
+            </svg>
+          )}
+        </button>
+
+        {/* Control 2: currency — icon-only on phones to free space for mute/dark */}
+        <div className="relative order-5 sm:order-none" ref={dropdownRef}>
           <button
             type="button"
             onClick={() => {
               sounds.playClick();
               setDropdownOpen(!dropdownOpen);
             }}
-            className="flex items-center gap-1 sm:gap-1.5 bg-slate-100 hover:bg-slate-100 active:scale-95 dark:bg-slate-800 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700/85 rounded-full px-2 sm:pl-3.5 sm:pr-4 py-1 sm:py-1.5 transition-all shadow-sm cursor-pointer select-none"
+            className="flex items-center gap-1 sm:gap-1.5 bg-slate-100 hover:bg-slate-100 active:scale-95 dark:bg-slate-800 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700/85 rounded-full w-8 h-8 sm:w-auto justify-center sm:pl-3.5 sm:pr-4 sm:py-1.5 transition-all shadow-sm cursor-pointer select-none"
             aria-haspopup="listbox"
             aria-expanded={dropdownOpen}
             title={isRtl ? 'تبديل العملة المعروضة' : 'Switch Preferred Currency'} aria-label={isRtl ? 'تبديل العملة المعروضة' : 'Switch Preferred Currency'}
@@ -443,16 +487,16 @@ export default function Header({
               </svg>
             </div>
 
-            <span className="text-[10px] sm:text-xs font-black text-slate-800 dark:text-slate-100 font-sans tracking-tight">
+            <span className="hidden sm:inline text-[10px] sm:text-xs font-black text-slate-800 dark:text-slate-100 font-sans tracking-tight">
               {currentCurrencyObj.code} <span className="opacity-85 font-normal">{currentCurrencyObj.symbol}</span>
             </span>
-            <ChevronDown className={`w-2.5 h-2.5 sm:w-3.5 sm:h-3.5 text-slate-400 dark:text-slate-500 transition-transform duration-300 ${dropdownOpen ? 'rotate-180' : ''}`} />
+            <ChevronDown className={`hidden sm:block w-2.5 h-2.5 sm:w-3.5 sm:h-3.5 text-slate-400 dark:text-slate-500 transition-transform duration-300 ${dropdownOpen ? 'rotate-180' : ''}`} />
           </button>
 
           {dropdownOpen && (
             <div 
-              className={`absolute top-full mt-2 w-52 sm:w-64 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-xl overflow-hidden py-1.5 z-50 animate-in fade-in slide-in-from-top-2 duration-200 ${
-                isRtl ? 'left-0' : 'right-0'
+              className={`fixed sm:absolute z-[70] inset-x-3 top-[calc(env(safe-area-inset-top)+3.75rem)] sm:inset-x-auto sm:top-full sm:mt-2 w-auto sm:w-52 md:w-64 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-xl overflow-hidden py-1.5 animate-in fade-in slide-in-from-top-2 duration-200 ${
+                isRtl ? 'sm:left-0' : 'sm:right-0'
               }`}
             >
               <div className="px-3 py-1.5 text-[10px] font-extrabold text-slate-400 dark:text-slate-500 tracking-wider uppercase border-b border-slate-100 dark:border-slate-800 mb-1 font-sans">
@@ -499,51 +543,6 @@ export default function Header({
             </div>
           )}
         </div>
-
-        {/* Control 3: Green Voice/Sound circular toggle, matching original color styling */}
-        <button
-          type="button"
-          onClick={onToggleMute}
-          className={`w-8 h-8 sm:w-10 sm:h-10 rounded-full flex items-center justify-center border transition-all active:scale-95 cursor-pointer shrink-0 ${
-            isMuted 
-              ? 'bg-slate-100 hover:bg-slate-200 border-slate-200 text-slate-400 dark:bg-slate-950 dark:border-slate-800 dark:text-slate-600' 
-              : 'bg-emerald-50 hover:bg-emerald-100 border-emerald-200 text-emerald-600 dark:bg-emerald-500/10 dark:border-emerald-500/20 dark:text-emerald-400'
-          }`}
-          title={isRtl ? 'كتم/تفعيل صوت التنبيهات' : 'Toggle Audio System'} aria-label={isRtl ? 'كتم/تفعيل صوت التنبيهات' : 'Toggle Audio System'}
-        >
-          {isMuted ? (
-            <svg className="w-4 h-4 sm:w-4.5 sm:h-4.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M17 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2" />
-            </svg>
-          ) : (
-            <svg className="w-4 h-4 sm:w-4.5 sm:h-4.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M15.536 8.464a5 5 0 010 7.072M18.364 5.636a9 9 0 010 12.728M12 18.75V5.25L7.75 9.5H4.5v5h3.25L12 18.75z" />
-            </svg>
-          )}
-        </button>
-
-        {/* Control 4: Yellow Night Mode circular toggle */}
-        <button
-          type="button"
-          onClick={onToggleDarkMode}
-          className={`w-8 h-8 sm:w-10 sm:h-10 rounded-full flex items-center justify-center border transition-all active:scale-95 cursor-pointer shrink-0 ${
-            isClassDarkMode 
-              ? 'bg-amber-500/10 border-amber-500/30 text-amber-400 hover:bg-amber-500/20' 
-              : 'bg-slate-100 hover:bg-slate-200 border-slate-200 text-slate-500 dark:bg-slate-950 dark:border-slate-800 dark:text-slate-500'
-          }`}
-          title={isRtl ? 'الوضع الداكن' : 'Night Mode'} aria-label={isRtl ? 'الوضع الداكن' : 'Night Mode'}
-        >
-          {isClassDarkMode ? (
-            <svg className="w-4 h-4 sm:w-4.5 sm:h-4.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364-6.364l-.707.707M6.343 17.657l-.707.707m0-12.728l.707.707m12.728 12.728l.707-.707M12 8a4 4 0 100 8 4 4 0 000-8z" />
-            </svg>
-          ) : (
-            <svg className="w-4 h-4 sm:w-4.5 sm:h-4.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
-            </svg>
-          )}
-        </button>
       </div>
     </div>
     </>
