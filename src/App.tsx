@@ -898,6 +898,7 @@ export default function App() {
           onOpenSidebar={() => setIsSidebarOpen(true)}
           onChangeScreen={setActiveScreen}
           activeScreen={activeScreen}
+          assistantReturnScreen={lastNonAiScreen}
           subscriptionDaysRemaining={hasRealSession ? subscriptionDaysRemaining : null}
         />
 
@@ -964,7 +965,16 @@ export default function App() {
             {activeScreen === 'ai-assistant' && canOpenScreen('ai-assistant') && (
               <div className="relative block">
                 <ErrorBoundary variant="screen" isRtl={isRtl} resetKey="ai-assistant">
-                <Suspense fallback={null}>
+                <Suspense
+                  fallback={
+                    <div className="max-w-4xl mx-auto h-[calc(100vh-10rem)] flex flex-col items-center justify-center rounded-[2rem] border border-teal-900/40 bg-[#0F2027]">
+                      <div className="w-10 h-10 rounded-full border-4 border-cyan-400/70 border-t-transparent animate-spin" />
+                      <span className="mt-3 text-sm font-bold text-teal-200/90">
+                        {isRtl ? 'جارٍ فتح المساعد…' : 'Opening assistant…'}
+                      </span>
+                    </div>
+                  }
+                >
                 <AIAssistant 
                   language={language} 
                   products={products} 

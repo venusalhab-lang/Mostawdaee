@@ -1323,77 +1323,77 @@ export default function InventoryManagement({
         transition={{ delay: 0.1 }}
         className={`bg-white/40 dark:bg-[#0c1221]/45 backdrop-blur-2xl rounded-2xl border border-slate-200/50 dark:border-white/5 shadow-2xl overflow-hidden flex flex-col ${celebrationClass}`}
       >
-        {/* Sleek Toolbar Component (شريط أدوات التحكم والبحث والفلترة) */}
-        <div className="p-4 border-b border-slate-200/40 dark:border-white/5 bg-slate-50/20 dark:bg-slate-950/10 flex flex-col md:flex-row items-stretch md:items-center gap-3">
-          
-          {/* Search Input */}
-          <div className="relative flex-grow">
-            <Search size={16} className={`absolute top-1/2 -translate-y-1/2 ${isRtl ? 'right-4' : 'left-4'} text-slate-400`} />
-            <input 
-              type="text"
-              placeholder={isRtl ? 'ابحث بالاسم، أو الباركود SKU...' : t.searchPlaceholder} aria-label={isRtl ? 'ابحث بالاسم، أو الباركود SKU...' : t.searchPlaceholder}
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className={`w-full ${isRtl ? 'pr-11 pl-10' : 'pl-11 pr-10'} py-2.5 bg-slate-100 dark:bg-black/40 border border-slate-200/60 dark:border-white/5 rounded-xl text-sm font-bold dark:text-white outline-none focus:border-cyan-400/60 focus:ring-2 focus:ring-cyan-400/15 transition-all`}
-            />
-            {searchQuery && (
+        {/* Toolbar: search + filters, then a dedicated full-width actions grid on phones */}
+        <div className="border-b border-slate-200/40 dark:border-white/5 bg-slate-50/20 dark:bg-slate-950/10">
+          <div className="p-3 sm:p-4 flex flex-col gap-3">
+            <div className="relative w-full min-w-0">
+              <Search size={16} className={`absolute top-1/2 -translate-y-1/2 ${isRtl ? 'right-4' : 'left-4'} text-slate-400`} />
+              <input
+                type="text"
+                placeholder={isRtl ? 'ابحث بالاسم، أو الباركود SKU...' : t.searchPlaceholder}
+                aria-label={isRtl ? 'ابحث بالاسم، أو الباركود SKU...' : t.searchPlaceholder}
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className={`w-full min-w-0 ${isRtl ? 'pr-11 pl-10' : 'pl-11 pr-10'} py-2.5 bg-slate-100 dark:bg-black/40 border border-slate-200/60 dark:border-white/5 rounded-xl text-sm font-bold dark:text-white outline-none focus:border-cyan-400/60 focus:ring-2 focus:ring-cyan-400/15 transition-all`}
+              />
+              {searchQuery && (
+                <button
+                  type="button"
+                  onClick={() => { setSearchQuery(''); sounds.playPop(); }}
+                  className={`absolute top-1/2 -translate-y-1/2 ${isRtl ? 'left-3' : 'right-3'} p-1 hover:bg-slate-200/50 dark:hover:bg-white/10 rounded-full text-slate-400 hover:text-rose-500 transition-all cursor-pointer`}
+                  aria-label={isRtl ? 'إغلاق' : 'Close'}
+                >
+                  <X size={14} />
+                </button>
+              )}
+            </div>
+
+            <div className="grid grid-cols-2 lg:grid-cols-[1fr_1fr_auto] gap-2 min-w-0">
+              <div className="relative min-w-0">
+                <select
+                  value={categoryFilter}
+                  onChange={(e) => setCategoryFilter(e.target.value)}
+                  className="w-full min-w-0 py-2.5 px-3 sm:px-4 bg-slate-100 dark:bg-black/40 border border-slate-200/60 dark:border-white/5 rounded-xl text-xs font-black text-slate-600 dark:text-slate-300 outline-none cursor-pointer hover:border-cyan-400/35 transition-colors appearance-none"
+                  style={{ backgroundImage: `url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e")`, backgroundRepeat: 'no-repeat', backgroundPosition: isRtl ? 'left 10px center' : 'right 10px center', backgroundSize: '12px' }}
+                >
+                  <option value="all" className="dark:bg-[#0c1221]">{isRtl ? 'كل التصنيفات' : 'All Categories'}</option>
+                  {dynamicCategories.map((cat) => (
+                    <option key={cat} value={cat} className="dark:bg-[#0c1221]">{cat}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="relative min-w-0">
+                <select
+                  value={stockFilter}
+                  onChange={(e) => setStockFilter(e.target.value)}
+                  className="w-full min-w-0 py-2.5 px-3 sm:px-4 bg-slate-100 dark:bg-black/40 border border-slate-200/60 dark:border-white/5 rounded-xl text-xs font-black text-slate-600 dark:text-slate-300 outline-none cursor-pointer hover:border-cyan-400/35 transition-colors appearance-none"
+                  style={{ backgroundImage: `url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e")`, backgroundRepeat: 'no-repeat', backgroundPosition: isRtl ? 'left 10px center' : 'right 10px center', backgroundSize: '12px' }}
+                >
+                  <option value="all" className="dark:bg-[#0c1221]">{isRtl ? 'حسب الحالة' : 'By Status'}</option>
+                  <option value="in" className="dark:bg-[#0c1221]">{isRtl ? 'متوفر' : t.inStock}</option>
+                  <option value="low" className="dark:bg-[#0c1221]">{isRtl ? 'نواقص' : t.lowStock}</option>
+                  <option value="out" className="dark:bg-[#0c1221]">{isRtl ? 'نفدت الكمية' : t.outOfStock}</option>
+                </select>
+              </div>
               <button
                 type="button"
-                onClick={() => { setSearchQuery(''); sounds.playPop(); }}
-                className={`absolute top-1/2 -translate-y-1/2 ${isRtl ? 'left-3' : 'right-3'} p-1 hover:bg-slate-200/50 dark:hover:bg-white/10 rounded-full text-slate-400 hover:text-rose-500 transition-all cursor-pointer`}
-               aria-label={isRtl ? 'إغلاق' : 'Close'}>
-                <X size={14} />
+                onClick={() => { setShowAdvancedFilters(!showAdvancedFilters); sounds.playClick(); }}
+                className={`col-span-2 lg:col-span-1 px-3.5 py-2.5 rounded-xl border flex items-center justify-center gap-1.5 transition-all text-xs font-black cursor-pointer ${
+                  showAdvancedFilters
+                    ? 'bg-cyan-500/15 border-cyan-500/40 text-cyan-600 dark:text-cyan-400 font-extrabold'
+                    : 'bg-slate-100 hover:bg-slate-200 dark:bg-white/5 dark:hover:bg-white/10 border-slate-200/60 dark:border-white/5 text-slate-600 dark:text-slate-300'
+                }`}
+                title={filterT.advancedSettings}
+                aria-label={filterT.advancedSettings}
+              >
+                <Filter size={14} className={showAdvancedFilters ? 'animate-pulse' : ''} />
+                <span>{isRtl ? 'تصفية متقدمة' : 'Advanced'}</span>
               </button>
-            )}
+            </div>
           </div>
 
-          {/* Categories Selector */}
-          <div className="relative min-w-[160px]">
-            <select
-              value={categoryFilter}
-              onChange={(e) => setCategoryFilter(e.target.value)}
-              className="w-full py-2.5 px-4 bg-slate-100 dark:bg-black/40 border border-slate-200/60 dark:border-white/5 rounded-xl text-xs font-black text-slate-600 dark:text-slate-300 outline-none cursor-pointer hover:border-cyan-400/35 transition-colors appearance-none"
-              style={{ backgroundImage: `url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e")`, backgroundRepeat: 'no-repeat', backgroundPosition: isRtl ? 'left 12px center' : 'right 12px center', backgroundSize: '12px' }}
-            >
-              <option value="all" className="dark:bg-[#0c1221]">{isRtl ? 'كل التصنيفات' : 'All Categories'}</option>
-              {dynamicCategories.map((cat) => (
-                <option key={cat} value={cat} className="dark:bg-[#0c1221]">{cat}</option>
-              ))}
-            </select>
-          </div>
-
-          {/* Status Selector */}
-          <div className="relative min-w-[130px]">
-            <select
-              value={stockFilter}
-              onChange={(e) => setStockFilter(e.target.value)}
-              className="w-full py-2.5 px-4 bg-slate-100 dark:bg-black/40 border border-slate-200/60 dark:border-white/5 rounded-xl text-xs font-black text-slate-600 dark:text-slate-300 outline-none cursor-pointer hover:border-cyan-400/35 transition-colors appearance-none"
-              style={{ backgroundImage: `url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e")`, backgroundRepeat: 'no-repeat', backgroundPosition: isRtl ? 'left 12px center' : 'right 12px center', backgroundSize: '12px' }}
-            >
-              <option value="all" className="dark:bg-[#0c1221]">{isRtl ? 'حسب الحالة' : 'By Status'}</option>
-              <option value="in" className="dark:bg-[#0c1221]">{isRtl ? 'متوفر' : t.inStock}</option>
-              <option value="low" className="dark:bg-[#0c1221]">{isRtl ? 'نواقص' : t.lowStock}</option>
-              <option value="out" className="dark:bg-[#0c1221]">{isRtl ? 'نفدت الكمية' : t.outOfStock}</option>
-            </select>
-          </div>
-
-          {/* Filter Advanced Toggler Button */}
-          <button
-            type="button"
-            onClick={() => { setShowAdvancedFilters(!showAdvancedFilters); sounds.playClick(); }}
-            className={`px-3.5 py-2.5 rounded-xl border flex items-center justify-center gap-1.5 transition-all text-xs font-black cursor-pointer ${
-              showAdvancedFilters 
-                ? 'bg-cyan-500/15 border-cyan-500/40 text-cyan-600 dark:text-cyan-400 font-extrabold' 
-                : 'bg-slate-100 hover:bg-slate-200 dark:bg-white/5 dark:hover:bg-white/10 border-slate-200/60 dark:border-white/5 text-slate-600 dark:text-slate-300'
-            }`}
-            title={filterT.advancedSettings} aria-label={filterT.advancedSettings}
-          >
-            <Filter size={14} className={showAdvancedFilters ? 'animate-pulse' : ''} />
-            <span>{isRtl ? 'تصفية متقدمة' : 'Advanced'}</span>
-          </button>
-
-          {/* Quick Data Exports */}
-          <div className="flex items-center gap-2 shrink-0 w-full md:w-auto">
+          {/* Data tools — 2×3 grid on phone so every label stays fully readable */}
+          <div className="px-3 pb-3 sm:px-4 sm:pb-4">
             <input
               ref={importInputRef}
               type="file"
@@ -1401,51 +1401,61 @@ export default function InventoryManagement({
               className="hidden"
               onChange={handleImportFile}
             />
-            <button
-              type="button"
-              onClick={openStocktake}
-              title={isRtl ? 'فتح الجرد والتسوية لتثبيت الكميات المعدودة' : 'Open stocktaking to set counted quantities'} aria-label={isRtl ? 'فتح الجرد والتسوية لتثبيت الكميات المعدودة' : 'Open stocktaking to set counted quantities'}
-              className="flex-1 md:flex-initial flex items-center justify-center gap-1.5 px-3.5 py-2.5 bg-slate-900/5 dark:bg-white/5 text-slate-800 dark:text-slate-100 border border-slate-300/50 dark:border-white/15 hover:border-slate-400 dark:hover:border-white/30 rounded-xl text-xs font-black tracking-tight transition-all cursor-pointer"
-            >
-              <ClipboardCheck size={14} />
-              <span>{isRtl ? 'الجرد' : 'Count'}</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => { sounds.playClick(); importInputRef.current?.click(); }}
-              title={isRtl ? 'استيراد منتجات من ملف CSV أو Excel (نفس أعمدة ملف التصدير)' : 'Import products from CSV/Excel (same columns as the export)'} aria-label={isRtl ? 'استيراد منتجات من ملف CSV أو Excel (نفس أعمدة ملف التصدير)' : 'Import products from CSV/Excel (same columns as the export)'}
-              className="flex-1 md:flex-initial flex items-center justify-center gap-1.5 px-3.5 py-2.5 bg-indigo-600/10 dark:bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border border-indigo-500/20 hover:border-indigo-500/50 rounded-xl text-xs font-black tracking-tight transition-all cursor-pointer"
-            >
-              <Upload size={14} />
-              <span>{isRtl ? 'استيراد' : 'Import'}</span>
-            </button>
-            <button
-              type="button"
-              onClick={exportInventoryToCSV}
-              title={isRtl ? 'تصدير كميات المخزون لملف Excel/CSV' : 'Export current stock as CSV/Excel'} aria-label={isRtl ? 'تصدير كميات المخزون لملف Excel/CSV' : 'Export current stock as CSV/Excel'}
-              className="flex-1 md:flex-initial flex items-center justify-center gap-1.5 px-3.5 py-2.5 bg-emerald-600/10 dark:bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 hover:border-emerald-500/50 rounded-xl text-xs font-black tracking-tight transition-all cursor-pointer"
-            >
-              <Download size={14} />
-              <span>{isRtl ? 'تصدير Excel' : 'Export Excel'}</span>
-            </button>
-            <button
-              type="button"
-              onClick={exportInventoryToPDF}
-              title={isRtl ? 'طباعة وتصدير تقرير الجرد بصيغة PDF' : 'Download compiled audit PDF'} aria-label={isRtl ? 'طباعة وتصدير تقرير الجرد بصيغة PDF' : 'Download compiled audit PDF'}
-              className="flex-1 md:flex-initial flex items-center justify-center gap-1.5 px-3.5 py-2.5 bg-cyan-600/10 dark:bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 border border-cyan-500/20 hover:border-cyan-500/50 rounded-xl text-xs font-black tracking-tight transition-all cursor-pointer"
-            >
-              <FileText size={14} />
-              <span>{isRtl ? 'تقرير PDF' : 'PDF Report'}</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => { sounds.playClick(); setLabelProducts(filteredProducts); }}
-              title={isRtl ? 'طباعة ملصقات باركود للأصناف المعروضة' : 'Print barcode labels for the listed products'} aria-label={isRtl ? 'طباعة ملصقات باركود للأصناف المعروضة' : 'Print barcode labels for the listed products'}
-              className="flex-1 md:flex-initial flex items-center justify-center gap-1.5 px-3.5 py-2.5 bg-slate-600/10 dark:bg-white/5 text-slate-700 dark:text-slate-200 border border-slate-500/20 hover:border-slate-500/50 rounded-xl text-xs font-black tracking-tight transition-all cursor-pointer"
-            >
-              <Barcode size={14} />
-              <span>{isRtl ? 'ملصقات' : 'Labels'}</span>
-            </button>
+            <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 mb-2 px-0.5">
+              {isRtl ? 'أدوات البيانات والطباعة' : 'Data & print tools'}
+            </p>
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2 min-w-0">
+              <button
+                type="button"
+                onClick={openStocktake}
+                title={isRtl ? 'فتح الجرد والتسوية لتثبيت الكميات المعدودة' : 'Open stocktaking to set counted quantities'}
+                aria-label={isRtl ? 'فتح الجرد والتسوية لتثبيت الكميات المعدودة' : 'Open stocktaking to set counted quantities'}
+                className="min-w-0 min-h-[2.75rem] px-2.5 py-2.5 flex items-center justify-center gap-1.5 bg-slate-900/5 dark:bg-white/5 text-slate-800 dark:text-slate-100 border border-slate-300/50 dark:border-white/15 hover:border-slate-400 dark:hover:border-white/30 rounded-xl text-[11px] sm:text-xs font-black tracking-tight transition-all cursor-pointer"
+              >
+                <ClipboardCheck size={14} className="shrink-0" />
+                <span className="truncate">{isRtl ? 'الجرد' : 'Count'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => { sounds.playClick(); importInputRef.current?.click(); }}
+                title={isRtl ? 'استيراد منتجات من ملف CSV أو Excel (نفس أعمدة ملف التصدير)' : 'Import products from CSV/Excel (same columns as the export)'}
+                aria-label={isRtl ? 'استيراد منتجات من ملف CSV أو Excel (نفس أعمدة ملف التصدير)' : 'Import products from CSV/Excel (same columns as the export)'}
+                className="min-w-0 min-h-[2.75rem] px-2.5 py-2.5 flex items-center justify-center gap-1.5 bg-indigo-600/10 dark:bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border border-indigo-500/20 hover:border-indigo-500/50 rounded-xl text-[11px] sm:text-xs font-black tracking-tight transition-all cursor-pointer"
+              >
+                <Upload size={14} className="shrink-0" />
+                <span className="truncate">{isRtl ? 'استيراد' : 'Import'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={exportInventoryToCSV}
+                title={isRtl ? 'تصدير كميات المخزون لملف Excel/CSV' : 'Export current stock as CSV/Excel'}
+                aria-label={isRtl ? 'تصدير كميات المخزون لملف Excel/CSV' : 'Export current stock as CSV/Excel'}
+                className="min-w-0 min-h-[2.75rem] px-2.5 py-2.5 flex items-center justify-center gap-1.5 bg-emerald-600/10 dark:bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 hover:border-emerald-500/50 rounded-xl text-[11px] sm:text-xs font-black tracking-tight transition-all cursor-pointer"
+              >
+                <Download size={14} className="shrink-0" />
+                <span className="truncate">{isRtl ? 'تصدير Excel' : 'Export'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={exportInventoryToPDF}
+                title={isRtl ? 'طباعة وتصدير تقرير الجرد بصيغة PDF' : 'Download compiled audit PDF'}
+                aria-label={isRtl ? 'طباعة وتصدير تقرير الجرد بصيغة PDF' : 'Download compiled audit PDF'}
+                className="min-w-0 min-h-[2.75rem] px-2.5 py-2.5 flex items-center justify-center gap-1.5 bg-cyan-600/10 dark:bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 border border-cyan-500/20 hover:border-cyan-500/50 rounded-xl text-[11px] sm:text-xs font-black tracking-tight transition-all cursor-pointer"
+              >
+                <FileText size={14} className="shrink-0" />
+                <span className="truncate">{isRtl ? 'تقرير PDF' : 'PDF'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => { sounds.playClick(); setLabelProducts(filteredProducts); }}
+                title={isRtl ? 'طباعة ملصقات باركود للأصناف المعروضة' : 'Print barcode labels for the listed products'}
+                aria-label={isRtl ? 'طباعة ملصقات باركود للأصناف المعروضة' : 'Print barcode labels for the listed products'}
+                className="min-w-0 min-h-[2.75rem] px-2.5 py-2.5 flex items-center justify-center gap-1.5 bg-slate-600/10 dark:bg-white/5 text-slate-700 dark:text-slate-200 border border-slate-500/20 hover:border-slate-500/50 rounded-xl text-[11px] sm:text-xs font-black tracking-tight transition-all cursor-pointer col-span-2 sm:col-span-1"
+              >
+                <Barcode size={14} className="shrink-0" />
+                <span className="truncate">{isRtl ? 'ملصقات الباركود' : 'Labels'}</span>
+              </button>
+            </div>
           </div>
         </div>
 

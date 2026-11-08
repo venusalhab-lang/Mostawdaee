@@ -19,6 +19,8 @@ interface HeaderProps {
   onOpenSidebar: () => void;
   onChangeScreen?: (screen: string) => void;
   activeScreen?: string;
+  /** Screen to restore when closing the AI assistant via the logo toggle. */
+  assistantReturnScreen?: string;
   /** Days left on active trial/premium; null skips the subscription notice. */
   subscriptionDaysRemaining?: number | null;
   style?: React.CSSProperties;
@@ -48,6 +50,7 @@ export default function Header({
   onOpenSidebar,
   onChangeScreen,
   activeScreen,
+  assistantReturnScreen = 'dashboard',
   subscriptionDaysRemaining = null,
   style
 }: HeaderProps) {
@@ -174,6 +177,11 @@ export default function Header({
     setPressProgress(0);
   };
 
+  useEffect(() => () => {
+    if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
+    if (progressIntervalRef.current) clearInterval(progressIntervalRef.current);
+  }, []);
+
   const handleLogoClick = () => {
     if (!assistantAllowed) return;
     if (hasLongPressedRef.current) {
@@ -182,7 +190,7 @@ export default function Header({
     }
     sounds.playClick();
     if (onChangeScreen) {
-      onChangeScreen(activeScreen === 'ai-assistant' ? 'dashboard' : 'ai-assistant');
+      onChangeScreen(activeScreen === 'ai-assistant' ? (assistantReturnScreen || 'dashboard') : 'ai-assistant');
     }
   };
 

@@ -95,6 +95,8 @@ function MessageBody({ text }: { text: string }) {
 
 function TypingText({ text, onDone }: { text: string; onDone: () => void }) {
   const [shown, setShown] = useState('');
+  const onDoneRef = useRef(onDone);
+  onDoneRef.current = onDone;
   useEffect(() => {
     const words = text.split(/(\s+)/);
     const step = words.length > 200 ? 6 : words.length > 80 ? 4 : 2;
@@ -105,7 +107,7 @@ function TypingText({ text, onDone }: { text: string; onDone: () => void }) {
       setShown(words.slice(0, index).join(''));
       if (index >= words.length) {
         clearInterval(timer);
-        onDone();
+        onDoneRef.current();
       }
     }, 16);
     return () => clearInterval(timer);
@@ -310,6 +312,9 @@ export default function AIAssistant({
   const owner = user?.uid || 'guest';
   const defaultCurrency: Currency = settings?.currency || 'JOD';
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const aliveRef = useRef(true);
+  const requestAbortRef = useRef<AbortController | null>(null);
+  const requestGenRef = useRef(0);
 
   const [chat, setChat] = useState(() => ({ owner, messages: loadChat(owner) }));
   if (chat.owner !== owner) setChat({ owner, messages: loadChat(owner) });
@@ -322,6 +327,16 @@ export default function AIAssistant({
   const [animateId, setAnimateId] = useState<string | null>(null);
   const [aiStatus, setAiStatus] = useState<AiStatus>('checking');
   const [lastNotice, setLastNotice] = useState('');
+
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+      requestGenRef.current += 1;
+      requestAbortRef.current?.abort();
+      requestAbortRef.current = null;
+    };
+  }, []);
 
   useEffect(() => {
     sessionStorage.removeItem(LEGACY_CHAT_KEY);
@@ -345,7 +360,10 @@ export default function AIAssistant({
     return () => { cancelled = true; };
   }, []);
 
-  const scrollToBottom = () => chatEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  const scrollToBottom = () => {
+    if (!aliveRef.current) return;
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  };
   useEffect(scrollToBottom, [messages.length, isLoading]);
 
   const data: AssistantData = useMemo(() => ({
@@ -360,10 +378,32 @@ export default function AIAssistant({
   const noticeFor = (code?: string) => (NOTICES[code || ''] || NOTICES.unavailable)[isRtl ? 0 : 1];
 
   const pushAssistant = (message: Omit<Message, 'id' | 'role'>) => {
+    if (!aliveRef.current) return;
     const id = crypto.randomUUID();
     updateMessages((prev) => [...prev, { id, role: 'assistant', ...message }]);
     if (settings?.enableAnimations !== false) setAnimateId(id);
   };
+
+  const handleClose = () => {
+    requestGenRef.current += 1;
+    requestAbortRef.current?.abort();
+    requestAbortRef.current = null;
+    onClose?.();
+  };
+
+  useEffect(() => {
+    if (!onClose) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      requestGenRef.current += 1;
+      requestAbortRef.current?.abort();
+      requestAbortRef.current = null;
+      onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
 
   const handleSend = async (preset?: string) => {
     const text = (preset ?? input).trim().slice(0, ASSISTANT_LIMITS.messageChars);
@@ -373,8 +413,12 @@ export default function AIAssistant({
     updateMessages(() => history);
     setInput('');
     setIsLoading(true);
+    const myGen = ++requestGenRef.current;
+
+    const stillMine = () => aliveRef.current && requestGenRef.current === myGen;
 
     const answerFromDevice = (code?: string) => {
+      if (!stillMine()) return;
       const notice = noticeFor(code);
       setLastNotice(notice);
       pushAssistant({ content: answerLocally(text, data, lang), source: 'local', notice });
@@ -382,7 +426,9 @@ export default function AIAssistant({
 
     try {
       if (aiStatus === 'missing') return answerFromDevice('ai_not_configured');
+      requestAbortRef.current?.abort();
       const controller = new AbortController();
+      requestAbortRef.current = controller;
       const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
       let response: Response;
       try {
@@ -400,8 +446,11 @@ export default function AIAssistant({
         });
       } finally {
         clearTimeout(timer);
+        if (requestAbortRef.current === controller) requestAbortRef.current = null;
       }
+      if (!stillMine()) return;
       const body = await response.json().catch(() => null);
+      if (!stillMine()) return;
       if (!response.ok || typeof body?.text !== 'string' || !body.text.trim()) return answerFromDevice(body?.code);
       setLastNotice('');
       pushAssistant({
@@ -410,9 +459,11 @@ export default function AIAssistant({
         ...(body.action ? { action: body.action as AssistantAction, actionState: 'pending' as const } : {}),
       });
     } catch {
+      // Close / supersede bump the generation so stillMine is false; timeout stays mine → local fallback.
+      if (!stillMine()) return;
       answerFromDevice('unavailable');
     } finally {
-      setIsLoading(false);
+      if (stillMine()) setIsLoading(false);
     }
   };
 
@@ -523,7 +574,7 @@ export default function AIAssistant({
             </button>
           )}
           {onClose && (
-            <button type="button" onClick={onClose} id="close_ai_assistant_btn"
+            <button type="button" onClick={handleClose} id="close_ai_assistant_btn"
               className="w-10 h-10 rounded-xl bg-white/5 hover:bg-white/10 text-slate-300 flex items-center justify-center border border-white/10"
               aria-label={isRtl ? 'إغلاق المساعد' : 'Close assistant'}>
               <X size={19} />
@@ -555,7 +606,11 @@ export default function AIAssistant({
                     ? 'bg-[#2C5364] text-white rounded-2xl rounded-tr-none border border-[#305e71]'
                     : 'bg-white/5 text-slate-100 rounded-2xl rounded-tl-none border border-white/5'}`}>
                     {msg.id === animateId
-                      ? <TypingText text={msg.content} onDone={() => { setAnimateId(null); scrollToBottom(); }} />
+                      ? <TypingText text={msg.content} onDone={() => {
+                          if (!aliveRef.current) return;
+                          setAnimateId(null);
+                          scrollToBottom();
+                        }} />
                       : <MessageBody text={msg.content} />}
                     {msg.id !== animateId && renderAction(msg)}
                   </div>
