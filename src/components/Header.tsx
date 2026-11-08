@@ -215,7 +215,7 @@ export default function Header({
   return (
     <>
       <div 
-        className="app-header bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 px-4 sm:px-6 py-3.5 flex items-center justify-between gap-4 z-30 sticky top-0 shadow-sm"
+        className="app-header bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 px-4 sm:px-6 py-3.5 pt-[max(0.875rem,env(safe-area-inset-top))] flex items-center justify-between gap-3 sm:gap-4 z-30 sticky top-0 shadow-sm min-w-0"
         id="top-navigation-row"
         dir={isRtl ? 'rtl' : 'ltr'}
         style={style}

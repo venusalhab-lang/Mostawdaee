@@ -13,9 +13,9 @@ import AccountSettings from './AccountSettings';
 
 type MemberRole = Exclude<WorkspaceRole, 'owner'>;
 
-const card = 'p-6 sm:p-8 bg-gray-50 dark:bg-gray-800/50 rounded-[2rem] border border-gray-200 dark:border-gray-700/50';
-const input = 'w-full px-4 py-3 rounded-xl bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-sm font-bold text-gray-900 dark:text-white outline-none focus:border-indigo-500';
-const primary = 'px-5 py-3 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-sm font-black transition flex items-center justify-center gap-2 cursor-pointer';
+const card = 'p-4 sm:p-6 lg:p-8 bg-gray-50 dark:bg-gray-800/50 rounded-2xl sm:rounded-[2rem] border border-gray-200 dark:border-gray-700/50';
+const input = 'w-full min-w-0 px-4 py-3 rounded-xl bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-sm font-bold text-gray-900 dark:text-white outline-none focus:border-indigo-500';
+const primary = 'px-5 py-3 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-sm font-black transition flex items-center justify-center gap-2 cursor-pointer w-full sm:w-auto';
 const quiet = 'px-4 py-2.5 rounded-xl border border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-50 text-xs font-black text-gray-700 dark:text-gray-200 transition flex items-center justify-center gap-2 cursor-pointer';
 
 function roleHelp(role: MemberRole, ar: boolean) {
@@ -101,7 +101,7 @@ export function TeamManager({ language }: { language: 'ar' | 'en' }) {
     <div className="space-y-6">
       <div className="flex items-center gap-3">
         <Users className="text-indigo-600" />
-        <h2 className="text-2xl font-black text-gray-900 dark:text-white">{ar ? 'الفريق والصلاحيات' : 'Team & permissions'}</h2>
+        <h2 className="text-xl sm:text-2xl font-black text-gray-900 dark:text-white">{ar ? 'الفريق والصلاحيات' : 'Team & permissions'}</h2>
       </div>
 
       <form onSubmit={invite} className={`${card} space-y-4`}>

@@ -922,7 +922,11 @@ export default function App() {
 
           {/* Screen Stage Container - Main Content Area */}
           <main 
-            className="main-content flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8 pb-[calc(7rem+env(safe-area-inset-bottom))] lg:pb-8"
+            className={`main-content flex-1 overflow-y-auto overflow-x-hidden min-w-0 pb-[calc(7rem+env(safe-area-inset-bottom))] lg:pb-8 ${
+              activeScreen === 'admin-dashboard'
+                ? 'p-2 sm:p-4 lg:p-6'
+                : 'p-4 sm:p-6 lg:p-8'
+            }`}
             style={sidebarOffsetStyle}
           >
 

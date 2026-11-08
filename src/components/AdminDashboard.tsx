@@ -78,20 +78,20 @@ export default function AdminDashboard({ language }: Props) {
 
   if (!platformRole) {
     return (
-      <div className={`${opsShell} flex items-center justify-center p-6`} dir={isRtl ? 'rtl' : 'ltr'}>
+      <div className={`${opsShell} flex items-center justify-center p-4 sm:p-6`} dir={isRtl ? 'rtl' : 'ltr'}>
         <div className={opsAmbient} />
-        <div className={`relative max-w-md w-full ${opsCard} p-8 text-center space-y-4`}>
+        <div className={`relative max-w-md w-full ${opsCard} p-5 sm:p-8 text-center space-y-4`}>
           <div className="h-12 w-12 rounded-2xl bg-rose-500/10 text-rose-300 flex items-center justify-center mx-auto border border-rose-400/20">
             <Lock size={22} />
           </div>
-          <h3 className="text-lg font-black text-white">
+          <h3 className="text-base sm:text-lg font-black text-white">
             {isRtl ? 'هذه اللوحة لفريق مستودعي' : 'This console is for the Mostawdaee team'}
           </h3>
-          <p className="text-xs text-slate-400" dir="ltr">{user?.email}</p>
+          <p className="text-xs text-slate-400 break-all" dir="ltr">{user?.email}</p>
           <p className="text-[11px] text-slate-500 leading-relaxed">
             {isRtl
-              ? 'إن كنت عضواً في الفريق وتظهر هذه الرسالة، أكّد بريدك أو اطلب من المؤسس تفعيل عضويتك، وتأكد أن الخادم يعمل بمفتاح الخدمة.'
-              : 'If you are on the team and see this, confirm your email or ask the founder to activate you, and ensure the server has the service role key.'}
+              ? 'إن كنت عضواً في الفريق وتظهر هذه الرسالة، أكّد بريدك أو اطلب من المؤسس تفعيل عضويتك، وتأكد أن التطبيق يتصل بـ mostawdaee.com وأن الخادم يعمل بمفتاح الخدمة.'
+              : 'If you are on the team and see this, confirm your email or ask the founder to activate you, and ensure the app reaches mostawdaee.com with the service role key on the server.'}
           </p>
           <a
             href={SITE}
@@ -126,20 +126,20 @@ export default function AdminDashboard({ language }: Props) {
       <div className={opsAmbient} />
       <div className={opsGrid} />
 
-      <div className="relative z-[1] p-5 sm:p-7 lg:p-8 space-y-6">
-        <header className="flex flex-col xl:flex-row xl:items-end justify-between gap-5 pb-5 border-b border-white/[0.07]">
-          <div className="space-y-3 min-w-0">
+      <div className="relative z-[1] p-3 sm:p-5 lg:p-7 space-y-4 sm:space-y-6">
+        <header className="flex flex-col gap-4 pb-4 sm:pb-5 border-b border-white/[0.07]">
+          <div className="space-y-2.5 min-w-0">
             <div className="inline-flex items-center gap-2 rounded-full border border-cyan-400/20 bg-cyan-400/5 px-3 py-1 text-[10px] font-black tracking-[0.18em] uppercase text-cyan-200/90">
               <Radio size={11} className="text-cyan-300 animate-pulse" />
               {isRtl ? 'غرفة العمليات' : 'Operations'}
             </div>
             <div className="flex items-center gap-3 min-w-0">
-              <Logo size={44} />
+              <Logo size={40} />
               <div className="min-w-0">
-                <h1 className="text-2xl sm:text-3xl font-black tracking-tight text-white truncate">
+                <h1 className="text-xl sm:text-2xl lg:text-3xl font-black tracking-tight text-white truncate">
                   {isRtl ? `غرفة عمليات ${brand}` : `${brand} operations`}
                 </h1>
-                <p className="text-xs text-slate-400 font-semibold mt-1">
+                <p className="text-[11px] sm:text-xs text-slate-400 font-semibold mt-1 leading-snug">
                   {isRtl
                     ? 'اشتراكات · دعم · صلاحيات · تدقيق — مرتبطة بـ mostawdaee.com'
                     : 'Subscriptions · support · access · audit — live on mostawdaee.com'}
@@ -148,36 +148,36 @@ export default function AdminDashboard({ language }: Props) {
             </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2 self-start xl:self-auto">
-            <div className={`${opsCard} px-3.5 py-2.5 flex items-center gap-3`}>
-              <div>
+          <div className="grid grid-cols-1 xs:grid-cols-2 sm:flex sm:flex-wrap items-stretch sm:items-center gap-2">
+            <div className={`${opsCard} px-3 py-2.5 flex items-center gap-3 min-w-0`}>
+              <div className="shrink-0">
                 <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
                   {isRtl ? 'الدور' : 'Role'}
                 </p>
                 <p className="text-xs font-black text-cyan-200">{platformRoleLabel(platformRole, isRtl)}</p>
               </div>
-              <div className="w-px h-8 bg-white/10" />
-              <div className="min-w-0">
+              <div className="w-px h-8 bg-white/10 shrink-0" />
+              <div className="min-w-0 flex-1">
                 <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
                   {isRtl ? 'المشغّل' : 'Operator'}
                 </p>
-                <p className="text-xs font-bold text-slate-300 truncate max-w-[180px]" dir="ltr">
+                <p className="text-xs font-bold text-slate-300 truncate" dir="ltr">
                   {user?.email}
                 </p>
               </div>
             </div>
-            <div className={`${opsCard} px-3.5 py-2.5 text-end`}>
-              <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500 flex items-center gap-1.5 justify-end">
+            <div className={`${opsCard} px-3 py-2.5 flex items-center justify-between gap-3 sm:block sm:text-end`}>
+              <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500 flex items-center gap-1.5 sm:justify-end">
                 <Clock size={11} />
                 {isRtl ? 'الوقت المحلي' : 'Local time'}
               </p>
-              <p className="text-sm font-black tabular-nums text-white mt-0.5">{clock}</p>
+              <p className="text-sm font-black tabular-nums text-white sm:mt-0.5">{clock}</p>
             </div>
             <a
               href={SITE}
               target="_blank"
               rel="noreferrer"
-              className={`${opsBtnGhost} text-cyan-200 border-cyan-400/20 hover:border-cyan-300/40`}
+              className={`${opsBtnGhost} text-cyan-200 border-cyan-400/20 hover:border-cyan-300/40 sm:ms-auto`}
               title="mostawdaee.com"
             >
               <ExternalLink size={13} />
@@ -188,7 +188,11 @@ export default function AdminDashboard({ language }: Props) {
 
         {platformRole === 'founder' && <FounderNotices isRtl={isRtl} />}
 
-        <nav className={`${opsCard} p-1.5 flex flex-wrap gap-1`} role="tablist" aria-label={isRtl ? 'أقسام غرفة العمليات' : 'Operations sections'}>
+        <nav
+          className={`${opsCard} p-1.5 flex gap-1 overflow-x-auto overscroll-x-contain [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden`}
+          role="tablist"
+          aria-label={isRtl ? 'أقسام غرفة العمليات' : 'Operations sections'}
+        >
           {visibleTabs.map((t) => {
             const selected = activeTab === t.id;
             return (
@@ -201,7 +205,7 @@ export default function AdminDashboard({ language }: Props) {
                   sounds.playClick();
                   setTab(t.id);
                 }}
-                className={`px-4 py-2.5 rounded-xl text-xs font-black flex items-center gap-2 transition cursor-pointer ${
+                className={`shrink-0 px-3.5 sm:px-4 py-2.5 rounded-xl text-xs font-black flex items-center gap-2 transition cursor-pointer ${
                   selected
                     ? 'bg-cyan-500 text-[#041018] shadow-[0_0_24px_-8px_rgba(34,211,238,0.8)]'
                     : 'text-slate-400 hover:text-white hover:bg-white/[0.04]'
@@ -372,152 +376,281 @@ function SubscribersPanel({ role, isRtl }: { role: PlatformRole; isRtl: boolean 
             <RefreshCw className="h-7 w-7 text-cyan-300 animate-spin mx-auto" />
           </div>
         ) : filtered.length === 0 ? (
-          <div className="p-16 text-center space-y-3">
+          <div className="p-10 sm:p-16 text-center space-y-3">
             <AlertCircle size={22} className="mx-auto text-slate-500" />
             <p className="text-xs text-slate-400 font-bold">{isRtl ? 'لا توجد حسابات مطابقة.' : 'No matching accounts.'}</p>
           </div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs border-collapse">
-              <thead>
-                <tr className={opsTableHead}>
-                  <th className="px-5 text-start font-black">{isRtl ? 'المتجر والحساب' : 'Store & account'}</th>
-                  <th className="px-5 text-center font-black">{isRtl ? 'الحالة' : 'Status'}</th>
-                  <th className="px-5 text-start font-black">{isRtl ? 'المتبقي' : 'Remaining'}</th>
-                  {showAi && (
-                    <th className="px-5 text-center font-black">{isRtl ? 'أسئلة المساعد' : 'Assistant'}</th>
-                  )}
-                  {canGrace && <th className="px-5 text-center font-black">{isRtl ? 'إجراءات' : 'Actions'}</th>}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-white/[0.04]">
-                {filtered.map((item) => (
-                  <tr key={item.id} className="hover:bg-white/[0.025] transition-colors">
-                    <td className="px-5 py-3.5">
-                      <span className="font-extrabold text-white block truncate max-w-[220px]">
+          <>
+            {/* Phone: stacked cards so actions stay visible without horizontal scroll. */}
+            <ul className="md:hidden divide-y divide-white/[0.04]">
+              {filtered.map((item) => (
+                <li key={item.id} className="p-4 space-y-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0 flex-1">
+                      <p className="font-extrabold text-white truncate">
                         {item.businessName || item.displayName || '—'}
-                      </span>
-                      <span className="text-[10px] text-slate-500 font-mono block" dir="ltr">
+                      </p>
+                      <p className="text-[10px] text-slate-500 font-mono truncate" dir="ltr">
                         {item.email || (isRtl ? 'بدون بريد' : 'No email')}
-                      </span>
+                      </p>
                       {item.role === 'founder' && (
                         <span className="text-[10px] font-bold text-cyan-300">{isRtl ? 'المؤسس' : 'Founder'}</span>
                       )}
-                    </td>
-                    <td className="px-5 py-3.5 text-center">
-                      <span
-                        className={`px-2.5 py-1 rounded-full font-bold text-[10px] border ${
-                          item.status === 'active'
-                            ? opsStatus.active
-                            : item.status === 'trial'
-                              ? opsStatus.trial
-                              : opsStatus.expired
-                        }`}
-                      >
-                        {item.status === 'active'
-                          ? isRtl
-                            ? 'مدفوع'
-                            : 'Paid'
+                    </div>
+                    <span
+                      className={`shrink-0 px-2.5 py-1 rounded-full font-bold text-[10px] border ${
+                        item.status === 'active'
+                          ? opsStatus.active
                           : item.status === 'trial'
-                            ? isRtl
-                              ? 'تجريبي'
-                              : 'Trial'
-                            : isRtl
-                              ? 'منتهٍ'
-                              : 'Expired'}
-                      </span>
-                    </td>
-                    <td className="px-5 py-3.5">
+                            ? opsStatus.trial
+                            : opsStatus.expired
+                      }`}
+                    >
+                      {item.status === 'active'
+                        ? isRtl
+                          ? 'مدفوع'
+                          : 'Paid'
+                        : item.status === 'trial'
+                          ? isRtl
+                            ? 'تجريبي'
+                            : 'Trial'
+                          : isRtl
+                            ? 'منتهٍ'
+                            : 'Expired'}
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+                    <span>
                       <span className="text-base font-black text-white tabular-nums">{item.daysRemaining}</span>
                       <span className="text-[10px] text-slate-500 font-semibold mx-1">{isRtl ? 'يوماً' : 'days'}</span>
-                      {item.endsAt && (
-                        <div className="flex items-center gap-1 text-slate-400">
-                          <Calendar size={11} className="text-slate-500" />
-                          <span>
-                            {new Date(item.endsAt).toLocaleDateString(isRtl ? 'ar-EG' : 'en-US', {
-                              year: 'numeric',
-                              month: 'short',
-                              day: 'numeric',
-                            })}
-                          </span>
-                        </div>
-                      )}
-                    </td>
+                    </span>
+                    {item.endsAt && (
+                      <span className="flex items-center gap-1 text-slate-400 text-[10px]">
+                        <Calendar size={11} className="text-slate-500" />
+                        {new Date(item.endsAt).toLocaleDateString(isRtl ? 'ar-EG' : 'en-US', {
+                          year: 'numeric',
+                          month: 'short',
+                          day: 'numeric',
+                        })}
+                      </span>
+                    )}
                     {showAi && (
-                      <td className="px-5 py-3.5 text-center tabular-nums">
-                        <span className="font-black text-white">{item.aiToday ?? 0}</span>
-                        {aiDailyLimit !== null && <span className="text-slate-500">/{aiDailyLimit}</span>}
-                        <span className="block text-[10px] text-slate-500">
-                          {isRtl ? `${item.ai30d ?? 0} خلال 30 يوماً` : `${item.ai30d ?? 0} in 30 days`}
+                      <span className="text-[10px] text-slate-400 tabular-nums">
+                        {isRtl ? 'المساعد' : 'AI'}: {item.aiToday ?? 0}
+                        {aiDailyLimit !== null ? `/${aiDailyLimit}` : ''}
+                        {' · '}
+                        {item.ai30d ?? 0}
+                        {isRtl ? ' /30ي' : '/30d'}
+                      </span>
+                    )}
+                  </div>
+                  {canGrace && (
+                    <div className="flex flex-wrap gap-1.5 pt-1">
+                      {(canManage ? [7, 30, 90, 365] : [SUPPORT_GRACE_DAYS]).map((days) => (
+                        <button
+                          key={days}
+                          type="button"
+                          disabled={busyId === item.id}
+                          onClick={() => void run(item.id, 'extend', { days })}
+                          className={`${actionChip} bg-cyan-400/10 text-cyan-200 border-cyan-400/20 hover:bg-cyan-400/20`}
+                        >
+                          {canManage ? `+${days}` : isRtl ? `مهلة ${days} أيام` : `${days}-day grace`}
+                        </button>
+                      ))}
+                      {canManage && (
+                        <>
+                          <button
+                            type="button"
+                            disabled={busyId === item.id}
+                            onClick={() => void run(item.id, 'mark_paid')}
+                            className={`${actionChip} bg-emerald-400/10 text-emerald-200 border-emerald-400/20`}
+                          >
+                            {isRtl ? 'مدفوع' : 'Paid'}
+                          </button>
+                          <button
+                            type="button"
+                            disabled={busyId === item.id}
+                            onClick={() => {
+                              if (
+                                !window.confirm(
+                                  isRtl ? 'يبدأ هذا تجربة جديدة من 25 يوماً من اليوم.' : 'This starts a 25-day trial from today.',
+                                )
+                              )
+                                return;
+                              void run(item.id, 'set_trial');
+                            }}
+                            className={`${actionChip} bg-amber-400/10 text-amber-200 border-amber-400/20`}
+                          >
+                            {isRtl ? 'تجريبي' : 'Trial'}
+                          </button>
+                          <button
+                            type="button"
+                            disabled={busyId === item.id}
+                            onClick={() => {
+                              if (
+                                !window.confirm(
+                                  isRtl ? 'إنهاء الاشتراك يغلق حساب هذا العميل.' : 'Ending the subscription locks this customer out.',
+                                )
+                              )
+                                return;
+                              void run(item.id, 'expire');
+                            }}
+                            className={`${actionChip} bg-rose-400/10 text-rose-200 border-rose-400/20`}
+                          >
+                            {isRtl ? 'إنهاء' : 'End'}
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  )}
+                </li>
+              ))}
+            </ul>
+
+            {/* Desktop / tablet: full table */}
+            <div className="hidden md:block overflow-x-auto">
+              <table className="w-full text-xs border-collapse">
+                <thead>
+                  <tr className={opsTableHead}>
+                    <th className="px-5 text-start font-black">{isRtl ? 'المتجر والحساب' : 'Store & account'}</th>
+                    <th className="px-5 text-center font-black">{isRtl ? 'الحالة' : 'Status'}</th>
+                    <th className="px-5 text-start font-black">{isRtl ? 'المتبقي' : 'Remaining'}</th>
+                    {showAi && (
+                      <th className="px-5 text-center font-black">{isRtl ? 'أسئلة المساعد' : 'Assistant'}</th>
+                    )}
+                    {canGrace && <th className="px-5 text-center font-black">{isRtl ? 'إجراءات' : 'Actions'}</th>}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-white/[0.04]">
+                  {filtered.map((item) => (
+                    <tr key={item.id} className="hover:bg-white/[0.025] transition-colors">
+                      <td className="px-5 py-3.5">
+                        <span className="font-extrabold text-white block truncate max-w-[220px]">
+                          {item.businessName || item.displayName || '—'}
+                        </span>
+                        <span className="text-[10px] text-slate-500 font-mono block" dir="ltr">
+                          {item.email || (isRtl ? 'بدون بريد' : 'No email')}
+                        </span>
+                        {item.role === 'founder' && (
+                          <span className="text-[10px] font-bold text-cyan-300">{isRtl ? 'المؤسس' : 'Founder'}</span>
+                        )}
+                      </td>
+                      <td className="px-5 py-3.5 text-center">
+                        <span
+                          className={`px-2.5 py-1 rounded-full font-bold text-[10px] border ${
+                            item.status === 'active'
+                              ? opsStatus.active
+                              : item.status === 'trial'
+                                ? opsStatus.trial
+                                : opsStatus.expired
+                          }`}
+                        >
+                          {item.status === 'active'
+                            ? isRtl
+                              ? 'مدفوع'
+                              : 'Paid'
+                            : item.status === 'trial'
+                              ? isRtl
+                                ? 'تجريبي'
+                                : 'Trial'
+                              : isRtl
+                                ? 'منتهٍ'
+                                : 'Expired'}
                         </span>
                       </td>
-                    )}
-                    {canGrace && (
                       <td className="px-5 py-3.5">
-                        <div className="flex flex-wrap items-center justify-center gap-1.5 max-w-xs mx-auto">
-                          {(canManage ? [7, 30, 90, 365] : [SUPPORT_GRACE_DAYS]).map((days) => (
-                            <button
-                              key={days}
-                              type="button"
-                              disabled={busyId === item.id}
-                              onClick={() => void run(item.id, 'extend', { days })}
-                              className={`${actionChip} bg-cyan-400/10 text-cyan-200 border-cyan-400/20 hover:bg-cyan-400/20`}
-                            >
-                              {canManage ? `+${days}` : isRtl ? `مهلة ${days} أيام` : `${days}-day grace`}
-                            </button>
-                          ))}
-                          {canManage && (
-                            <>
-                              <button
-                                type="button"
-                                disabled={busyId === item.id}
-                                onClick={() => void run(item.id, 'mark_paid')}
-                                className={`${actionChip} bg-emerald-400/10 text-emerald-200 border-emerald-400/20`}
-                              >
-                                {isRtl ? 'مدفوع' : 'Paid'}
-                              </button>
-                              <button
-                                type="button"
-                                disabled={busyId === item.id}
-                                onClick={() => {
-                                  if (
-                                    !window.confirm(
-                                      isRtl ? 'يبدأ هذا تجربة جديدة من 25 يوماً من اليوم.' : 'This starts a 25-day trial from today.',
-                                    )
-                                  )
-                                    return;
-                                  void run(item.id, 'set_trial');
-                                }}
-                                className={`${actionChip} bg-amber-400/10 text-amber-200 border-amber-400/20`}
-                              >
-                                {isRtl ? 'تجريبي' : 'Trial'}
-                              </button>
-                              <button
-                                type="button"
-                                disabled={busyId === item.id}
-                                onClick={() => {
-                                  if (
-                                    !window.confirm(
-                                      isRtl ? 'إنهاء الاشتراك يغلق حساب هذا العميل.' : 'Ending the subscription locks this customer out.',
-                                    )
-                                  )
-                                    return;
-                                  void run(item.id, 'expire');
-                                }}
-                                className={`${actionChip} bg-rose-400/10 text-rose-200 border-rose-400/20`}
-                              >
-                                {isRtl ? 'إنهاء' : 'End'}
-                              </button>
-                            </>
-                          )}
-                        </div>
+                        <span className="text-base font-black text-white tabular-nums">{item.daysRemaining}</span>
+                        <span className="text-[10px] text-slate-500 font-semibold mx-1">{isRtl ? 'يوماً' : 'days'}</span>
+                        {item.endsAt && (
+                          <div className="flex items-center gap-1 text-slate-400">
+                            <Calendar size={11} className="text-slate-500" />
+                            <span>
+                              {new Date(item.endsAt).toLocaleDateString(isRtl ? 'ar-EG' : 'en-US', {
+                                year: 'numeric',
+                                month: 'short',
+                                day: 'numeric',
+                              })}
+                            </span>
+                          </div>
+                        )}
                       </td>
-                    )}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                      {showAi && (
+                        <td className="px-5 py-3.5 text-center tabular-nums">
+                          <span className="font-black text-white">{item.aiToday ?? 0}</span>
+                          {aiDailyLimit !== null && <span className="text-slate-500">/{aiDailyLimit}</span>}
+                          <span className="block text-[10px] text-slate-500">
+                            {isRtl ? `${item.ai30d ?? 0} خلال 30 يوماً` : `${item.ai30d ?? 0} in 30 days`}
+                          </span>
+                        </td>
+                      )}
+                      {canGrace && (
+                        <td className="px-5 py-3.5">
+                          <div className="flex flex-wrap items-center justify-center gap-1.5 max-w-xs mx-auto">
+                            {(canManage ? [7, 30, 90, 365] : [SUPPORT_GRACE_DAYS]).map((days) => (
+                              <button
+                                key={days}
+                                type="button"
+                                disabled={busyId === item.id}
+                                onClick={() => void run(item.id, 'extend', { days })}
+                                className={`${actionChip} bg-cyan-400/10 text-cyan-200 border-cyan-400/20 hover:bg-cyan-400/20`}
+                              >
+                                {canManage ? `+${days}` : isRtl ? `مهلة ${days} أيام` : `${days}-day grace`}
+                              </button>
+                            ))}
+                            {canManage && (
+                              <>
+                                <button
+                                  type="button"
+                                  disabled={busyId === item.id}
+                                  onClick={() => void run(item.id, 'mark_paid')}
+                                  className={`${actionChip} bg-emerald-400/10 text-emerald-200 border-emerald-400/20`}
+                                >
+                                  {isRtl ? 'مدفوع' : 'Paid'}
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={busyId === item.id}
+                                  onClick={() => {
+                                    if (
+                                      !window.confirm(
+                                        isRtl ? 'يبدأ هذا تجربة جديدة من 25 يوماً من اليوم.' : 'This starts a 25-day trial from today.',
+                                      )
+                                    )
+                                      return;
+                                    void run(item.id, 'set_trial');
+                                  }}
+                                  className={`${actionChip} bg-amber-400/10 text-amber-200 border-amber-400/20`}
+                                >
+                                  {isRtl ? 'تجريبي' : 'Trial'}
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={busyId === item.id}
+                                  onClick={() => {
+                                    if (
+                                      !window.confirm(
+                                        isRtl ? 'إنهاء الاشتراك يغلق حساب هذا العميل.' : 'Ending the subscription locks this customer out.',
+                                      )
+                                    )
+                                      return;
+                                    void run(item.id, 'expire');
+                                  }}
+                                  className={`${actionChip} bg-rose-400/10 text-rose-200 border-rose-400/20`}
+                                >
+                                  {isRtl ? 'إنهاء' : 'End'}
+                                </button>
+                              </>
+                            )}
+                          </div>
+                        </td>
+                      )}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
         )}
       </div>
     </div>
@@ -544,7 +677,7 @@ function Metric({
         <span className={`text-[11px] font-extrabold tracking-wide ${tone}`}>{label}</span>
         <Icon size={16} className={tone} />
       </div>
-      <div className="relative mt-3 text-3xl font-black text-white tabular-nums tracking-tight">
+      <div className="relative mt-2 sm:mt-3 text-2xl sm:text-3xl font-black text-white tabular-nums tracking-tight">
         {loading ? <RefreshCw className="h-5 w-5 animate-spin text-slate-500 inline" /> : value}
       </div>
     </div>
