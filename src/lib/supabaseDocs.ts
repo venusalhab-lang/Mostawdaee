@@ -715,7 +715,8 @@ export async function runTransaction(_db: unknown, work: (transaction: any) => P
       throw wrapped;
     }
     if (!error) {
-      await applyCommitted(ops, uid);
+      // Unlock callers as soon as the server commit succeeds; refresh the local cache in the background.
+      void applyCommitted(ops, uid);
       return;
     }
     const wrapped = schemaError(error);

@@ -29,6 +29,7 @@ import {
   MonitorSmartphone,
   CalendarClock,
   Undo2,
+  Loader2,
 } from 'lucide-react';
 import { useFirebase } from './FirebaseProvider';
 import ReturnModal from './ReturnModal';
@@ -1408,7 +1409,7 @@ export default function POSSystem({ language }: POSSystemProps) {
       consumeInvoiceNumber(invoicePrefix, sessionUid, storeId);
       draftIdRef.current = null;
 
-      // Optional mirror to a third-party API (only when VITE_EXTERNAL_SALES_API is configured).
+      // Optional mirror to a third-party API — never block checkout confirmation on it.
       if (externalApi && posMode === 'sale') {
         const invoiceData = {
           id: Date.now(),
@@ -1423,14 +1424,14 @@ export default function POSSystem({ language }: POSSystemProps) {
           created_at: new Date().toISOString(),
           is_synced: false,
         };
-        try {
-          const response = await fetch(`${externalApi}/sales/store`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ ...invoiceData, is_synced: true }),
-          });
-          if (!response.ok) throw new Error(`external api ${response.status}`);
-        } catch (apiErr) {
+        void fetch(`${externalApi}/sales/store`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...invoiceData, is_synced: true }),
+        }).then((response) => {
+          if (response.ok) return;
+          throw new Error(`external api ${response.status}`);
+        }).catch((apiErr) => {
           console.warn('External API post failed; queued for background sync:', apiErr);
           try {
             const queued = JSON.parse(localStorage.getItem('offline_sales') || '[]');
@@ -1439,7 +1440,7 @@ export default function POSSystem({ language }: POSSystemProps) {
           } catch (storageErr) {
             console.error('Failed to queue external sale:', storageErr);
           }
-        }
+        });
       }
 
       // Only a sale that was actually saved may open the cash drawer; reprints never do.
@@ -2457,11 +2458,18 @@ export default function POSSystem({ language }: POSSystemProps) {
                 }
                 className="py-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-black transition-all flex items-center justify-center gap-1.5 text-xs shadow-lg shadow-emerald-500/20 cursor-pointer disabled:opacity-50"
               >
-                <span>
-                  {posMode === 'sale' && paymentMethod === 'cash' && selectedCustomerId && receivedAmount !== '' && parseFloat(receivedAmount) < grandTotal - 1e-6
-                    ? (isRtl ? 'نقد + آجل وطباعة' : 'Cash + credit & print')
-                    : (isRtl ? 'إتمام وطباعة [Enter]' : 'Pay & Print [Enter]')}
-                </span>
+                {isSubmitting ? (
+                  <>
+                    <Loader2 size={14} className="animate-spin" />
+                    <span>{isRtl ? 'جارٍ تأكيد البيع…' : 'Confirming sale…'}</span>
+                  </>
+                ) : (
+                  <span>
+                    {posMode === 'sale' && paymentMethod === 'cash' && selectedCustomerId && receivedAmount !== '' && parseFloat(receivedAmount) < grandTotal - 1e-6
+                      ? (isRtl ? 'نقد + آجل وطباعة' : 'Cash + credit & print')
+                      : (isRtl ? 'إتمام وطباعة [Enter]' : 'Pay & Print [Enter]')}
+                  </span>
+                )}
               </button>
             </div>
 
@@ -2703,13 +2711,14 @@ export default function POSSystem({ language }: POSSystemProps) {
       {/* Cash Payment Modal Helper */}
       <CashPaymentModal
         isOpen={showCashPaymentModal}
-        onClose={() => setShowCashPaymentModal(false)}
+        onClose={() => { if (!isSubmitting) setShowCashPaymentModal(false); }}
         totalAmount={grandTotal}
         currency={POS_SYMBOLS[activeCurrency] || activeCurrency}
         decimals={currencyDecimals(activeCurrency)}
         quickAmounts={QUICK_CASH[activeCurrency] || QUICK_CASH.USD}
         onConfirm={(received) => handleSubmitProcess(received, 'cash')}
         language={isRtl ? 'ar' : 'en'}
+        isSubmitting={isSubmitting}
       />
 
       {/* Free / service line — no inventory */}

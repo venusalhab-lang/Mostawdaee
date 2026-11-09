@@ -10,6 +10,7 @@ interface PaymentModalProps {
   decimals?: number;
   quickAmounts?: number[];
   language?: 'ar' | 'en';
+  isSubmitting?: boolean;
 }
 
 const LABELS = {
@@ -22,6 +23,7 @@ const LABELS = {
     change: 'الباقي للزبون',
     short: 'المبلغ المدخل غير كافٍ',
     confirm: 'تأكيد وإصدار الفاتورة',
+    confirming: 'جارٍ تأكيد البيع…',
   },
   en: {
     title: 'Cash payment',
@@ -32,12 +34,13 @@ const LABELS = {
     change: 'Change due',
     short: 'Amount entered is not enough',
     confirm: 'Confirm and issue invoice',
+    confirming: 'Confirming sale…',
   },
 };
 
 const FULL_AMOUNT = 'full';
 
-export default function CashPaymentModal({ isOpen, onClose, totalAmount, currency = '₪', onConfirm, decimals = 2, quickAmounts: quickList = [50, 100, 200], language = 'ar' }: PaymentModalProps) {
+export default function CashPaymentModal({ isOpen, onClose, totalAmount, currency = '₪', onConfirm, decimals = 2, quickAmounts: quickList = [50, 100, 200], language = 'ar', isSubmitting = false }: PaymentModalProps) {
   const l = LABELS[language];
   const [receivedAmount, setReceivedAmount] = useState<string>('');
   const inputRef = useRef<HTMLInputElement>(null);
@@ -114,11 +117,12 @@ export default function CashPaymentModal({ isOpen, onClose, totalAmount, currenc
                 value={receivedAmount}
                 onChange={(e) => setReceivedAmount(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === 'Enter' && isSufficient && received > 0) {
+                  if (e.key === 'Enter' && isSufficient && received > 0 && !isSubmitting) {
                     onConfirm(received);
                   }
                 }}
-                className="w-full text-center text-3xl font-mono font-bold bg-slate-100 dark:bg-white/5 border-2 border-slate-200 dark:border-white/10 focus:border-blue-500 dark:focus:border-blue-500 rounded-xl px-4 py-3 outline-none transition-all text-slate-900 dark:text-white"
+                disabled={isSubmitting}
+                className="w-full text-center text-3xl font-mono font-bold bg-slate-100 dark:bg-white/5 border-2 border-slate-200 dark:border-white/10 focus:border-blue-500 dark:focus:border-blue-500 rounded-xl px-4 py-3 outline-none transition-all text-slate-900 dark:text-white disabled:opacity-60"
                 placeholder="0.00"
               />
             </div>
@@ -153,11 +157,18 @@ export default function CashPaymentModal({ isOpen, onClose, totalAmount, currenc
         <div className="px-6 py-4 border-t border-slate-100 dark:border-white/5 bg-slate-50 dark:bg-white/[0.02]">
           <button
             type="button"
-            onClick={() => onConfirm(received)}
-            disabled={!isSufficient || received === 0}
+            onClick={() => { if (!isSubmitting) onConfirm(received); }}
+            disabled={!isSufficient || received === 0 || isSubmitting}
             className="w-full py-4 rounded-xl font-bold text-lg text-white bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 dark:disabled:bg-slate-700/50 disabled:text-slate-500 disabled:cursor-not-allowed transition-all flex items-center justify-center gap-2 shadow-lg shadow-blue-600/30 disabled:shadow-none active:scale-[0.98] cursor-pointer"
           >
-            🖨️ {l.confirm}
+            {isSubmitting ? (
+              <>
+                <span className="inline-block w-5 h-5 rounded-full border-2 border-white/80 border-t-transparent animate-spin" />
+                {l.confirming}
+              </>
+            ) : (
+              <>🖨️ {l.confirm}</>
+            )}
           </button>
         </div>
       </div>

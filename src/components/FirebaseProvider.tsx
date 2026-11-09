@@ -577,35 +577,50 @@ async function commitInvoiceOnce(uid: string, requested: Invoice, opts: CommitIn
   await runTransaction(db, async (transaction) => {
     result = { status: 'saved', negativeStock: [], invoiceNumber: requested.invoiceNumber };
     const invoiceRef = doc(db, 'users', uid, 'invoices', requested.id);
-    const existing = await transaction.get(invoiceRef);
+    const vaultStateRef = doc(db, 'users', uid, 'settings', 'vault');
+    // Prefetch invoice + vault + stock (+ claim/customer/supplier) in one batched round-trip.
+    const qtyByProduct = quantitiesByProduct(requested.items);
+    const productEntries = [...qtyByProduct.entries()];
+    const productRefs = productEntries.map(([productId]) => doc(db, 'users', uid, 'inventory', productId));
+    const claimRef = claim
+      ? doc(db, 'users', uid, 'invoice_numbers', encodeURIComponent(requested.invoiceNumber))
+      : null;
+    const customerRefEarly = requested.type === 'sale' && requested.paymentMethod === 'credit' && requested.customerId
+      ? doc(db, 'users', uid, 'customers', requested.customerId)
+      : null;
+    const supplierRefEarly = requested.type === 'purchase' && requested.paymentMethod === 'credit' && requested.supplierId
+      ? doc(db, 'users', uid, 'suppliers', requested.supplierId)
+      : null;
+    const prefetched = await transaction.getMany([
+      invoiceRef,
+      vaultStateRef,
+      ...productRefs,
+      ...(claimRef ? [claimRef] : []),
+      ...(customerRefEarly ? [customerRefEarly] : []),
+      ...(supplierRefEarly ? [supplierRefEarly] : []),
+    ]);
+    const existing = prefetched[0];
+    const vaultSnap = prefetched[1];
+    const productSnaps = prefetched.slice(2, 2 + productRefs.length);
     if (existing.exists()) {
       const stored = existing.data() as Invoice;
       result = { status: 'duplicate', negativeStock: [], invoiceNumber: stored?.invoiceNumber || requested.invoiceNumber };
       return;
     }
+    // claimInvoiceNumber reuses the prefetched first candidate from the transaction read cache.
     const invoice: Invoice = claim
       ? { ...requested, invoiceNumber: await claimInvoiceNumber(transaction, uid, requested) }
       : requested;
     result.invoiceNumber = invoice.invoiceNumber;
 
-    const vaultStateRef = doc(db, 'users', uid, 'settings', 'vault');
-    const vaultSnap = await transaction.get(vaultStateRef);
     const currentVaultData = vaultSnap.exists() ? vaultSnap.data() : {};
 
-    // One stock check per product, even if it appears on several lines.
-    const qtyByProduct = quantitiesByProduct(invoice.items);
     const productsRead = new Map<string, Product>();
     const costChanges: NonNullable<Invoice['costChanges']> = {};
     // An invoice-level discount on a purchase lowers what each line really cost, in proportion to the line.
     const linesTotal = invoice.items.reduce((sum, i) => sum + (Number(i.total) || 0), 0);
     const purchaseDiscount = invoice.type === 'purchase' ? Math.min(Math.max(Number(invoice.discount) || 0, 0), linesTotal) : 0;
     const costScale = purchaseDiscount > 0 && linesTotal > 0 ? (linesTotal - purchaseDiscount) / linesTotal : 1;
-    const productEntries = [...qtyByProduct.entries()];
-    const productRefs = productEntries.map(([productId]) => doc(db, 'users', uid, 'inventory', productId));
-    // Batched OCC reads — one round-trip for the whole cart instead of one per SKU.
-    const productSnaps = productRefs.length
-      ? await transaction.getMany(productRefs)
-      : [];
     for (let i = 0; i < productEntries.length; i += 1) {
       const [productId, { qty: movedQty, description }] = productEntries[i];
       const productRef = productRefs[i];
