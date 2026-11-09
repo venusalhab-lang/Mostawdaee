@@ -90,7 +90,7 @@ export default function PremiumUpgradeModal({
 
     setProcessing(true);
     try {
-      initializeBilling(
+      await initializeBilling(
         async (tx) => {
           setProcessing(true);
           try {

@@ -6,7 +6,8 @@ import { Capacitor } from '@capacitor/core';
  * - Phone builds: must be absolute — the WebView has no Vercel `/api` rewrite.
  *   Prefer `VITE_API_BASE_URL` at build time; otherwise fall back to production.
  */
-export const DEFAULT_NATIVE_API_BASE = 'https://mostawdaee.com';
+/** Prefer www — apex mostawdaee.com 308-redirects here; native POST should not depend on redirect following. */
+export const DEFAULT_NATIVE_API_BASE = 'https://www.mostawdaee.com';
 
 /** Pure resolver — used by getApiBase and unit tests. */
 export function resolveApiBase(opts: { envBase?: string | null; native?: boolean }): string {

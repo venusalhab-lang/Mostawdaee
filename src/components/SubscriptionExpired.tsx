@@ -61,27 +61,27 @@ export default function SubscriptionExpired({ language, onLanguageToggle, reason
   const buy = async () => {
     sounds.playClick();
     setBusy('buy');
-    initializeBilling(
-      async (tx) => {
-        setBusy('buy');
-        try {
-          await activatePaidSubscription(tx);
-          toast.success(isRtl ? 'تم تفعيل اشتراكك.' : 'Your subscription is active.');
-          sounds.playSuccess();
-          await onRefresh();
-        } catch (err) {
-          toast.error((isRtl ? 'لم يُفعَّل الاشتراك بعد: ' : 'Subscription not activated yet: ') + (err instanceof Error ? err.message : ''));
-          throw err; // keeps the Google Play purchase pending so activation is retried
-        } finally {
-          setBusy(null);
-        }
-      },
-      (message) => {
-        toast.error((isRtl ? 'خطأ Google Play: ' : 'Google Play error: ') + message);
-        setBusy(null);
-      },
-    );
     try {
+      await initializeBilling(
+        async (tx) => {
+          setBusy('buy');
+          try {
+            await activatePaidSubscription(tx);
+            toast.success(isRtl ? 'تم تفعيل اشتراكك.' : 'Your subscription is active.');
+            sounds.playSuccess();
+            await onRefresh();
+          } catch (err) {
+            toast.error((isRtl ? 'لم يُفعَّل الاشتراك بعد: ' : 'Subscription not activated yet: ') + (err instanceof Error ? err.message : ''));
+            throw err; // keeps the Google Play purchase pending so activation is retried
+          } finally {
+            setBusy(null);
+          }
+        },
+        (message) => {
+          toast.error((isRtl ? 'خطأ Google Play: ' : 'Google Play error: ') + message);
+          setBusy(null);
+        },
+      );
       await makePurchase(PRODUCT_ID);
     } catch (err: any) {
       toast.error(err?.message || (isRtl ? 'تعذّر بدء الشراء' : 'Could not start the purchase'));
