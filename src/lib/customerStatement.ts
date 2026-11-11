@@ -199,6 +199,115 @@ export function sumStatementByType(
   return { invoices, payments, returns };
 }
 
+export type DebtStatus = 'paid' | 'partial' | 'open';
+
+/** How much of one debt entry (credit sale, opening balance or manual adjustment) is still owed. */
+export interface DebtAllocation {
+  txId: string;
+  invoiceId?: string;
+  date: number;
+  amount: number;
+  settled: number;
+  remaining: number;
+  status: DebtStatus;
+}
+
+export interface CustomerDebtAllocation {
+  /** Oldest first. */
+  debts: DebtAllocation[];
+  byTxId: Map<string, DebtAllocation>;
+  /** Sum of what is still owed on the debts. */
+  outstanding: number;
+  /** Credits with no debt left to settle. */
+  unapplied: number;
+}
+
+const debtStatus = (amount: number, remaining: number): DebtStatus =>
+  remaining <= 0 ? 'paid' : remaining < amount ? 'partial' : 'open';
+
+/**
+ * Settles the customer's debts from their credits, oldest debt first. A sales return settles the sale it returns before
+ * anything else. Derived from the ledger on every render, never stored, so it cannot drift from the transactions.
+ * Only entries in the customer's currency take part.
+ */
+export function allocateCustomerDebt(
+  txs: CustomerTransaction[],
+  customerId: string,
+  currency: string,
+  invoices: Invoice[] = [],
+): CustomerDebtAllocation {
+  const round = (v: number) => roundMoney(v, currency);
+  const returnOf = new Map(invoices.filter((i) => i.type === 'return' && i.returnOf).map((i) => [i.id, i.returnOf!]));
+  const mine = txs
+    .filter((tx) => tx && tx.customerId === customerId && (tx.currency || currency) === currency)
+    .sort((a, b) => txTime(a) - txTime(b) || (a.type === b.type ? 0 : a.type === 'invoice' ? -1 : 1));
+
+  const debts: DebtAllocation[] = [];
+  let unapplied = 0;
+  const settle = (debt: DebtAllocation, available: number) => {
+    const applied = Math.min(debt.remaining, available);
+    debt.settled = round(debt.settled + applied);
+    debt.remaining = round(debt.amount - debt.settled);
+    return round(available - applied);
+  };
+
+  for (const tx of mine) {
+    const amount = round(Math.abs(Number(tx.amount) || 0));
+    if (amount <= 0) continue;
+    if (tx.type === 'invoice') {
+      const debt: DebtAllocation = {
+        txId: tx.id, invoiceId: tx.invoiceId, date: txTime(tx), amount, settled: 0, remaining: amount, status: 'open',
+      };
+      if (unapplied > 0) unapplied = settle(debt, unapplied);
+      debts.push(debt);
+      continue;
+    }
+    let left = amount;
+    const target = tx.invoiceId ? (returnOf.get(tx.invoiceId) ?? tx.invoiceId) : undefined;
+    const own = target ? debts.find((d) => d.invoiceId === target && d.remaining > 0) : undefined;
+    if (own) left = settle(own, left);
+    for (const debt of debts) {
+      if (left <= 0) break;
+      if (debt.remaining > 0) left = settle(debt, left);
+    }
+    unapplied = round(unapplied + left);
+  }
+
+  for (const debt of debts) debt.status = debtStatus(debt.amount, debt.remaining);
+  return {
+    debts,
+    byTxId: new Map(debts.map((d) => [d.txId, d])),
+    outstanding: round(debts.reduce((sum, d) => sum + d.remaining, 0)),
+    unapplied: round(unapplied),
+  };
+}
+
+/** What a payment of `amount` would settle, oldest open debt first. */
+export function previewPayment(
+  allocation: CustomerDebtAllocation,
+  amount: number,
+  currency: string,
+): { debt: DebtAllocation; applied: number; remainingAfter: number; status: DebtStatus }[] {
+  let left = roundMoney(Math.max(0, Number(amount) || 0), currency);
+  const out: { debt: DebtAllocation; applied: number; remainingAfter: number; status: DebtStatus }[] = [];
+  for (const debt of allocation.debts) {
+    if (left <= 0) break;
+    if (debt.remaining <= 0) continue;
+    const applied = Math.min(debt.remaining, left);
+    const remainingAfter = roundMoney(debt.remaining - applied, currency);
+    left = roundMoney(left - applied, currency);
+    out.push({ debt, applied, remainingAfter, status: debtStatus(debt.amount, remainingAfter) });
+  }
+  return out;
+}
+
+export function debtStatusLabel(debt: Pick<DebtAllocation, 'status' | 'remaining'>, currency: string, isRtl: boolean): string {
+  if (debt.status === 'paid') return isRtl ? 'مسددة' : 'Paid';
+  if (debt.status === 'open') return isRtl ? 'غير مسددة' : 'Unpaid';
+  const left = formatMoney(debt.remaining, currency, 'en-US');
+  return isRtl ? `مسددة جزئيًا · بقي ${left}` : `Partly paid · ${left} left`;
+}
+
 /** WhatsApp-friendly statement. Caps length so the deep link still opens. */
 export function buildWhatsAppStatement(opts: {
   customer: Customer;
@@ -208,10 +317,11 @@ export function buildWhatsAppStatement(opts: {
   isRtl: boolean;
   isReturnCredit: (tx: CustomerTransaction) => boolean;
   invoices: Invoice[];
+  allocation?: CustomerDebtAllocation;
   maxChars?: number;
 }): string {
   const {
-    customer, txs, period, businessName, isRtl, isReturnCredit, invoices, maxChars = 3500,
+    customer, txs, period, businessName, isRtl, isReturnCredit, invoices, allocation, maxChars = 3500,
   } = opts;
   const locale = isRtl ? 'ar' : 'en-US';
   const currency = customer.currency || 'JOD';
@@ -258,6 +368,8 @@ export function buildWhatsAppStatement(opts: {
         const detail = statementLineDetail(tx, invoices, isRtl);
         if (detail) row += `\n  ${detail}`;
       }
+      const debt = tx.type === 'invoice' ? allocation?.byTxId.get(tx.id) : undefined;
+      if (debt) row += `\n  ${isRtl ? 'الحالة' : 'Status'}: ${debtStatusLabel(debt, tx.currency || currency, isRtl)}`;
       row += `\n  ${isRtl ? 'الرصيد بعد الحركة' : 'Balance after'}: ${formatMoney(Number(tx.remainingBalanceAfter) || 0, tx.currency || currency, 'en-US')}`;
       rows.push(row);
     }

@@ -8,7 +8,50 @@ import {
   statementLineDetail,
   statementPeriod,
   sumStatementByType,
+  allocateCustomerDebt,
+  previewPayment,
+  debtStatusLabel,
 } from '../customerStatement';
+
+describe('allocateCustomerDebt', () => {
+  const d = (id: string, day: number, amount: number, invoiceId?: string) => tx({
+    id, type: 'invoice', amount, invoiceId, date: `2026-03-${String(day).padStart(2, '0')}T10:00:00.000Z`,
+  });
+  const p = (id: string, day: number, amount: number, invoiceId?: string) => tx({
+    id, type: 'payment', amount, invoiceId, date: `2026-03-${String(day).padStart(2, '0')}T10:00:00.000Z`,
+  });
+
+  it('settles a partial payment against the oldest debts first', () => {
+    const a = allocateCustomerDebt([d('a', 1, 600, 's1'), d('b', 2, 400, 's2'), p('x', 3, 700)], 'c1', 'ILS');
+    expect(a.debts.map((x) => [x.txId, x.status, x.remaining])).toEqual([['a', 'paid', 0], ['b', 'partial', 300]]);
+    expect(a.outstanding).toBe(300);
+    expect(a.unapplied).toBe(0);
+    expect(debtStatusLabel(a.byTxId.get('b')!, 'ILS', true)).toContain('بقي');
+  });
+
+  it('applies a sales return to the sale it returns before older debts', () => {
+    const invoices = [{ id: 'r1', type: 'return', returnOf: 's2' } as Invoice];
+    const a = allocateCustomerDebt([d('a', 1, 100, 's1'), d('b', 2, 50, 's2'), p('ret', 3, 50, 'r1')], 'c1', 'ILS', invoices);
+    expect(a.byTxId.get('a')!.status).toBe('open');
+    expect(a.byTxId.get('b')!.status).toBe('paid');
+  });
+
+  it('carries leftover credit into a later debt and ignores other currencies', () => {
+    const a = allocateCustomerDebt([
+      d('a', 1, 100), p('x', 2, 130), d('b', 3, 50), tx({ id: 'usd', amount: 999, currency: 'USD' }),
+    ], 'c1', 'ILS');
+    expect(a.byTxId.get('b')!.remaining).toBe(20);
+    expect(a.outstanding).toBe(20);
+    expect(a.byTxId.has('usd')).toBe(false);
+  });
+
+  it('previews which debts a payment closes', () => {
+    const a = allocateCustomerDebt([d('a', 1, 600), d('b', 2, 400)], 'c1', 'ILS');
+    const preview = previewPayment(a, 700, 'ILS');
+    expect(preview.map((l) => [l.debt.txId, l.applied, l.remainingAfter, l.status]))
+      .toEqual([['a', 600, 0, 'paid'], ['b', 100, 300, 'partial']]);
+  });
+});
 
 const customer: Customer = {
   id: 'c1', customerId: 'c1', name: 'أبو أحمد', phone: '0599', createdAt: '', totalDebt: 150, currency: 'ILS',

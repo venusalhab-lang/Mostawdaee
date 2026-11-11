@@ -49,6 +49,11 @@ import {
   statementLineDetail,
   statementPeriod,
   sumStatementByType,
+  allocateCustomerDebt,
+  debtStatusLabel,
+  previewPayment,
+  type CustomerDebtAllocation,
+  type DebtAllocation,
   type StatementItemRow,
   type StatementPeriodPreset,
 } from '../lib/customerStatement';
@@ -57,6 +62,14 @@ import { requestPosSale } from '../lib/posIntent';
 interface Props {
   language: Language;
   settings: AppSettings;
+}
+
+/** Per-entry statuses are shown only when they add up to the stored balance. */
+function allocationMismatch(allocation: CustomerDebtAllocation | null, customer: Customer | null): boolean {
+  if (!allocation || !customer) return false;
+  const currency = customer.currency || 'JOD';
+  return Math.abs(allocation.outstanding - (Number(customer.totalDebt) || 0)) >= 10 ** -currencyDecimals(currency)
+    || allocation.unapplied > 0;
 }
 
 export default function CustomerManagement({ language, settings }: Props) {
@@ -192,6 +205,10 @@ export default function CustomerManagement({ language, settings }: Props) {
         isRtl,
         isReturnCredit,
         invoices,
+        allocation: (() => {
+          const allocation = allocateCustomerDebt(customerTransactions, customer.id, customer.currency || 'JOD', invoices);
+          return allocationMismatch(allocation, customer) ? undefined : allocation;
+        })(),
       });
     } else {
       return isRtl 
@@ -242,6 +259,17 @@ export default function CustomerManagement({ language, settings }: Props) {
   }, [selectedLedgerCustomer, invoices, activeLedgerPeriod, isRtl, ledgerSearchQuery]);
   const ledgerItemTotals = React.useMemo(() => purchaseTotalsByCurrency(ledgerItemRows), [ledgerItemRows]);
   const invoiceById = React.useMemo(() => new Map(invoices.map((inv) => [inv.id, inv])), [invoices]);
+  const ledgerAllocation = React.useMemo(() => (selectedLedgerCustomer
+    ? allocateCustomerDebt(customerTransactions, selectedLedgerCustomer.id, selectedLedgerCustomer.currency || 'JOD', invoices)
+    : null), [selectedLedgerCustomer, customerTransactions, invoices]);
+  const payAllocation = React.useMemo(() => (selectedCustomer && isPayModalOpen && debtAction === 'subtract'
+    ? allocateCustomerDebt(customerTransactions, selectedCustomer.id, selectedCustomer.currency || 'JOD', invoices)
+    : null), [selectedCustomer, isPayModalOpen, debtAction, customerTransactions, invoices]);
+  const debtRef = (debt: DebtAllocation) => {
+    const number = debt.invoiceId ? invoiceById.get(debt.invoiceId)?.invoiceNumber : undefined;
+    return number ? `#${number}` : `${isRtl ? 'قيد' : 'Entry'} ${fmtDate(debt.date)}`;
+  };
+  const ledgerStatuses = ledgerAllocation && !allocationMismatch(ledgerAllocation, selectedLedgerCustomer) ? ledgerAllocation : null;
 
   const tableLocale = isRtl ? 'ar-u-nu-latn' : 'en-GB';
   const fmtDate = (ms: number) => (Number.isFinite(ms)
@@ -309,6 +337,7 @@ export default function CustomerManagement({ language, settings }: Props) {
         const inv = tx.invoiceId ? invoiceById.get(tx.invoiceId) : undefined;
         const items = inv ? invoiceItemRows(inv, isRtl) : [];
         const detail = items.length ? '' : statementLineDetail(tx, invoices, isRtl);
+        const debt = tx.type === 'invoice' ? ledgerStatuses?.byTxId.get(tx.id) : undefined;
         const itemRows = items.map((row) => `
           <tr class="item">
             <td colspan="3"></td>
@@ -322,7 +351,7 @@ export default function CustomerManagement({ language, settings }: Props) {
           <tr class="mv">
             <td class="num">${escapeHtml(fmtDate(t))}</td>
             <td class="num">${escapeHtml(fmtTime(t))}</td>
-            <td>${escapeHtml(kindLabel(tx))}${inv?.invoiceNumber ? `<div class="sku">#${escapeHtml(inv.invoiceNumber)}</div>` : ''}</td>
+            <td>${escapeHtml(kindLabel(tx))}${inv?.invoiceNumber ? `<div class="sku">#${escapeHtml(inv.invoiceNumber)}</div>` : ''}${debt ? `<div class="st st-${debt.status}">${escapeHtml(debtStatusLabel(debt, tx.currency || currency, isRtl))}</div>` : ''}</td>
             <td colspan="4">${escapeHtml(detail)}</td>
             <td class="amt" style="color:${tx.type === 'payment' ? '#059669' : '#dc2626'}"><b>${tx.type === 'payment' ? '−' : '+'}${money(Number(tx.amount) || 0, tx.currency || currency)}</b></td>
             <td class="amt"><b>${money(Number(tx.remainingBalanceAfter) || 0, tx.currency || currency)}</b></td>
@@ -356,6 +385,8 @@ export default function CustomerManagement({ language, settings }: Props) {
             .amt { text-align: ${end}; white-space: nowrap; font-variant-numeric: tabular-nums; }
             .num { white-space: nowrap; font-variant-numeric: tabular-nums; }
             .sku { font-size: 9px; color: #64748b; font-family: monospace; }
+            .st { font-size: 9px; font-weight: 800; margin-top: 2px; }
+            .st-paid { color: #059669; } .st-partial { color: #b45309; } .st-open { color: #dc2626; }
             tr.mv td { background: #fff; }
             tr.item td { background: #f8fafc; color: #334155; border-top-color: #e2e8f0; }
             tr.ret td { background: #ecfdf5; }
@@ -1159,6 +1190,40 @@ export default function CustomerManagement({ language, settings }: Props) {
                   </div>
                 </div>
 
+                {payAllocation && debtAmount > 0 && (() => {
+                  const currency = selectedCustomer.currency || 'JOD';
+                  const current = roundMoney(Number(selectedCustomer.totalDebt) || 0, currency);
+                  const after = roundMoney(current - debtAmount, currency);
+                  if (after < 0) {
+                    return (
+                      <p className="text-xs font-bold text-rose-600 dark:text-rose-400">
+                        {isRtl ? 'المبلغ أكبر من الدين الحالي.' : 'The amount is more than the current debt.'}
+                      </p>
+                    );
+                  }
+                  const lines = allocationMismatch(payAllocation, selectedCustomer) ? [] : previewPayment(payAllocation, debtAmount, currency);
+                  return (
+                    <div className="rounded-2xl border border-emerald-100 dark:border-emerald-900/40 bg-emerald-50/50 dark:bg-emerald-950/20 p-3 space-y-2 text-xs">
+                      <div className="flex justify-between font-bold text-gray-700 dark:text-gray-200">
+                        <span>{isRtl ? 'المتبقي بعد الدفعة' : 'Left after this payment'}</span>
+                        <span className="font-mono font-black text-emerald-700 dark:text-emerald-400">{formatMoney(after, currency, 'en-US')}</span>
+                      </div>
+                      {lines.length > 0 && (
+                        <ul className="space-y-1 border-t border-emerald-100 dark:border-emerald-900/40 pt-2">
+                          {lines.map(({ debt, applied, remainingAfter, status }) => (
+                            <li key={debt.txId} className="flex justify-between gap-2 text-[11px] text-gray-600 dark:text-gray-300 tabular-nums">
+                              <span className="truncate">{debtRef(debt)} · {isRtl ? 'يُسدَّد' : 'pays'} {formatMoney(applied, currency, 'en-US')}</span>
+                              <span className={`shrink-0 font-bold ${status === 'paid' ? 'text-emerald-700 dark:text-emerald-400' : 'text-amber-700 dark:text-amber-300'}`}>
+                                {debtStatusLabel({ status, remaining: remainingAfter }, currency, isRtl)}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  );
+                })()}
+
                 {/* Note / audit reason */}
                 <div className="space-y-1">
                   <label className="text-xs font-black text-gray-400 uppercase tracking-wider">
@@ -1652,12 +1717,20 @@ export default function CustomerManagement({ language, settings }: Props) {
                     <p className="text-[10px] text-gray-400 font-bold uppercase tracking-wider">
                       {isRtl ? 'الحركات مرتبة من الأقدم إلى الأحدث (مناسبة لتصفية الشهر)' : 'Movements oldest → newest (for monthly settlement)'}
                     </p>
+                    {ledgerAllocation && <OpenDebtsStrip
+                      allocation={ledgerAllocation}
+                      currency={selectedLedgerCustomer.currency || 'JOD'}
+                      isRtl={isRtl}
+                      refOf={debtRef}
+                      mismatch={allocationMismatch(ledgerAllocation, selectedLedgerCustomer)}
+                    />}
                     <div className="space-y-3">
                       {ledgerTxs.map((tx) => {
                           const isPayment = tx.type === 'payment';
                           const inv = tx.invoiceId ? invoiceById.get(tx.invoiceId) : undefined;
                           const itemRows = inv ? invoiceItemRows(inv, isRtl) : [];
                           const detail = itemRows.length ? '' : statementLineDetail(tx, invoices, isRtl);
+                          const debt = isPayment ? undefined : ledgerStatuses?.byTxId.get(tx.id);
                           return (
                             <div
                               key={tx.id}
@@ -1681,6 +1754,17 @@ export default function CustomerManagement({ language, settings }: Props) {
                                     <span className="font-mono text-[9px] px-1.5 py-0.5 rounded bg-teal-950/40 text-teal-400 font-bold uppercase select-all">
                                       #{tx.transactionId || tx.id}
                                     </span>
+                                    {debt && (
+                                      <span className={`text-[10px] px-2 py-0.5 rounded-full font-black border ${
+                                        debt.status === 'paid'
+                                          ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                                          : debt.status === 'partial'
+                                            ? 'bg-amber-500/10 border-amber-500/30 text-amber-300'
+                                            : 'bg-rose-500/10 border-rose-500/30 text-rose-300'
+                                      }`}>
+                                        {debtStatusLabel(debt, tx.currency || selectedLedgerCustomer.currency || 'JOD', isRtl)}
+                                      </span>
+                                    )}
                                   </div>
                                   {inv?.invoiceNumber ? (
                                     <p className="text-[11px] text-slate-300 font-bold">
@@ -1757,6 +1841,51 @@ export default function CustomerManagement({ language, settings }: Props) {
         )}
       </AnimatePresence>
 
+    </div>
+  );
+}
+
+function OpenDebtsStrip({ allocation, currency, isRtl, refOf, mismatch }: {
+  allocation: CustomerDebtAllocation;
+  currency: string;
+  isRtl: boolean;
+  refOf: (debt: DebtAllocation) => string;
+  mismatch: boolean;
+}) {
+  const open = mismatch ? [] : allocation.debts.filter((d) => d.remaining > 0);
+  if (open.length === 0 && !mismatch) return null;
+  return (
+    <div className="rounded-2xl border border-amber-500/20 bg-amber-500/[0.06] p-3 space-y-2">
+      {open.length > 0 && (
+        <>
+          <p className="text-[11px] font-black text-amber-200">
+            {isRtl
+              ? `غير المسدد (${open.length}) — الدفعات تُخصم من الأقدم أولًا`
+              : `Unpaid (${open.length}) — payments settle the oldest first`}
+          </p>
+          <div className="flex flex-wrap gap-1.5">
+            {open.map((debt) => (
+              <span
+                key={debt.txId}
+                className={`text-[10px] font-bold px-2 py-1 rounded-lg border tabular-nums ${
+                  debt.status === 'partial'
+                    ? 'border-amber-500/30 bg-amber-500/10 text-amber-200'
+                    : 'border-rose-500/30 bg-rose-500/10 text-rose-200'
+                }`}
+              >
+                {refOf(debt)} · {isRtl ? 'بقي' : 'left'} {formatMoney(debt.remaining, currency, 'en-US')}
+              </span>
+            ))}
+          </div>
+        </>
+      )}
+      {mismatch && (
+        <p className="text-[10px] font-bold text-amber-300/90">
+          {isRtl
+            ? 'حالة كل فاتورة غير معروضة: مجموع الحركات المسجلة لا يطابق رصيد الزبون (قد تكون حركات قديمة بعملة أخرى أو ناقصة). الرصيد المعروض أعلاه هو المعتمد.'
+            : 'Per-invoice status is hidden: the recorded movements do not add up to the customer balance (older entries may be missing or in another currency). The balance shown above is authoritative.'}
+        </p>
+      )}
     </div>
   );
 }
