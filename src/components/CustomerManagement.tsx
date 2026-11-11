@@ -19,9 +19,12 @@ import {
   ArrowUp,
   ArrowDown,
   Share2,
-  Loader2
+  Loader2,
+  ShoppingCart,
+  Package,
+  ListOrdered
 } from 'lucide-react';
-import { Language, Customer, CustomerTransaction, AppSettings, Currency } from '../types';
+import { Language, Customer, CustomerTransaction, AppSettings, Currency, Invoice } from '../types';
 import { motion, AnimatePresence } from 'motion/react';
 import { useFirebase } from './FirebaseProvider';
 import { CURRENCY_SYMBOLS, POS_CURRENCY_CODES, currencyDecimals, formatAmount, formatMoney, roundMoney } from '../lib/exchangeRates';
@@ -36,6 +39,20 @@ import { toast } from 'sonner';
 import { escapeHtml } from '../lib/invoiceDocument';
 import { printHtmlDocument } from '../lib/printHtml';
 import { checkManualArIncrease, MANUAL_AR_REASON_MIN } from '../lib/customerLedger';
+import {
+  buildWhatsAppStatement,
+  customerPurchaseRows,
+  filterCustomerStatement,
+  invoiceItemRows,
+  periodLabel,
+  purchaseTotalsByCurrency,
+  statementLineDetail,
+  statementPeriod,
+  sumStatementByType,
+  type StatementItemRow,
+  type StatementPeriodPreset,
+} from '../lib/customerStatement';
+import { requestPosSale } from '../lib/posIntent';
 
 interface Props {
   language: Language;
@@ -56,7 +73,10 @@ export default function CustomerManagement({ language, settings }: Props) {
   } = useFirebase();
   const returnIds = React.useMemo(() => new Set(invoices.filter((i) => i.type === 'return').map((i) => i.id)), [invoices]);
   /** A sales return lowers the debt like a payment, but no money was received. */
-  const isReturnCredit = (tx: CustomerTransaction) => tx.type === 'payment' && !!tx.invoiceId && returnIds.has(tx.invoiceId);
+  const isReturnCredit = React.useCallback(
+    (tx: CustomerTransaction) => tx.type === 'payment' && !!tx.invoiceId && returnIds.has(tx.invoiceId),
+    [returnIds],
+  );
 
   // Dialog & Form State
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -71,13 +91,19 @@ export default function CustomerManagement({ language, settings }: Props) {
   // Search & Filter state
   const [searchQuery, setSearchQuery] = useState('');
   const [ledgerSearchQuery, setLedgerSearchQuery] = useState('');
+  const [ledgerPeriodPreset, setLedgerPeriodPreset] = useState<StatementPeriodPreset>('this_month');
+  const [ledgerFromDate, setLedgerFromDate] = useState('');
+  const [ledgerToDate, setLedgerToDate] = useState('');
+  const [ledgerView, setLedgerView] = useState<'movements' | 'items'>('movements');
   const [currencyFilter, setCurrencyFilter] = useState<'ALL' | Currency>('ALL');
   const [debtFilter, setDebtFilter] = useState<'ALL' | 'HAS_DEBT' | 'CLEAR'>('ALL');
 
-  useScreenSearch('customers', ({ query }) => {
+  useScreenSearch('customers', ({ query, recordId }) => {
     setCurrencyFilter('ALL');
     setDebtFilter('ALL');
     setSearchQuery(query);
+    const target = recordId ? customers.find((c) => c.id === recordId) : undefined;
+    if (target) openStatement(target);
   });
 
   // New/Edit Customer form
@@ -156,60 +182,17 @@ export default function CustomerManagement({ language, settings }: Props) {
         ? `السلام عليكم ورحمة الله، الأستاذ/ة ${customer.name}. نأمل أن تكونوا بخير. تذكير لطيف بالرصيد المترتب على حسابكم الكريم: بقيمة ${formattedAmount}. نشكر تعاونكم الدائم وثقتكم بنا.`
         : `Hello ${customer.name}. We hope you are doing well. This is a gentle reminder regarding your outstanding balance of ${formattedAmount}. Thank you for your continued business.`;
     } else if (type === 'statement') {
-      // Retrieve top 5 recent customer transactions for detailed mini-ledger
-      const recentTx = customerTransactions
-        .filter(tx => tx.customerId === customer.id)
-        .slice(0, 5);
-
-      if (isRtl) {
-        let message = sender ? `*كشف حساب - ${sender}*\n\n` : `*كشف حساب*\n\n`;
-        message += `المحترم/ة: *${customer.name}*\n`;
-        message += `تحية طيبة وبعد، إليكم ملخص حسابكم الحالي حتى تاريخ اليوم:\n\n`;
-        message += `📊 *إجمالي الدين المستحق:* *${formatMoney(customer.totalDebt, customer.currency, 'en-US')}*\n`;
-        message += `-----------------------------------\n`;
-        message += `📜 *آخر العمليات على حسابكم:*\n`;
-
-        if (recentTx.length === 0) {
-          message += `لا توجد عمليات مسجلة حالياً.\n`;
-        } else {
-          recentTx.forEach(tx => {
-            const typeEmoji = tx.type === 'invoice' ? "➕ فاتورة" : isReturnCredit(tx) ? "➖ مرتجع مبيعات" : "➖ دفعة مستلمة";
-            const dateStr = tx.date ? tx.date.substring(0, 10) : '';
-            message += `${typeEmoji} بتاريخ ${dateStr} بقيمة *${formatMoney(tx.amount, tx.currency, 'en-US')}*\n`;
-            if (tx.notes) {
-              message += `   _(البيان: ${tx.notes})_\n`;
-            }
-          });
-        }
-
-        message += `-----------------------------------\n`;
-        message += `لأي استفسار يرجى مراجعة إدارة المستودع. شكراً لثقتكم بنا. 🙏`;
-        return message;
-      } else {
-        let message = sender ? `*Account Statement - ${sender}*\n\n` : `*Account Statement*\n\n`;
-        message += `Dear *${customer.name}*,\n`;
-        message += `Please find below a summary of your current account status:\n\n`;
-        message += `📊 *Outstanding Balance:* *${formatMoney(customer.totalDebt, customer.currency, 'en-US')}*\n`;
-        message += `-----------------------------------\n`;
-        message += `📜 *Recent Transactions Status:*\n`;
-
-        if (recentTx.length === 0) {
-          message += `No transaction ledger entries recorded.\n`;
-        } else {
-          recentTx.forEach(tx => {
-            const typeEmoji = tx.type === 'invoice' ? "➕ Credit Invoice" : isReturnCredit(tx) ? "➖ Sales Return" : "➖ Payment Received";
-            const dateStr = tx.date ? tx.date.substring(0, 10) : '';
-            message += `${typeEmoji} on ${dateStr} for *${formatMoney(tx.amount, tx.currency, 'en-US')}*\n`;
-            if (tx.notes) {
-              message += `   _(Ref: ${tx.notes})_\n`;
-            }
-          });
-        }
-
-        message += `-----------------------------------\n`;
-        message += `For any inquiries, please contact management. Thank you for your continued trust! 🙏`;
-        return message;
-      }
+      const period = statementPeriod(ledgerPeriodPreset, ledgerFromDate, ledgerToDate);
+      const txs = filterCustomerStatement(customerTransactions, customer.id, period, ledgerSearchQuery, invoices);
+      return buildWhatsAppStatement({
+        customer,
+        txs,
+        period,
+        businessName: sender,
+        isRtl,
+        isReturnCredit,
+        invoices,
+      });
     } else {
       return isRtl 
         ? `الإخوة الكرام في ${customer.name}، نسعد دائماً بخدمتكم${sender ? ` في ${sender}` : ''}. يسعدنا البقاء على تواصل معكم.`
@@ -233,6 +216,197 @@ export default function CustomerManagement({ language, settings }: Props) {
     return matchesSearch && matchesCurrency && matchesDebt;
   }), [customers, searchQuery, currencyFilter, debtFilter]);
   const customerPage = useProgressiveList(filteredCustomers, `${searchQuery}|${currencyFilter}|${debtFilter}`);
+
+  const activeLedgerPeriod = React.useMemo(
+    () => statementPeriod(ledgerPeriodPreset, ledgerFromDate, ledgerToDate),
+    [ledgerPeriodPreset, ledgerFromDate, ledgerToDate],
+  );
+  const ledgerTxs = React.useMemo(() => {
+    if (!selectedLedgerCustomer) return [];
+    return filterCustomerStatement(
+      customerTransactions,
+      selectedLedgerCustomer.id,
+      activeLedgerPeriod,
+      ledgerSearchQuery,
+      invoices,
+    );
+  }, [selectedLedgerCustomer, customerTransactions, activeLedgerPeriod, ledgerSearchQuery, invoices]);
+  const ledgerSums = React.useMemo(() => {
+    if (!selectedLedgerCustomer) return { invoices: 0, payments: 0, returns: 0 };
+    return sumStatementByType(ledgerTxs, selectedLedgerCustomer.currency || 'JOD', isReturnCredit);
+  }, [selectedLedgerCustomer, ledgerTxs, isReturnCredit]);
+
+  const ledgerItemRows = React.useMemo(() => {
+    if (!selectedLedgerCustomer) return [];
+    return customerPurchaseRows(invoices, selectedLedgerCustomer.id, activeLedgerPeriod, isRtl, ledgerSearchQuery);
+  }, [selectedLedgerCustomer, invoices, activeLedgerPeriod, isRtl, ledgerSearchQuery]);
+  const ledgerItemTotals = React.useMemo(() => purchaseTotalsByCurrency(ledgerItemRows), [ledgerItemRows]);
+  const invoiceById = React.useMemo(() => new Map(invoices.map((inv) => [inv.id, inv])), [invoices]);
+
+  const tableLocale = isRtl ? 'ar-u-nu-latn' : 'en-GB';
+  const fmtDate = (ms: number) => (Number.isFinite(ms)
+    ? new Date(ms).toLocaleDateString(tableLocale, { year: 'numeric', month: '2-digit', day: '2-digit' })
+    : '—');
+  const fmtTime = (ms: number) => (Number.isFinite(ms)
+    ? new Date(ms).toLocaleTimeString(tableLocale, { hour: '2-digit', minute: '2-digit' })
+    : '—');
+  const paymentLabel = (row: StatementItemRow) => {
+    if (row.kind === 'return') return isRtl ? 'مرتجع' : 'Return';
+    switch (row.paymentMethod) {
+      case 'credit': {
+        const paid = Number(invoiceById.get(row.invoiceId)?.paidAmount) || 0;
+        return paid > 0 ? (isRtl ? 'نقد + آجل' : 'Cash + credit') : (isRtl ? 'آجل' : 'Credit');
+      }
+      case 'card': return isRtl ? 'بطاقة' : 'Card';
+      case 'wallet': return isRtl ? 'محفظة' : 'Wallet';
+      default: return isRtl ? 'نقدي' : 'Cash';
+    }
+  };
+
+  function printLedger(customer: Customer) {
+    const itemsMode = ledgerView === 'items';
+    if (itemsMode ? ledgerItemRows.length === 0 : ledgerTxs.length === 0) {
+      toast.error(isRtl ? 'لا يوجد ما يُطبع في هذه الفترة.' : 'Nothing to print in this period.');
+      return;
+    }
+    const locale = isRtl ? 'ar' : 'en';
+    const currency = customer.currency || 'JOD';
+    const money = (v: number, c: string) => escapeHtml(formatMoney(v, c, 'en-US'));
+    const end = isRtl ? 'left' : 'right';
+    const kindLabel = (tx: CustomerTransaction) => (tx.type === 'payment'
+      ? (isReturnCredit(tx) ? (isRtl ? 'مرتجع مبيعات' : 'Sales return') : (isRtl ? 'سداد دفعة' : 'Payment received'))
+      : (isRtl ? 'بيع بالآجل' : 'Credit sale'));
+
+    let body: string;
+    if (itemsMode) {
+      const rows = ledgerItemRows.map((row) => `
+        <tr class="${row.kind === 'return' ? 'ret' : ''}">
+          <td class="num">${escapeHtml(fmtDate(row.date))}</td>
+          <td class="num">${escapeHtml(fmtTime(row.date))}</td>
+          <td class="num">#${escapeHtml(row.invoiceNumber)}</td>
+          <td>${escapeHtml(paymentLabel(row))}</td>
+          <td><b>${escapeHtml(row.description)}</b>${row.sku ? `<div class="sku">${escapeHtml(row.sku)}</div>` : ''}</td>
+          <td class="amt">${row.kind === 'return' ? '−' : ''}${escapeHtml(row.quantityText)}</td>
+          <td class="amt">${money(row.unitPrice, row.currency)}</td>
+          <td class="amt"><b>${row.kind === 'return' ? '−' : ''}${money(row.total, row.currency)}</b></td>
+        </tr>`).join('');
+      const totals = ledgerItemTotals.map((tot) => `
+        <tr class="total"><td colspan="7" class="amt">${isRtl ? 'صافي المشتريات' : 'Net bought'} (${escapeHtml(tot.currency)})</td>
+        <td class="amt">${money(tot.net, tot.currency)}</td></tr>`).join('');
+      body = `
+        <table>
+          <thead><tr>
+            <th>${isRtl ? 'التاريخ' : 'Date'}</th><th>${isRtl ? 'الوقت' : 'Time'}</th><th>${isRtl ? 'الفاتورة' : 'Invoice'}</th>
+            <th>${isRtl ? 'الدفع' : 'Payment'}</th><th>${isRtl ? 'الصنف' : 'Item'}</th><th class="amt">${isRtl ? 'الكمية' : 'Qty'}</th>
+            <th class="amt">${isRtl ? 'سعر الوحدة' : 'Unit price'}</th><th class="amt">${isRtl ? 'المجموع' : 'Total'}</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+          <tfoot>${totals}</tfoot>
+        </table>`;
+    } else {
+      const rows = ledgerTxs.map((tx) => {
+        const t = Date.parse(tx.date);
+        const inv = tx.invoiceId ? invoiceById.get(tx.invoiceId) : undefined;
+        const items = inv ? invoiceItemRows(inv, isRtl) : [];
+        const detail = items.length ? '' : statementLineDetail(tx, invoices, isRtl);
+        const itemRows = items.map((row) => `
+          <tr class="item">
+            <td colspan="3"></td>
+            <td>${escapeHtml(row.description)}</td>
+            <td class="amt">${escapeHtml(row.quantityText)}</td>
+            <td class="amt">${money(row.unitPrice, row.currency)}</td>
+            <td class="amt">${money(row.total, row.currency)}</td>
+            <td colspan="2"></td>
+          </tr>`).join('');
+        return `
+          <tr class="mv">
+            <td class="num">${escapeHtml(fmtDate(t))}</td>
+            <td class="num">${escapeHtml(fmtTime(t))}</td>
+            <td>${escapeHtml(kindLabel(tx))}${inv?.invoiceNumber ? `<div class="sku">#${escapeHtml(inv.invoiceNumber)}</div>` : ''}</td>
+            <td colspan="4">${escapeHtml(detail)}</td>
+            <td class="amt" style="color:${tx.type === 'payment' ? '#059669' : '#dc2626'}"><b>${tx.type === 'payment' ? '−' : '+'}${money(Number(tx.amount) || 0, tx.currency || currency)}</b></td>
+            <td class="amt"><b>${money(Number(tx.remainingBalanceAfter) || 0, tx.currency || currency)}</b></td>
+          </tr>${itemRows}`;
+      }).join('');
+      body = `
+        <table>
+          <thead><tr>
+            <th>${isRtl ? 'التاريخ' : 'Date'}</th><th>${isRtl ? 'الوقت' : 'Time'}</th><th>${isRtl ? 'الحركة' : 'Movement'}</th>
+            <th>${isRtl ? 'الصنف / البيان' : 'Item / note'}</th><th class="amt">${isRtl ? 'الكمية' : 'Qty'}</th>
+            <th class="amt">${isRtl ? 'سعر الوحدة' : 'Unit price'}</th><th class="amt">${isRtl ? 'المجموع' : 'Line total'}</th>
+            <th class="amt">${isRtl ? 'المبلغ' : 'Amount'}</th><th class="amt">${isRtl ? 'الرصيد' : 'Balance'}</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>`;
+    }
+
+    printHtmlDocument(`
+      <html>
+        <head>
+          <meta charset="UTF-8">
+          <title>${escapeHtml(isRtl ? 'كشف حساب' : 'Statement')} - ${escapeHtml(customer.name)}</title>
+          <style>
+            body { font-family: system-ui, -apple-system, sans-serif; direction: ${isRtl ? 'rtl' : 'ltr'}; padding: 32px; color: #1e293b; background: #fff; }
+            .brand { font-size: 20px; font-weight: 900; color: #0f172a; border-bottom: 2px solid #0f172a; padding-bottom: 8px; margin-bottom: 16px; }
+            .header-details { background: #f1f5f9; padding: 16px; border-radius: 12px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+            .header-details p { margin: 3px 0; font-size: 12px; }
+            table { width: 100%; border-collapse: collapse; margin-top: 16px; }
+            th, td { border: 1px solid #cbd5e1; padding: 6px 8px; font-size: 10.5px; text-align: ${isRtl ? 'right' : 'left'}; vertical-align: top; }
+            th { background: #f8fafc; color: #475569; font-weight: 800; }
+            .amt { text-align: ${end}; white-space: nowrap; font-variant-numeric: tabular-nums; }
+            .num { white-space: nowrap; font-variant-numeric: tabular-nums; }
+            .sku { font-size: 9px; color: #64748b; font-family: monospace; }
+            tr.mv td { background: #fff; }
+            tr.item td { background: #f8fafc; color: #334155; border-top-color: #e2e8f0; }
+            tr.ret td { background: #ecfdf5; }
+            tr.total td { background: #f1f5f9; font-weight: 900; }
+            thead { display: table-header-group; }
+            tr { page-break-inside: avoid; }
+            .footer-tag { margin-top: 28px; text-align: center; font-size: 10px; color: #64748b; border-top: 1px solid #e2e8f0; padding-top: 12px; }
+          </style>
+        </head>
+        <body>
+          <div class="brand">${escapeHtml(settings.businessName?.trim() || (isRtl ? 'مستودعي' : 'Mostawdaee'))} — ${itemsMode
+            ? (isRtl ? 'الأصناف المشتراة' : 'Items bought')
+            : (isRtl ? 'كشف حساب زبون' : 'Customer statement')}</div>
+          <div class="header-details">
+            <div>
+              <p><strong>${isRtl ? 'الزبون' : 'Customer'}:</strong> ${escapeHtml(customer.name)}</p>
+              <p><strong>${isRtl ? 'الهاتف' : 'Phone'}:</strong> <span dir="ltr">${escapeHtml(customer.phone)}</span></p>
+              <p><strong>${isRtl ? 'الفترة' : 'Period'}:</strong> ${escapeHtml(periodLabel(activeLedgerPeriod, isRtl, locale))}</p>
+            </div>
+            <div style="text-align: ${end};">
+              <p><strong>${isRtl ? 'الرصيد الحالي' : 'Current balance'}:</strong> <span style="font-size: 15px; color: #0284c7; font-weight: 900;">${money(Number(customer.totalDebt) || 0, currency)}</span></p>
+              <p><strong>${isRtl ? 'آجل الفترة' : 'Credit in period'}:</strong> ${money(ledgerSums.invoices, currency)}</p>
+              <p><strong>${isRtl ? 'سداد الفترة' : 'Paid in period'}:</strong> ${money(ledgerSums.payments, currency)}</p>
+              <p><strong>${isRtl ? 'تاريخ الطباعة' : 'Printed'}:</strong> ${escapeHtml(`${fmtDate(Date.now())} ${fmtTime(Date.now())}`)}</p>
+            </div>
+          </div>
+          ${body}
+          <div class="footer-tag">${isRtl ? 'مستودعي · كشف حساب للتصفية الشهرية' : 'Mostawdaee · statement for monthly settlement'}</div>
+        </body>
+      </html>
+    `);
+  }
+
+  function openStatement(customer: Customer) {
+    setSelectedLedgerCustomer(customer);
+    setLedgerPeriodPreset('this_month');
+    setLedgerFromDate('');
+    setLedgerToDate('');
+    setLedgerSearchQuery('');
+    setLedgerView('movements');
+    setIsLedgerModalOpen(true);
+  }
+
+  const closeLedgerModal = React.useCallback(() => {
+    setIsLedgerModalOpen(false);
+    setLedgerSearchQuery('');
+    setLedgerPeriodPreset('this_month');
+    setLedgerFromDate('');
+    setLedgerToDate('');
+    setLedgerView('movements');
+  }, []);
 
   // Calculate currency summaries
   // One independent total per currency (debts of different currencies are never added together)
@@ -741,13 +915,22 @@ export default function CustomerManagement({ language, settings }: Props) {
 
                   </div>
 
-                  <div className="mt-2 text-center">
-                    <button 
-                      onClick={() => { setSelectedLedgerCustomer(customer); setIsLedgerModalOpen(true); }}
-                      className="w-full h-[36px] bg-slate-50 hover:bg-slate-100 dark:bg-slate-900/40 dark:hover:bg-indigo-950/20 text-gray-700 dark:text-indigo-300 rounded-xl text-[10px] font-bold border border-gray-100 dark:border-gray-700/60 inline-flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                  <div className="mt-2 grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => requestPosSale({ customerId: customer.id })}
+                      className="h-[36px] bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-[10px] font-black inline-flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                    >
+                      <ShoppingCart size={12} />
+                      {isRtl ? 'بيع أصناف لهذا الزبون' : 'Sell items to customer'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => openStatement(customer)}
+                      className="h-[36px] bg-slate-50 hover:bg-slate-100 dark:bg-slate-900/40 dark:hover:bg-indigo-950/20 text-gray-700 dark:text-indigo-300 rounded-xl text-[10px] font-bold border border-gray-100 dark:border-gray-700/60 inline-flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
                     >
                       <Coins size={12} className="text-indigo-500" />
-                      {isRtl ? 'كشف الحساب التاريخي' : 'View Account Statement'}
+                      {isRtl ? 'كشف الحساب والأصناف' : 'Statement & items'}
                     </button>
                   </div>
 
@@ -1168,7 +1351,7 @@ export default function CustomerManagement({ language, settings }: Props) {
               initial={{ opacity: 0 }}
               animate={{ opacity: 0.7 }}
               exit={{ opacity: 0 }}
-              onClick={() => { setIsLedgerModalOpen(false); setLedgerSearchQuery(''); }}
+              onClick={closeLedgerModal}
               className="absolute inset-0 bg-[#070e11]/85 backdrop-blur-sm"
             />
 
@@ -1194,7 +1377,8 @@ export default function CustomerManagement({ language, settings }: Props) {
                   </div>
                 </div>
                 <button 
-                  onClick={() => { setIsLedgerModalOpen(false); setLedgerSearchQuery(''); }}
+                  type="button"
+                  onClick={closeLedgerModal}
                   className="p-2 bg-[#1b3038] hover:bg-rose-900/20 text-gray-400 hover:text-rose-400 rounded-full transition-colors cursor-pointer"
                  aria-label={isRtl ? 'إغلاق' : 'Close'}>
                   <X size={15} />
@@ -1220,76 +1404,121 @@ export default function CustomerManagement({ language, settings }: Props) {
                       </h3>
                     </div>
 
-                    {/* Quick WhatsApp Action with clean formatting and country-code builder */}
-                    <button
-                      onClick={() => {
-                        const messageText = getPrefilledMessage(selectedLedgerCustomer, 'statement');
-                        const destinationPhone = cleanAndFormatPhone(selectedLedgerCustomer.phone);
-                        const waUrl = `https://wa.me/${destinationPhone}?text=${encodeURIComponent(messageText)}`;
-                        window.open(waUrl, '_blank', 'noopener,noreferrer');
-                        toast.success(isRtl ? 'تم تجهيز كشف الحساب وبدء المحادثة!' : 'Detailed statement prefilled inside WhatsApp!');
-                      }}
-                      className="px-4 py-2.5 bg-[#25D366] hover:bg-[#1ebd54] text-white rounded-xl text-xs font-black flex items-center gap-2 shadow-md transition-all active:scale-95 cursor-pointer max-w-max self-start md:self-auto"
-                    >
-                      <Share2 size={14} className="animate-bounce" />
-                      {isRtl ? 'إرسال كشف الحساب 💬' : 'Send Statement 💬'}
-                    </button>
+                    <div className="flex flex-wrap gap-2 self-start md:self-auto">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const id = selectedLedgerCustomer.id;
+                          closeLedgerModal();
+                          requestPosSale({ customerId: id });
+                        }}
+                        className="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-black flex items-center gap-2 shadow-md transition-all active:scale-95 cursor-pointer"
+                      >
+                        <ShoppingCart size={14} />
+                        {isRtl ? 'بيع أصناف' : 'Sell items'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const messageText = getPrefilledMessage(selectedLedgerCustomer, 'statement');
+                          const destinationPhone = cleanAndFormatPhone(selectedLedgerCustomer.phone);
+                          const waUrl = `https://wa.me/${destinationPhone}?text=${encodeURIComponent(messageText)}`;
+                          window.open(waUrl, '_blank', 'noopener,noreferrer');
+                          toast.success(isRtl ? 'تم تجهيز كشف الحساب للفترة المحددة.' : 'Statement for the selected period is ready in WhatsApp.');
+                        }}
+                        className="px-4 py-2.5 bg-[#25D366] hover:bg-[#1ebd54] text-white rounded-xl text-xs font-black flex items-center gap-2 shadow-md transition-all active:scale-95 cursor-pointer"
+                      >
+                        <Share2 size={14} />
+                        {isRtl ? 'إرسال كشف الفترة' : 'Send period statement'}
+                      </button>
+                    </div>
                   </div>
 
                   <div className="w-full h-px bg-white/10" />
 
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
                     <div className="space-y-1">
                       <p className="text-[10px] text-gray-300 font-bold uppercase tracking-wide">
-                        {isRtl ? 'إجمالي الدين المترتب الحالي' : 'Outstanding Debt Balance'}
+                        {isRtl ? 'الرصيد الحالي' : 'Current balance'}
                       </p>
-                      <p className="text-2xl font-black text-[#00D2FF] tracking-tight drop-shadow-[0_0_8px_rgba(0,210,255,0.4)] font-mono">
+                      <p className="text-2xl font-black text-[#00D2FF] tracking-tight font-mono">
                         {formatMoney(selectedLedgerCustomer.totalDebt, selectedLedgerCustomer.currency, isRtl ? 'ar' : 'en-US')}
                       </p>
                     </div>
-
                     <div className="space-y-1">
                       <p className="text-[10px] text-gray-300 font-bold uppercase tracking-wide">
-                        {isRtl ? 'إجمالي الدفعات المسددة' : 'Total Paid Received'}
-                      </p>
-                      <p className="text-lg font-black text-emerald-400 tracking-tight font-mono">
-                        {formatMoney(
-                          customerTransactions
-                            .filter(tx =>
-                              tx.customerId === selectedLedgerCustomer.id
-                              && tx.type === 'payment'
-                              && !isReturnCredit(tx)
-                              && (tx.currency || selectedLedgerCustomer.currency) === selectedLedgerCustomer.currency)
-                            .reduce((acc, current) => acc + (Number(current.amount) || 0), 0),
-                          selectedLedgerCustomer.currency,
-                          isRtl ? 'ar' : 'en-US',
-                        )}
-                      </p>
-                    </div>
-
-                    <div className="space-y-1">
-                      <p className="text-[10px] text-gray-300 font-bold uppercase tracking-wide">
-                        {isRtl ? 'إجمالي المبيعات بالآجل' : 'Total Invoices Sum'}
+                        {isRtl ? 'آجل الفترة' : 'Credit in period'}
                       </p>
                       <p className="text-lg font-black text-amber-400 tracking-tight font-mono">
-                        {formatMoney(
-                          customerTransactions
-                            .filter(tx =>
-                              tx.customerId === selectedLedgerCustomer.id
-                              && tx.type === 'invoice'
-                              && (tx.currency || selectedLedgerCustomer.currency) === selectedLedgerCustomer.currency)
-                            .reduce((acc, current) => acc + (Number(current.amount) || 0), 0),
-                          selectedLedgerCustomer.currency,
-                          isRtl ? 'ar' : 'en-US',
-                        )}
+                        {formatMoney(ledgerSums.invoices, selectedLedgerCustomer.currency, isRtl ? 'ar' : 'en-US')}
+                      </p>
+                    </div>
+                    <div className="space-y-1">
+                      <p className="text-[10px] text-gray-300 font-bold uppercase tracking-wide">
+                        {isRtl ? 'سداد الفترة' : 'Paid in period'}
+                      </p>
+                      <p className="text-lg font-black text-emerald-400 tracking-tight font-mono">
+                        {formatMoney(ledgerSums.payments, selectedLedgerCustomer.currency, isRtl ? 'ar' : 'en-US')}
+                      </p>
+                    </div>
+                    <div className="space-y-1">
+                      <p className="text-[10px] text-gray-300 font-bold uppercase tracking-wide">
+                        {isRtl ? 'الفترة المعروضة' : 'Shown period'}
+                      </p>
+                      <p className="text-sm font-bold text-teal-200 leading-snug">
+                        {periodLabel(activeLedgerPeriod, isRtl, isRtl ? 'ar' : 'en-US')}
+                      </p>
+                      <p className="text-[10px] text-slate-400 font-mono">
+                        {ledgerTxs.length} {isRtl ? 'حركة' : 'movements'}
                       </p>
                     </div>
                   </div>
                 </div>
 
-                {/* Search controller & layout switches */}
-                <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4">
-                  {/* Local timeline filter */}
+                <div className="flex flex-col gap-3">
+                  <div className="flex flex-wrap gap-2">
+                    {([
+                      ['this_month', isRtl ? 'هذا الشهر' : 'This month'],
+                      ['last_month', isRtl ? 'الشهر الماضي' : 'Last month'],
+                      ['all', isRtl ? 'كل الفترات' : 'All time'],
+                      ['custom', isRtl ? 'من / إلى' : 'From / to'],
+                    ] as const).map(([id, label]) => (
+                      <button
+                        key={id}
+                        type="button"
+                        onClick={() => setLedgerPeriodPreset(id)}
+                        className={`px-3 py-1.5 rounded-xl text-[11px] font-black border transition-all cursor-pointer ${
+                          ledgerPeriodPreset === id
+                            ? 'bg-cyan-500/15 border-cyan-500/40 text-cyan-300'
+                            : 'bg-white/5 border-white/10 text-slate-300 hover:bg-white/10'
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  {ledgerPeriodPreset === 'custom' && (
+                    <div className="grid grid-cols-2 gap-2 max-w-md">
+                      <label className="text-[10px] font-bold text-slate-400 space-y-1">
+                        <span>{isRtl ? 'من تاريخ' : 'From'}</span>
+                        <input
+                          type="date"
+                          value={ledgerFromDate}
+                          onChange={(e) => setLedgerFromDate(e.target.value)}
+                          className="w-full h-9 rounded-xl border border-teal-800 bg-[#0c181c] px-2 text-xs text-white"
+                        />
+                      </label>
+                      <label className="text-[10px] font-bold text-slate-400 space-y-1">
+                        <span>{isRtl ? 'إلى تاريخ' : 'To'}</span>
+                        <input
+                          type="date"
+                          value={ledgerToDate}
+                          onChange={(e) => setLedgerToDate(e.target.value)}
+                          className="w-full h-9 rounded-xl border border-teal-800 bg-[#0c181c] px-2 text-xs text-white"
+                        />
+                      </label>
+                    </div>
+                  )}
                   <div className="relative flex-1 max-w-md">
                     <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-teal-500/60">
                       <Search size={14} />
@@ -1298,60 +1527,129 @@ export default function CustomerManagement({ language, settings }: Props) {
                       type="text"
                       value={ledgerSearchQuery}
                       onChange={(e) => setLedgerSearchQuery(e.target.value)}
-                      placeholder={isRtl ? 'تصفية الجدول والحركات بالبيان...' : 'Filter ledger entries by reference/note...'} aria-label={isRtl ? 'تصفية الجدول والحركات بالبيان...' : 'Filter ledger entries by reference/note...'}
+                      placeholder={isRtl ? 'ابحث باسم الصنف أو رقم الفاتورة أو البيان...' : 'Search item, invoice number or note...'}
+                      aria-label={isRtl ? 'ابحث باسم الصنف أو رقم الفاتورة أو البيان...' : 'Search item, invoice number or note...'}
                       className="w-full h-[40px] pl-10 pr-4 rounded-xl border border-teal-800 bg-[#0c181c] text-xs focus:ring-2 focus:ring-teal-500 focus:outline-none text-white font-medium"
                     />
                   </div>
-
-                  {/* Header summary label */}
-                  <span className="text-xs text-teal-400 font-mono font-bold self-center">
-                    {isRtl ? 'سجل الحركات التاريخي المعتمد' : 'Authorized Accounting Ledger Log'}
-                  </span>
                 </div>
 
-                {/* 2. THE CHRONOLOGICAL TIMELINE LIST & TABULAR DETAILS FLOW */}
-                {customerTransactions.filter(tx => tx.customerId === selectedLedgerCustomer.id).length === 0 ? (
+                <div role="tablist" className="grid grid-cols-2 gap-1 p-1 rounded-2xl bg-[#0c181c] border border-teal-900/40 max-w-md">
+                  {([
+                    ['movements', isRtl ? `الحركات المالية (${ledgerTxs.length})` : `Movements (${ledgerTxs.length})`, ListOrdered],
+                    ['items', isRtl ? `الأصناف المشتراة (${ledgerItemRows.length})` : `Items bought (${ledgerItemRows.length})`, Package],
+                  ] as const).map(([id, label, Icon]) => (
+                    <button
+                      key={id}
+                      type="button"
+                      role="tab"
+                      aria-selected={ledgerView === id}
+                      onClick={() => setLedgerView(id)}
+                      className={`h-9 rounded-xl text-[11px] font-black inline-flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                        ledgerView === id ? 'bg-teal-500/20 text-teal-200 border border-teal-500/40' : 'text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      <Icon size={13} />
+                      {label}
+                    </button>
+                  ))}
+                </div>
+
+                {ledgerView === 'items' ? (
+                  ledgerItemRows.length === 0 ? (
+                    <div className="py-12 flex flex-col items-center justify-center text-center bg-[#0d1b20]/30 rounded-3xl border border-teal-900/10">
+                      <Package size={42} className="text-teal-600 mb-2" />
+                      <p className="text-sm font-black text-white">{isRtl ? 'لا توجد أصناف مشتراة في هذه الفترة' : 'No items bought in this period'}</p>
+                      <p className="text-[11px] mt-1 text-teal-600/80 max-w-sm">
+                        {isRtl ? 'تظهر هنا كل فواتير البيع المسجلة على هذا الزبون من نقطة البيع (نقداً أو آجلاً) ومرتجعاته.' : 'Every sale invoice recorded to this customer at the POS (cash or credit) and its returns appear here.'}
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      <div className="overflow-x-auto rounded-2xl border border-white/[0.06]">
+                        <table className="w-full min-w-[720px] text-[11px] text-slate-200">
+                          <thead className="bg-white/[0.04] text-slate-400 font-black">
+                            <tr>
+                              <th className="px-3 py-2.5 text-start">{isRtl ? 'التاريخ' : 'Date'}</th>
+                              <th className="px-3 py-2.5 text-start">{isRtl ? 'الوقت' : 'Time'}</th>
+                              <th className="px-3 py-2.5 text-start">{isRtl ? 'الفاتورة' : 'Invoice'}</th>
+                              <th className="px-3 py-2.5 text-start">{isRtl ? 'الدفع' : 'Payment'}</th>
+                              <th className="px-3 py-2.5 text-start">{isRtl ? 'الصنف' : 'Item'}</th>
+                              <th className="px-3 py-2.5 text-end">{isRtl ? 'الكمية' : 'Qty'}</th>
+                              <th className="px-3 py-2.5 text-end">{isRtl ? 'سعر الوحدة' : 'Unit price'}</th>
+                              <th className="px-3 py-2.5 text-end">{isRtl ? 'المجموع' : 'Total'}</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {ledgerItemRows.map((row) => (
+                              <tr key={row.key} className={`border-t border-white/[0.05] ${row.kind === 'return' ? 'bg-emerald-500/[0.04]' : ''}`}>
+                                <td className="px-3 py-2 font-mono whitespace-nowrap">{fmtDate(row.date)}</td>
+                                <td className="px-3 py-2 font-mono whitespace-nowrap text-slate-400">{fmtTime(row.date)}</td>
+                                <td className="px-3 py-2 font-mono whitespace-nowrap">#{row.invoiceNumber}</td>
+                                <td className="px-3 py-2 whitespace-nowrap">{paymentLabel(row)}</td>
+                                <td className="px-3 py-2 font-bold text-white">
+                                  {row.description}
+                                  {row.sku ? <span className="block text-[9px] font-mono text-slate-500">{row.sku}</span> : null}
+                                </td>
+                                <td className="px-3 py-2 text-end font-mono whitespace-nowrap">{row.kind === 'return' ? '−' : ''}{row.quantityText}</td>
+                                <td className="px-3 py-2 text-end font-mono whitespace-nowrap">{formatMoney(row.unitPrice, row.currency, 'en-US')}</td>
+                                <td className={`px-3 py-2 text-end font-mono font-black whitespace-nowrap ${row.kind === 'return' ? 'text-emerald-400' : 'text-white'}`}>
+                                  {row.kind === 'return' ? '−' : ''}{formatMoney(row.total, row.currency, 'en-US')}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        {ledgerItemTotals.map((tot) => (
+                          <div key={tot.currency} className="rounded-xl bg-white/[0.04] border border-white/[0.06] px-3 py-2 text-[11px] text-slate-300">
+                            <span className="font-bold">{isRtl ? 'صافي المشتريات' : 'Net bought'}:</span>{' '}
+                            <span className="font-mono font-black text-white">{formatMoney(tot.net, tot.currency, 'en-US')}</span>
+                            {tot.returns > 0 && (
+                              <span className="ms-2 text-slate-500">
+                                ({isRtl ? 'مبيعات' : 'sales'} {formatMoney(tot.sales, tot.currency, 'en-US')} − {isRtl ? 'مرتجع' : 'returns'} {formatMoney(tot.returns, tot.currency, 'en-US')})
+                              </span>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )
+                ) : ledgerTxs.length === 0 ? (
                   <div className="py-12 flex flex-col items-center justify-center text-center text-teal-500/60 bg-[#0d1b20]/30 rounded-3xl border border-teal-900/10">
-                    <Coins size={42} className="text-teal-600 mb-2 animate-pulse" />
-                    <p className="text-sm font-black text-white">{isRtl ? 'لا توجد حركات مسجلة حالياً' : 'No Statement Ledger Records Found'}</p>
-                    <p className="text-[11px] mt-1 text-teal-600/80 max-w-sm">{isRtl ? 'تظهر الفواتير وعمليات القبض والدفع بانتظام بمجرد اعتمادها.' : 'Chronological invoice operations and payments appear once submitted.'}</p>
+                    <Coins size={42} className="text-teal-600 mb-2" />
+                    <p className="text-sm font-black text-white">{isRtl ? 'لا توجد حركات في هذه الفترة' : 'No movements in this period'}</p>
+                    <p className="text-[11px] mt-1 text-teal-600/80 max-w-sm">
+                      {isRtl ? 'غيّر الفترة أو أزل التصفية لعرض كل ما سجّله الزبون بالآجل والسداد.' : 'Change the period or clear the filter to see all credit and payment rows.'}
+                    </p>
                   </div>
                 ) : (
                   <div className="space-y-4">
-                    {/* Switch layout explanation for user */}
                     <p className="text-[10px] text-gray-400 font-bold uppercase tracking-wider">
-                      {isRtl ? 'سجل الحركات الزمنية (مرتب من الأحدث للأقدم)' : 'Chronological Flow Timeline (Latest to Oldest)'}
+                      {isRtl ? 'الحركات مرتبة من الأقدم إلى الأحدث (مناسبة لتصفية الشهر)' : 'Movements oldest → newest (for monthly settlement)'}
                     </p>
-
-                    {/* Timeline Container styled in frosted slate cards */}
                     <div className="space-y-3">
-                      {customerTransactions
-                        .filter(tx => {
-                          if (!tx) return false;
-                          if (tx.customerId !== selectedLedgerCustomer.id) return false;
-                          if (!ledgerSearchQuery) return true;
-                          return (tx.notes || '').toLowerCase().includes(ledgerSearchQuery.toLowerCase()) || 
-                                 (tx.transactionId || '').toLowerCase().includes(ledgerSearchQuery.toLowerCase());
-                        })
-                        // Sort latest first
-                        .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
-                        .map((tx) => {
+                      {ledgerTxs.map((tx) => {
                           const isPayment = tx.type === 'payment';
+                          const inv = tx.invoiceId ? invoiceById.get(tx.invoiceId) : undefined;
+                          const itemRows = inv ? invoiceItemRows(inv, isRtl) : [];
+                          const detail = itemRows.length ? '' : statementLineDetail(tx, invoices, isRtl);
                           return (
-                            <div 
-                              key={tx.id} 
-                              className="bg-white/[0.03] border border-white/[0.06] rounded-2.5xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 transition-all hover:bg-white/[0.05]"
+                            <div
+                              key={tx.id}
+                              className="bg-white/[0.03] border border-white/[0.06] rounded-2xl p-4 flex flex-col gap-3 transition-all hover:bg-white/[0.05]"
                             >
-                              <div className="flex gap-4 items-center">
-                                {/* Leading avatar icon representing movement orientation */}
+                            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                              <div className="flex gap-4 items-center min-w-0">
                                 <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${
                                   isPayment ? 'bg-emerald-500/15 text-emerald-400' : 'bg-rose-500/15 text-rose-400'
                                 }`}>
                                   {isPayment ? <ArrowDown size={18} /> : <ArrowUp size={18} />}
                                 </div>
 
-                                <div className="space-y-0.5">
-                                  <div className="flex items-center gap-2">
+                                <div className="space-y-0.5 min-w-0">
+                                  <div className="flex items-center gap-2 flex-wrap">
                                     <p className="text-xs font-black text-white">
                                       {isPayment 
                                         ? (isReturnCredit(tx) ? (isRtl ? 'مرتجع مبيعات' : 'Sales return') : (isRtl ? 'دفعة نقدية مسددة' : 'Payment Received'))
@@ -1361,16 +1659,21 @@ export default function CustomerManagement({ language, settings }: Props) {
                                       #{tx.transactionId || tx.id}
                                     </span>
                                   </div>
-                                  <p className="text-[11px] text-slate-300 font-medium">
-                                    {tx.notes}
-                                  </p>
+                                  {inv?.invoiceNumber ? (
+                                    <p className="text-[11px] text-slate-300 font-bold">
+                                      {isRtl ? 'فاتورة' : 'Invoice'} <span className="font-mono">#{inv.invoiceNumber}</span>
+                                    </p>
+                                  ) : null}
+                                  {detail ? (
+                                    <p className="text-[11px] text-slate-300 font-medium break-words">{detail}</p>
+                                  ) : null}
                                   <span className="text-[10px] text-slate-500 font-mono">
-                                    {new Date(tx.date).toLocaleString()}
+                                    {fmtDate(Date.parse(tx.date))} · {fmtTime(Date.parse(tx.date))}
                                   </span>
                                 </div>
                               </div>
 
-                              <div className="flex sm:flex-col items-end justify-between w-full sm:w-auto border-t sm:border-t-0 border-white/5 pt-2 sm:pt-0">
+                              <div className="flex sm:flex-col items-end justify-between w-full sm:w-auto border-t sm:border-t-0 border-white/5 pt-2 sm:pt-0 shrink-0">
                                 <span className={`text-sm font-mono font-black ${isPayment ? 'text-emerald-400' : 'text-rose-400'}`}>
                                   {isPayment ? '-' : '+'}{formatAmount(tx.amount, tx.currency, 'en-US')}{' '}
                                   <span className="text-[10px] text-white/70">{tx.currency}</span>
@@ -1381,6 +1684,7 @@ export default function CustomerManagement({ language, settings }: Props) {
                                     <span className="text-white font-mono font-black">{formatAmount(tx.remainingBalanceAfter, tx.currency, 'en-US')}{' '}{tx.currency}</span>
                                   </span>
                                   <button
+                                    type="button"
                                     onClick={() => handleDeleteLedgerTransaction(tx)}
                                     className="p-1 px-1.5 bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 rounded-md transition-colors cursor-pointer ml-1"
                                     title={isRtl ? 'حذف الحركة' : 'Delete transaction'} aria-label={isRtl ? 'حذف الحركة' : 'Delete transaction'}
@@ -1389,6 +1693,8 @@ export default function CustomerManagement({ language, settings }: Props) {
                                   </button>
                                 </div>
                               </div>
+                            </div>
+                            {itemRows.length > 0 && <StatementItemsTable rows={itemRows} isRtl={isRtl} invoice={inv} />}
                             </div>
                           );
                         })}
@@ -1403,7 +1709,7 @@ export default function CustomerManagement({ language, settings }: Props) {
                 <TactileButton 
                   type="button" 
                   variant="secondary" 
-                  onClick={() => { setIsLedgerModalOpen(false); setLedgerSearchQuery(''); }}
+                  onClick={closeLedgerModal}
                   className="px-5 py-2.5 rounded-xl text-xs font-bold border-teal-900/40 bg-teal-950/20 hover:bg-teal-950/40 text-gray-300"
                 >
                   {isRtl ? 'إغلاق الكشف' : 'Close Statement'}
@@ -1411,86 +1717,14 @@ export default function CustomerManagement({ language, settings }: Props) {
                 
                 <div className="flex gap-2">
                   <button
-                    onClick={() => {
-                      // Generate and build formal document print template
-                      const txsToPrint = customerTransactions
-                        .filter(tx => tx.customerId === selectedLedgerCustomer.id)
-                        .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-
-                      if (txsToPrint.length === 0) {
-                        toast.error(isRtl ? 'لا توجد حركات لطباعتها!' : 'No transaction ledger entries to print');
-                        return;
-                      }
-
-                      const generatedRows = txsToPrint.map(tx => `
-                        <tr>
-                          <td style="text-align: center; font-family: monospace;">#${escapeHtml(tx.transactionId || tx.id)}</td>
-                          <td>${escapeHtml(new Date(tx.date).toLocaleString(isRtl ? 'ar' : 'en'))}</td>
-                          <td>${tx.type === 'payment' ? (isReturnCredit(tx) ? (isRtl ? 'مرتجع مبيعات' : 'Sales return') : (isRtl ? 'سداد دفعة' : 'Payment Received')) : (isRtl ? 'فاتورة بيع بالآجل' : 'Credit Sale')}</td>
-                          <td>${escapeHtml(tx.notes || '')}</td>
-                          <td style="text-align: right; font-weight: bold; color: ${tx.type === 'payment' ? '#10b981' : '#ef4444'};">
-                            ${tx.type === 'payment' ? '-' : '+'}${escapeHtml(formatMoney(Number(tx.amount) || 0, tx.currency || selectedLedgerCustomer.currency || 'JOD'))}
-                          </td>
-                          <td style="text-align: right; font-weight: bold;">
-                            ${escapeHtml(formatMoney(Number(tx.remainingBalanceAfter) || 0, tx.currency || selectedLedgerCustomer.currency || 'JOD'))}
-                          </td>
-                        </tr>
-                      `).join('');
-
-                      {
-                        printHtmlDocument(`
-                          <html>
-                            <head>
-                              <meta charset="UTF-8">
-                              <title>${escapeHtml(isRtl ? 'كشف حساب' : 'Statement')} - ${escapeHtml(selectedLedgerCustomer.name)}</title>
-                              <style>
-                                body { font-family: system-ui, -apple-system, sans-serif; direction: ${isRtl ? 'rtl' : 'ltr'}; padding: 40px; color: #1e293b; background-color: #ffffff; }
-                                .brand { font-size: 24px; font-weight: 900; color: #0f172a; border-bottom: 2px solid #0f172a; padding-bottom: 10px; margin-bottom: 20px; }
-                                table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-                                th, td { border: 1px solid #cbd5e1; padding: 12px; font-size: 11px; text-align: ${isRtl ? 'right' : 'left'}; }
-                                th { background-color: #f8fafc; color: #475569; font-weight: 800; }
-                                .header-details { background-color: #f1f5f9; padding: 20px; border-radius: 12px; margin-bottom: 20px; display: grid; grid-template-cols: 1fr 1fr; gap: 10px; }
-                                .detail-block p { margin: 4px 0; font-size: 12px; }
-                                .footer-tag { margin-top: 40px; text-align: center; font-size: 10px; color: #64748b; border-top: 1px solid #e2e8f0; padding-top: 15px; }
-                              </style>
-                            </head>
-                            <body>
-                              <div class="brand">كشف الحساب المالي الموحد - مستودعي</div>
-                              <div class="header-details">
-                                <div class="detail-block">
-                                  <p><strong>العميل:</strong> ${escapeHtml(selectedLedgerCustomer.name)}</p>
-                                  <p><strong>الهاتف:</strong> <span dir="ltr">${escapeHtml(selectedLedgerCustomer.phone)}</span></p>
-                                </div>
-                                <div class="detail-block" style="text-align: ${isRtl ? 'left' : 'right'};">
-                                  <p><strong>الرصيد المترتب الحالي:</strong> <span style="font-size: 16px; color: #0284c7; font-weight: 900;">${escapeHtml(formatMoney(Number(selectedLedgerCustomer.totalDebt) || 0, selectedLedgerCustomer.currency || 'JOD'))}</span></p>
-                                  <p><strong>تاريخ طباعة الكشف:</strong> ${escapeHtml(new Date().toLocaleString(isRtl ? 'ar' : 'en'))}</p>
-                                </div>
-                              </div>
-                              <table>
-                                <thead>
-                                  <tr>
-                                    <th>رقم الحركة</th>
-                                    <th>التاريخ</th>
-                                    <th>نوع الحركة</th>
-                                    <th>البيان وملاحظات</th>
-                                    <th style="text-align: right;">المبلغ</th>
-                                    <th style="text-align: right;">الرصيد المستحق بعد الحركة</th>
-                                  </tr>
-                                </thead>
-                                <tbody>
-                                  ${generatedRows}
-                                </tbody>
-                              </table>
-                              <div class="footer-tag">تطبيق مستودعي لتنظيم المستودعات وإدارة الحسابات | شكراً لثقتكم بنا.</div>
-                            </body>
-                          </html>
-                        `);
-                      }
-                    }}
+                    type="button"
+                    onClick={() => printLedger(selectedLedgerCustomer)}
                     className="px-5 py-2.5 rounded-xl h-[38px] cursor-pointer bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold transition-all flex items-center gap-1.5"
                   >
                     <span>🖨️</span>
-                    {isRtl ? 'طباعة كشف الحساب' : 'Print Statement'}
+                    {ledgerView === 'items'
+                      ? (isRtl ? 'طباعة جدول الأصناف' : 'Print items table')
+                      : (isRtl ? 'طباعة كشف الفترة' : 'Print period statement')}
                   </button>
                 </div>
               </div>
@@ -1500,6 +1734,55 @@ export default function CustomerManagement({ language, settings }: Props) {
         )}
       </AnimatePresence>
 
+    </div>
+  );
+}
+
+function StatementItemsTable({ rows, isRtl, invoice }: { rows: StatementItemRow[]; isRtl: boolean; invoice?: Invoice }) {
+  const cur = invoice?.currency || rows[0]?.currency || 'JOD';
+  const discount = Number(invoice?.discount) || 0;
+  const tax = Number(invoice?.taxAmount) || 0;
+  const paid = invoice?.type === 'sale' ? Number(invoice.paymentMethod === 'credit' ? invoice.paidAmount : invoice.totalAmount) || 0 : 0;
+  const summary: [string, number][] = invoice ? [
+    ...(discount > 0 ? [[isRtl ? 'خصم' : 'Discount', -discount] as [string, number]] : []),
+    ...(tax > 0 ? [[isRtl ? 'ضريبة' : 'VAT', tax] as [string, number]] : []),
+    [isRtl ? 'إجمالي الفاتورة' : 'Invoice total', Number(invoice.totalAmount) || 0],
+    ...(paid > 0 ? [[isRtl ? 'مدفوع نقداً' : 'Paid now', -paid] as [string, number]] : []),
+  ] : [];
+  return (
+    <div className="overflow-x-auto rounded-xl border border-white/[0.05] bg-black/10">
+      <table className="w-full min-w-[420px] text-[11px] text-slate-300">
+        <thead className="text-slate-500 font-black">
+          <tr>
+            <th className="px-3 py-1.5 text-start">{isRtl ? 'الصنف' : 'Item'}</th>
+            <th className="px-3 py-1.5 text-end">{isRtl ? 'الكمية' : 'Qty'}</th>
+            <th className="px-3 py-1.5 text-end">{isRtl ? 'سعر الوحدة' : 'Unit price'}</th>
+            <th className="px-3 py-1.5 text-end">{isRtl ? 'المجموع' : 'Total'}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.key} className="border-t border-white/[0.04]">
+              <td className="px-3 py-1.5 font-bold text-slate-100">{row.description}</td>
+              <td className="px-3 py-1.5 text-end font-mono whitespace-nowrap">{row.quantityText}</td>
+              <td className="px-3 py-1.5 text-end font-mono whitespace-nowrap">{formatMoney(row.unitPrice, row.currency, 'en-US')}</td>
+              <td className="px-3 py-1.5 text-end font-mono font-black text-slate-100 whitespace-nowrap">{formatMoney(row.total, row.currency, 'en-US')}</td>
+            </tr>
+          ))}
+        </tbody>
+        {summary.length > 0 && (
+          <tfoot className="text-slate-400">
+            {summary.map(([label, value]) => (
+              <tr key={label} className="border-t border-white/[0.04]">
+                <td colSpan={3} className="px-3 py-1 text-end font-bold">{label}</td>
+                <td className="px-3 py-1 text-end font-mono font-black text-slate-200 whitespace-nowrap">
+                  {value < 0 ? '−' : ''}{formatMoney(Math.abs(value), cur, 'en-US')}
+                </td>
+              </tr>
+            ))}
+          </tfoot>
+        )}
+      </table>
     </div>
   );
 }

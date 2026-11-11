@@ -30,6 +30,8 @@ import {
   CalendarClock,
   Undo2,
   Loader2,
+  FileText,
+  Warehouse as WarehouseIcon,
 } from 'lucide-react';
 import { useFirebase } from './FirebaseProvider';
 import ReturnModal from './ReturnModal';
@@ -71,6 +73,7 @@ import { playPosBeep } from '../lib/sounds';
 import { getExternalSalesApi } from '../lib/externalSalesApi';
 import { computeStockStatus } from '../lib/stock';
 import { pickForPurchase, pickForSale, productsForCode } from '../lib/productLookup';
+import { openCustomerStatement, usePosSaleIntent } from '../lib/posIntent';
 import { formatPackStock, isPackLine, lineAsPack, lineKey, lineQuantityText, lineUnits, productPack, productsForPackCode, unitsInCart } from '../lib/packs';
 import { checkSalePayment } from '../lib/salesPayment';
 import CurrencyPicker from './CurrencyPicker';
@@ -222,6 +225,22 @@ export default function POSSystem({ language }: POSSystemProps) {
   const [receivedAmount, setReceivedAmount] = useState<string>('');
   const [selectedCustomerId, setSelectedCustomerId] = useState<string>('');
   const [customerQuery, setCustomerQuery] = useState('');
+  const [lastSaleCustomer, setLastSaleCustomer] = useState<{ id: string; name: string } | null>(null);
+  /** Sell only from this warehouse. null = every warehouse; '' = products with no warehouse. */
+  const [saleWarehouseId, setSaleWarehouseId] = useState<string | null>(() => {
+    try {
+      const saved = localStorage.getItem('mustawdae_pos_sale_warehouse');
+      return saved === null ? null : saved;
+    } catch { return null; }
+  });
+  const chooseSaleWarehouse = (id: string | null) => {
+    setSaleWarehouseId(id);
+    setSelectedCategory('all');
+    try {
+      if (id === null) localStorage.removeItem('mustawdae_pos_sale_warehouse');
+      else localStorage.setItem('mustawdae_pos_sale_warehouse', id);
+    } catch { /* ignore */ }
+  };
   const [heldBills, setHeldBills] = useState<HeldBill[]>([]);
 
   const discountInputRef = useRef<HTMLInputElement>(null);
@@ -418,6 +437,20 @@ export default function POSSystem({ language }: POSSystemProps) {
     setPosMode(mode);
     clearCartState();
   };
+
+  usePosSaleIntent(({ customerId }) => {
+    if (posMode !== 'sale') {
+      if (scannedItems.length > 0 && !window.confirm(isRtl
+        ? 'سلة التوريد الحالية ستُفرَّغ للانتقال إلى البيع لهذا الزبون. هل تريد المتابعة؟'
+        : 'The current supply cart will be cleared to sell to this customer. Continue?')) return;
+      if (!parkOpenHeldOrAbort()) return;
+      setPosMode('sale');
+      clearCartState();
+    }
+    setSelectedCustomerId(customerId);
+    setCustomerQuery('');
+    setShowSuccessModal(false);
+  });
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showSuccessModal, setShowSuccessModal] = useState(false);
   const [lastInvoiceNumber, setLastInvoiceNumber] = useState('');
@@ -435,7 +468,33 @@ export default function POSSystem({ language }: POSSystemProps) {
   const draftIdRef = useRef<string | null>(null);
   useEffect(() => { draftIdRef.current = null; }, [scannedItems, posMode, discount, enableTax, paymentMethod, activeCurrency]);
 
-  const displayedProducts = products;
+  const activeSaleWarehouse = posMode === 'sale'
+    && saleWarehouseId !== null
+    && (saleWarehouseId === '' || (warehouses || []).some((w) => w.id === saleWarehouseId))
+    ? saleWarehouseId
+    : null;
+  const inSaleWarehouse = (p: Pick<Product, 'warehouseId'>) =>
+    activeSaleWarehouse === null || (p.warehouseId || '') === activeSaleWarehouse;
+  const saleWarehouseName = activeSaleWarehouse === null
+    ? ''
+    : activeSaleWarehouse === ''
+      ? (isRtl ? 'بدون مخزن' : 'No warehouse')
+      : (warehouses || []).find((w) => w.id === activeSaleWarehouse)?.name || '';
+  const hasUnassignedProducts = useMemo(() => products.some((p) => !p.warehouseId), [products]);
+
+  const displayedProducts = useMemo(
+    () => (activeSaleWarehouse === null ? products : products.filter((p) => (p.warehouseId || '') === activeSaleWarehouse)),
+    [products, activeSaleWarehouse],
+  );
+  /** The code exists only in other warehouses: refuse rather than cut stock from the wrong one. */
+  const refuseOutsideSaleWarehouse = (matches: Pick<Product, 'warehouseId'>[]): boolean => {
+    if (activeSaleWarehouse === null || matches.length === 0 || matches.some(inSaleWarehouse)) return false;
+    playPosBeep('error');
+    toast.error(isRtl
+      ? `هذا الصنف غير موجود في مخزن «${saleWarehouseName}». غيّر مخزن البيع أو انقل الصنف إليه.`
+      : `This item is not in the “${saleWarehouseName}” warehouse. Change the sale warehouse or transfer the item.`);
+    return true;
+  };
 
   // Retrieve unique categories
   const categoryCounts = useMemo(() => {
@@ -448,7 +507,7 @@ export default function POSSystem({ language }: POSSystemProps) {
     () => (selectedCategory === 'all' ? displayedProducts : displayedProducts.filter(p => p.category === selectedCategory)),
     [displayedProducts, selectedCategory],
   );
-  const gridPage = useProgressiveList(gridProducts, selectedCategory);
+  const gridPage = useProgressiveList(gridProducts, `${selectedCategory}|${activeSaleWarehouse ?? '*'}`);
 
   const refreshRates = async (force = false) => {
     setRatesLoading(true);
@@ -590,11 +649,17 @@ export default function POSSystem({ language }: POSSystemProps) {
     const cleanText = decodedText.replace(/[\x00-\x1F\x7F-\x9F]/g, "").trim();
     setBarcodeInput(cleanText);
     
-    const codeMatches = productsForCode(products, cleanText);
-    const packMatches = codeMatches.length ? [] : productsForPackCode(products, cleanText);
+    const allCodeMatches = productsForCode(products, cleanText);
+    const allPackMatches = allCodeMatches.length ? [] : productsForPackCode(products, cleanText);
+    if (refuseOutsideSaleWarehouse([...allCodeMatches, ...allPackMatches])) {
+      setBarcodeInput('');
+      return;
+    }
+    const codeMatches = allCodeMatches.filter(inSaleWarehouse);
+    const packMatches = codeMatches.length ? [] : allPackMatches.filter(inSaleWarehouse);
     const asPack = packMatches.length > 0;
     const candidates = asPack ? packMatches : codeMatches;
-    const matchedProduct = posMode === 'purchase' ? pickForPurchase(candidates) : pickForSale(candidates);
+    const matchedProduct = posMode === 'purchase' ? pickForPurchase(candidates) : pickForSale(candidates, activeSaleWarehouse);
 
     if (matchedProduct) {
       addItemToPOS(matchedProduct, asPack);
@@ -605,7 +670,7 @@ export default function POSSystem({ language }: POSSystemProps) {
       );
     } else {
       // Fallback search by name containing scanned code
-      const matchByName = products.filter(
+      const matchByName = displayedProducts.filter(
         p => p.name.toLowerCase().includes(cleanText.toLowerCase())
       );
       if (matchByName.length === 1) {
@@ -863,8 +928,14 @@ export default function POSSystem({ language }: POSSystemProps) {
     if (!query) return;
 
     // 1. Search locally synchronized inventory (instant match)
-    const codeMatches = productsForCode(products, query);
-    const matchedProduct = posMode === 'purchase' ? pickForPurchase(codeMatches) : pickForSale(codeMatches);
+    const allCodeMatches = productsForCode(products, query);
+    const allPackMatches = productsForPackCode(products, query);
+    if (refuseOutsideSaleWarehouse(allCodeMatches.length ? allCodeMatches : allPackMatches)) {
+      setBarcodeInput('');
+      return;
+    }
+    const codeMatches = allCodeMatches.filter(inSaleWarehouse);
+    const matchedProduct = posMode === 'purchase' ? pickForPurchase(codeMatches) : pickForSale(codeMatches, activeSaleWarehouse);
 
     if (matchedProduct) {
       addItemToPOS(matchedProduct);
@@ -872,8 +943,8 @@ export default function POSSystem({ language }: POSSystemProps) {
       return;
     }
 
-    const packMatches = productsForPackCode(products, query);
-    const packProduct = posMode === 'purchase' ? pickForPurchase(packMatches) : pickForSale(packMatches);
+    const packMatches = allPackMatches.filter(inSaleWarehouse);
+    const packProduct = posMode === 'purchase' ? pickForPurchase(packMatches) : pickForSale(packMatches, activeSaleWarehouse);
     if (packProduct) {
       addItemToPOS(packProduct, true);
       setBarcodeInput('');
@@ -881,7 +952,7 @@ export default function POSSystem({ language }: POSSystemProps) {
     }
 
     // Try searching by name containing the query as local fallback
-    const matchByName = products.filter(
+    const matchByName = displayedProducts.filter(
       p => p.name.toLowerCase().includes(query.toLowerCase())
     );
     if (matchByName.length === 1) {
@@ -1471,6 +1542,7 @@ export default function POSSystem({ language }: POSSystemProps) {
       }
 
       // Clear State
+      setLastSaleCustomer(posMode === 'sale' && customer ? { id: customer.id, name: customer.name } : null);
       setLastInvoiceNumber(officialInvoice.invoiceNumber);
       setInvoiceTick((t) => t + 1);
       setLastCompletedInvoice(officialInvoice);
@@ -1508,8 +1580,9 @@ export default function POSSystem({ language }: POSSystemProps) {
 
   const lookupTerm = searchTerm.toLowerCase();
   const filteredLookupProducts = showProductLookup
-    ? products.filter(p => p.name.toLowerCase().includes(lookupTerm) || p.sku?.toLowerCase().includes(lookupTerm)).slice(0, 100)
+    ? displayedProducts.filter(p => p.name.toLowerCase().includes(lookupTerm) || p.sku?.toLowerCase().includes(lookupTerm)).slice(0, 100)
     : [];
+  const warehouseNameOf = (id?: string) => (id ? (warehouses || []).find((w) => w.id === id)?.name : '') || '';
 
   return (
     <div className="flex-1 p-2 sm:p-4 lg:p-6 flex flex-col min-h-[85vh] text-slate-800 dark:text-slate-100" dir={isRtl ? 'rtl' : 'ltr'}>
@@ -1641,6 +1714,60 @@ export default function POSSystem({ language }: POSSystemProps) {
           >
             {isRtl ? 'فتح الوردية' : 'Open shift'}
           </button>
+        </div>
+      )}
+
+      {posMode === 'sale' && (selectedCustomer || (warehouses?.length ?? 0) > 0) && (
+        <div className="mt-4 flex flex-col sm:flex-row sm:items-center gap-2">
+          {selectedCustomer && (
+            <div className="flex-1 min-w-0 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-2xl border border-indigo-200/70 dark:border-indigo-500/25 bg-indigo-50/70 dark:bg-indigo-500/10 px-4 py-2.5">
+              <User size={15} className="text-indigo-500 shrink-0" />
+              <span className="text-xs font-black text-slate-800 dark:text-slate-100 truncate">
+                {isRtl ? 'البيع على حساب:' : 'Selling to:'} {selectedCustomer.name}
+              </span>
+              <span className="text-[11px] font-bold text-slate-500 dark:text-slate-400 font-mono">
+                {isRtl ? 'الرصيد الحالي' : 'Balance'} {formatMoney(Number(selectedCustomer.totalDebt) || 0, selectedCustomer.currency || activeCurrency)}
+              </span>
+              <div className="ms-auto flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => openCustomerStatement(selectedCustomer.id, selectedCustomer.name)}
+                  className="inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-[11px] font-black text-indigo-700 dark:text-indigo-300 hover:bg-indigo-100 dark:hover:bg-indigo-500/20 cursor-pointer"
+                >
+                  <FileText size={12} />
+                  {isRtl ? 'كشف الحساب' : 'Statement'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setSelectedCustomerId(''); setCustomerQuery(''); }}
+                  className="p-1 rounded-md text-slate-400 hover:text-slate-700 dark:hover:text-white cursor-pointer"
+                  aria-label={isRtl ? 'إزالة العميل' : 'Clear customer'}
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            </div>
+          )}
+          {(warehouses?.length ?? 0) > 0 && (
+            <label className="flex items-center gap-2 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/60 px-3 py-2 shrink-0">
+              <WarehouseIcon size={15} className={activeSaleWarehouse === null ? 'text-slate-400' : 'text-emerald-500'} />
+              <span className="text-[11px] font-black text-slate-500 dark:text-slate-400">{isRtl ? 'البيع من:' : 'Sell from:'}</span>
+              <select
+                value={activeSaleWarehouse === null ? '__all__' : activeSaleWarehouse === '' ? '__none__' : activeSaleWarehouse}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  chooseSaleWarehouse(v === '__all__' ? null : v === '__none__' ? '' : v);
+                }}
+                className="bg-transparent text-xs font-black text-slate-800 dark:text-slate-100 focus:outline-none cursor-pointer"
+              >
+                <option value="__all__">{isRtl ? 'كل المخازن' : 'All warehouses'}</option>
+                {(warehouses || []).map((w) => (
+                  <option key={w.id} value={w.id}>{w.name}</option>
+                ))}
+                {hasUnassignedProducts && <option value="__none__">{isRtl ? 'بدون مخزن' : 'No warehouse'}</option>}
+              </select>
+            </label>
+          )}
         </div>
       )}
 
@@ -2532,7 +2659,10 @@ export default function POSSystem({ language }: POSSystemProps) {
                     >
                       <div className="space-y-0.5">
                         <p className="font-extrabold text-xs text-slate-900 dark:text-white">{p.name}</p>
-                        <p className="text-[10px] text-slate-400 dark:text-slate-500 font-mono">SKU: {p.sku || p.id} • {isRtl ? 'المتوفر:' : 'Qty:'} {p.quantity}</p>
+                        <p className="text-[10px] text-slate-400 dark:text-slate-500 font-mono">
+                          SKU: {p.sku || p.id} • {isRtl ? 'المتوفر:' : 'Qty:'} {p.quantity}
+                          {warehouseNameOf(p.warehouseId) ? ` • ${warehouseNameOf(p.warehouseId)}` : ''}
+                        </p>
                       </div>
                       <span className="text-xs font-black text-indigo-600 dark:text-indigo-400 font-mono">
                         {(() => {
@@ -2577,6 +2707,34 @@ export default function POSSystem({ language }: POSSystemProps) {
                     : `Invoice ${lastInvoiceNumber} was saved; stock and balances were updated.`}
                 </p>
               </div>
+
+              {lastSaleCustomer && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowSuccessModal(false);
+                      openCustomerStatement(lastSaleCustomer.id, lastSaleCustomer.name);
+                    }}
+                    className="py-3 rounded-xl text-xs font-black border border-indigo-200 dark:border-indigo-500/30 bg-indigo-50 dark:bg-indigo-500/10 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-100 dark:hover:bg-indigo-500/20 transition cursor-pointer flex items-center justify-center gap-2"
+                  >
+                    <FileText size={14} />
+                    {isRtl ? `كشف حساب ${lastSaleCustomer.name}` : `${lastSaleCustomer.name}'s statement`}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedCustomerId(lastSaleCustomer.id);
+                      setShowSuccessModal(false);
+                      focusScanner();
+                    }}
+                    className="py-3 rounded-xl text-xs font-black border border-emerald-200 dark:border-emerald-500/30 bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-100 dark:hover:bg-emerald-500/20 transition cursor-pointer flex items-center justify-center gap-2"
+                  >
+                    <User size={14} />
+                    {isRtl ? 'بيع آخر لنفس الزبون' : 'Another sale to this customer'}
+                  </button>
+                </div>
+              )}
 
               <div className="pt-4 border-t border-slate-200 dark:border-slate-800 flex flex-col sm:flex-row gap-3">
                 {lastCompletedInvoice && (
