@@ -819,7 +819,7 @@ export default function CustomerManagement({ language, settings }: Props) {
                     </div>
 
                     {/* Edit & Purge handles */}
-                    <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-all">
+                    <div className="flex gap-1 transition-all [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100 [@media(hover:hover)]:group-focus-within:opacity-100">
                       <button 
                         onClick={() => handleOpenEdit(customer)}
                         className="p-2 bg-gray-50 hover:bg-indigo-50 dark:bg-gray-700/50 dark:hover:bg-indigo-950/40 text-gray-400 hover:text-indigo-600 rounded-lg transition-colors cursor-pointer"
@@ -960,7 +960,7 @@ export default function CustomerManagement({ language, settings }: Props) {
       {/* DIALOG 1: Add or Edit Customer Profile */}
       <AnimatePresence>
         {isModalOpen && (
-          <div className="fixed inset-0 z-[50] flex items-center justify-center p-4">
+          <div className="fixed inset-0 z-[50] flex items-center justify-center p-2 sm:p-4">
             
             {/* Dark elegant backdrops */}
             <motion.div 
@@ -976,7 +976,7 @@ export default function CustomerManagement({ language, settings }: Props) {
               initial={{ scale: 0.9, y: 20, opacity: 0 }}
               animate={{ scale: 1, y: 0, opacity: 1 }}
               exit={{ scale: 0.9, y: 20, opacity: 0 }}
-              className="bg-white dark:bg-gray-800 rounded-[2.5rem] border border-gray-100 dark:border-gray-700 shadow-2xl relative max-w-lg w-full z-10 overflow-hidden"
+              className="bg-white dark:bg-gray-800 rounded-3xl sm:rounded-[2.5rem] border border-gray-100 dark:border-gray-700 shadow-2xl relative max-w-lg w-full z-10 overflow-x-hidden overflow-y-auto max-h-[calc(100dvh-1rem)] sm:max-h-[92dvh]"
             >
               <div className="p-6 border-b border-gray-50 dark:border-gray-700 flex justify-between items-center bg-gray-50/50 dark:bg-gray-800/50">
                 <h2 className="text-xl font-black text-gray-900 dark:text-white">
@@ -1089,7 +1089,7 @@ export default function CustomerManagement({ language, settings }: Props) {
       {/* DIALOG 2: Adjust Debt Ledger (Receive Payments / Settle or Add Debt) */}
       <AnimatePresence>
         {isPayModalOpen && selectedCustomer && (
-          <div className="fixed inset-0 z-[50] flex items-center justify-center p-4">
+          <div className="fixed inset-0 z-[50] flex items-center justify-center p-2 sm:p-4">
             
             <motion.div 
               initial={{ opacity: 0 }}
@@ -1103,7 +1103,7 @@ export default function CustomerManagement({ language, settings }: Props) {
               initial={{ scale: 0.9, y: 20, opacity: 0 }}
               animate={{ scale: 1, y: 0, opacity: 1 }}
               exit={{ scale: 0.9, y: 20, opacity: 0 }}
-              className="bg-white dark:bg-gray-800 rounded-[2.5rem] border border-gray-100 dark:border-gray-700 shadow-2xl relative max-w-lg w-full z-10 overflow-hidden"
+              className="bg-white dark:bg-gray-800 rounded-3xl sm:rounded-[2.5rem] border border-gray-100 dark:border-gray-700 shadow-2xl relative max-w-lg w-full z-10 overflow-x-hidden overflow-y-auto max-h-[calc(100dvh-1rem)] sm:max-h-[92dvh]"
             >
               <div className="p-6 border-b border-gray-50 dark:border-gray-700 flex justify-between items-center bg-gray-50/50 dark:bg-gray-800/50">
                 <div>
@@ -1234,7 +1234,7 @@ export default function CustomerManagement({ language, settings }: Props) {
       {/* DIALOG 3: Send via WhatsApp with dynamic Templates */}
       <AnimatePresence>
         {isMsgModalOpen && selectedCustomer && (
-          <div className="fixed inset-0 z-[50] flex items-center justify-center p-4">
+          <div className="fixed inset-0 z-[50] flex items-center justify-center p-2 sm:p-4">
             
             <motion.div 
               initial={{ opacity: 0 }}
@@ -1248,7 +1248,7 @@ export default function CustomerManagement({ language, settings }: Props) {
               initial={{ scale: 0.9, y: 20, opacity: 0 }}
               animate={{ scale: 1, y: 0, opacity: 1 }}
               exit={{ scale: 0.9, y: 20, opacity: 0 }}
-              className="bg-white dark:bg-gray-800 rounded-[2.5rem] border border-gray-100 dark:border-gray-700 shadow-2xl relative max-w-lg w-full z-10 overflow-hidden"
+              className="bg-white dark:bg-gray-800 rounded-3xl sm:rounded-[2.5rem] border border-gray-100 dark:border-gray-700 shadow-2xl relative max-w-lg w-full z-10 overflow-x-hidden overflow-y-auto max-h-[calc(100dvh-1rem)] sm:max-h-[92dvh]"
             >
               <div className="p-6 border-b border-gray-50 dark:border-gray-700 flex justify-between items-center bg-gray-50/50 dark:bg-gray-800/50">
                 <div>
@@ -1345,7 +1345,7 @@ export default function CustomerManagement({ language, settings }: Props) {
       {/* DIALOG 4: Customer Account Statement Ledger */}
       <AnimatePresence>
         {isLedgerModalOpen && selectedLedgerCustomer && (
-          <div className="fixed inset-0 z-[50] flex items-center justify-center p-4">
+          <div className="fixed inset-0 z-[50] flex items-center justify-center p-2 sm:p-4">
             
             <motion.div 
               initial={{ opacity: 0 }}
@@ -1359,10 +1359,10 @@ export default function CustomerManagement({ language, settings }: Props) {
               initial={{ scale: 0.93, y: 15, opacity: 0 }}
               animate={{ scale: 1, y: 0, opacity: 1 }}
               exit={{ scale: 0.93, y: 15, opacity: 0 }}
-              className="bg-[#112229] border border-teal-900/40 rounded-[2.5rem] shadow-2xl relative max-w-4xl w-full z-10 overflow-hidden flex flex-col max-h-[92vh]"
+              className="bg-[#112229] border border-teal-900/40 rounded-3xl sm:rounded-[2.5rem] shadow-2xl relative max-w-4xl w-full z-10 overflow-hidden flex flex-col max-h-[calc(100dvh-1rem)] sm:max-h-[92dvh]"
             >
               {/* Modal Header */}
-              <div className="p-6 border-b border-teal-950/45 flex justify-between items-center bg-[#0d1b20]">
+              <div className="px-4 py-3 sm:p-6 border-b border-teal-950/45 flex justify-between items-center gap-3 bg-[#0d1b20] shrink-0">
                 <div className="flex items-center gap-3">
                   <div className="p-2.5 bg-indigo-500/10 text-indigo-400 rounded-xl">
                     <Coins size={20} />
@@ -1386,10 +1386,10 @@ export default function CustomerManagement({ language, settings }: Props) {
               </div>
 
               {/* Scrollable Container */}
-              <div className="p-6 overflow-y-auto flex-1 flex flex-col gap-6 custom-scrollbar">
+              <div className="p-4 sm:p-6 overflow-y-auto flex-1 min-h-0 space-y-5 sm:space-y-6 custom-scrollbar">
                 
                 {/* 1. THE HERO CARD (BILINGUAL DETAILED WORKSPACE LEDGER STATS) */}
-                <div className="w-full p-6 rounded-3xl bg-gradient-to-br from-[#1b343e] via-[#203a43] to-[#2c5364] border border-white/5 shadow-xl relative overflow-hidden flex flex-col gap-4">
+                <div className="w-full p-4 sm:p-6 rounded-3xl bg-gradient-to-br from-[#1b343e] via-[#203a43] to-[#2c5364] border border-white/5 shadow-xl relative overflow-hidden flex flex-col gap-4">
                   {/* Glassmorphism abstract decorative circle */}
                   <div className="absolute -right-12 -bottom-12 w-48 h-48 bg-teal-400/5 rounded-full blur-3xl pointer-events-none" />
                   
@@ -1436,7 +1436,7 @@ export default function CustomerManagement({ language, settings }: Props) {
 
                   <div className="w-full h-px bg-white/10" />
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                  <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
                     <div className="space-y-1">
                       <p className="text-[10px] text-gray-300 font-bold uppercase tracking-wide">
                         {isRtl ? 'الرصيد الحالي' : 'Current balance'}
@@ -1566,7 +1566,30 @@ export default function CustomerManagement({ language, settings }: Props) {
                     </div>
                   ) : (
                     <div className="space-y-3">
-                      <div className="overflow-x-auto rounded-2xl border border-white/[0.06]">
+                      <div className="sm:hidden space-y-2">
+                        {ledgerItemRows.map((row) => (
+                          <div
+                            key={row.key}
+                            className={`rounded-2xl border px-3 py-2.5 ${row.kind === 'return' ? 'border-emerald-500/20 bg-emerald-500/[0.05]' : 'border-white/[0.06] bg-white/[0.03]'}`}
+                          >
+                            <div className="flex items-start justify-between gap-3">
+                              <p className="text-xs font-black text-white break-words min-w-0">{row.description}</p>
+                              <p className={`text-xs font-mono font-black whitespace-nowrap ${row.kind === 'return' ? 'text-emerald-400' : 'text-white'}`}>
+                                {row.kind === 'return' ? '−' : ''}{formatMoney(row.total, row.currency, 'en-US')}
+                              </p>
+                            </div>
+                            <p className="mt-1 text-[11px] tabular-nums text-slate-300">
+                              {row.kind === 'return' ? '−' : ''}{row.quantityText} × {formatMoney(row.unitPrice, row.currency, 'en-US')}
+                            </p>
+                            <p className="mt-1 text-[10px] text-slate-500 flex flex-wrap gap-x-2">
+                              <span className="font-mono">{fmtDate(row.date)} · {fmtTime(row.date)}</span>
+                              <span className="font-mono">#{row.invoiceNumber}</span>
+                              <span>{paymentLabel(row)}</span>
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                      <div className="hidden sm:block overflow-x-auto rounded-2xl border border-white/[0.06]">
                         <table className="w-full min-w-[720px] text-[11px] text-slate-200">
                           <thead className="bg-white/[0.04] text-slate-400 font-black">
                             <tr>
@@ -1591,7 +1614,7 @@ export default function CustomerManagement({ language, settings }: Props) {
                                   {row.description}
                                   {row.sku ? <span className="block text-[9px] font-mono text-slate-500">{row.sku}</span> : null}
                                 </td>
-                                <td className="px-3 py-2 text-end font-mono whitespace-nowrap">{row.kind === 'return' ? '−' : ''}{row.quantityText}</td>
+                                <td className="px-3 py-2 text-end tabular-nums whitespace-nowrap">{row.kind === 'return' ? '−' : ''}{row.quantityText}</td>
                                 <td className="px-3 py-2 text-end font-mono whitespace-nowrap">{formatMoney(row.unitPrice, row.currency, 'en-US')}</td>
                                 <td className={`px-3 py-2 text-end font-mono font-black whitespace-nowrap ${row.kind === 'return' ? 'text-emerald-400' : 'text-white'}`}>
                                   {row.kind === 'return' ? '−' : ''}{formatMoney(row.total, row.currency, 'en-US')}
@@ -1705,7 +1728,7 @@ export default function CustomerManagement({ language, settings }: Props) {
               </div>
 
               {/* Modal Footer Controls */}
-              <div className="p-6 border-t border-teal-950/45 bg-[#0d1b20] flex justify-between items-center">
+              <div className="px-4 py-3 sm:p-6 border-t border-teal-950/45 bg-[#0d1b20] flex justify-between items-center gap-2 shrink-0">
                 <TactileButton 
                   type="button" 
                   variant="secondary" 
@@ -1751,22 +1774,27 @@ function StatementItemsTable({ rows, isRtl, invoice }: { rows: StatementItemRow[
   ] : [];
   return (
     <div className="overflow-x-auto rounded-xl border border-white/[0.05] bg-black/10">
-      <table className="w-full min-w-[420px] text-[11px] text-slate-300">
+      <table className="w-full text-[11px] text-slate-300">
         <thead className="text-slate-500 font-black">
           <tr>
-            <th className="px-3 py-1.5 text-start">{isRtl ? 'الصنف' : 'Item'}</th>
-            <th className="px-3 py-1.5 text-end">{isRtl ? 'الكمية' : 'Qty'}</th>
-            <th className="px-3 py-1.5 text-end">{isRtl ? 'سعر الوحدة' : 'Unit price'}</th>
-            <th className="px-3 py-1.5 text-end">{isRtl ? 'المجموع' : 'Total'}</th>
+            <th className="px-2 sm:px-3 py-1.5 text-start">{isRtl ? 'الصنف' : 'Item'}</th>
+            <th className="px-2 sm:px-3 py-1.5 text-end">{isRtl ? 'الكمية' : 'Qty'}</th>
+            <th className="hidden sm:table-cell px-3 py-1.5 text-end">{isRtl ? 'سعر الوحدة' : 'Unit price'}</th>
+            <th className="px-2 sm:px-3 py-1.5 text-end">{isRtl ? 'المجموع' : 'Total'}</th>
           </tr>
         </thead>
         <tbody>
           {rows.map((row) => (
             <tr key={row.key} className="border-t border-white/[0.04]">
-              <td className="px-3 py-1.5 font-bold text-slate-100">{row.description}</td>
-              <td className="px-3 py-1.5 text-end font-mono whitespace-nowrap">{row.quantityText}</td>
-              <td className="px-3 py-1.5 text-end font-mono whitespace-nowrap">{formatMoney(row.unitPrice, row.currency, 'en-US')}</td>
-              <td className="px-3 py-1.5 text-end font-mono font-black text-slate-100 whitespace-nowrap">{formatMoney(row.total, row.currency, 'en-US')}</td>
+              <td className="px-2 sm:px-3 py-1.5 font-bold text-slate-100 break-words">
+                {row.description}
+                <span className="sm:hidden block text-[10px] font-mono font-medium text-slate-500">
+                  @ {formatMoney(row.unitPrice, row.currency, 'en-US')}
+                </span>
+              </td>
+              <td className="px-2 sm:px-3 py-1.5 text-end tabular-nums whitespace-nowrap">{row.quantityText}</td>
+              <td className="hidden sm:table-cell px-3 py-1.5 text-end font-mono whitespace-nowrap">{formatMoney(row.unitPrice, row.currency, 'en-US')}</td>
+              <td className="px-2 sm:px-3 py-1.5 text-end font-mono font-black text-slate-100 whitespace-nowrap">{formatMoney(row.total, row.currency, 'en-US')}</td>
             </tr>
           ))}
         </tbody>
@@ -1774,7 +1802,8 @@ function StatementItemsTable({ rows, isRtl, invoice }: { rows: StatementItemRow[
           <tfoot className="text-slate-400">
             {summary.map(([label, value]) => (
               <tr key={label} className="border-t border-white/[0.04]">
-                <td colSpan={3} className="px-3 py-1 text-end font-bold">{label}</td>
+                <td colSpan={2} className="sm:hidden px-2 py-1 text-end font-bold">{label}</td>
+                <td colSpan={3} className="hidden sm:table-cell px-3 py-1 text-end font-bold">{label}</td>
                 <td className="px-3 py-1 text-end font-mono font-black text-slate-200 whitespace-nowrap">
                   {value < 0 ? '−' : ''}{formatMoney(Math.abs(value), cur, 'en-US')}
                 </td>
