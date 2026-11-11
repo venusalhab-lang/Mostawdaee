@@ -221,7 +221,7 @@ export default function POSSystem({ language }: POSSystemProps) {
   
   // Advanced POS states
   const [lastScannedProductId, setLastScannedProductId] = useState<string | null>(null);
-  const [paymentMethod, setPaymentMethod] = useState<'cash' | 'card' | 'wallet'>('cash');
+  const [paymentMethod, setPaymentMethod] = useState<'cash' | 'card' | 'wallet' | 'credit'>('cash');
   const [receivedAmount, setReceivedAmount] = useState<string>('');
   const [selectedCustomerId, setSelectedCustomerId] = useState<string>('');
   const [customerQuery, setCustomerQuery] = useState('');
@@ -449,6 +449,9 @@ export default function POSSystem({ language }: POSSystemProps) {
     }
     setSelectedCustomerId(customerId);
     setCustomerQuery('');
+    // From the customer card the intent is on-account sale — empty cash would otherwise save as full cash and leave debt at 0.
+    setPaymentMethod('credit');
+    setReceivedAmount('');
     setShowSuccessModal(false);
   });
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -1351,7 +1354,7 @@ export default function POSSystem({ language }: POSSystemProps) {
   }, [customers, customerQuery]);
 
   // Submit standard invoice
-  const handleSubmitProcess = async (cashOverride?: number, methodOverride?: 'cash' | 'card' | 'wallet') => {
+  const handleSubmitProcess = async (cashOverride?: number, methodOverride?: 'cash' | 'card' | 'wallet' | 'credit') => {
     const method = methodOverride || paymentMethod;
     if (submitLockRef.current) return;
     if (scannedItems.length === 0) {
@@ -1374,11 +1377,13 @@ export default function POSSystem({ language }: POSSystemProps) {
     try {
       const typedCash = typeof cashOverride === 'number' ? cashOverride : parseFloat(receivedAmount);
       const isCashSale = posMode === 'sale' && method === 'cash';
+      const isFullCredit = posMode === 'sale' && method === 'credit';
+      // Empty cash field means "paid in full" — not on account. Use آجل (or type 0 / underpay) for debt.
       const parsedCash = isCashSale
         ? (receivedAmount !== '' || typeof cashOverride === 'number'
           ? (Number.isFinite(typedCash) ? typedCash : 0)
           : grandTotal)
-        : grandTotal;
+        : isFullCredit ? 0 : grandTotal;
 
       let saleMethod: 'cash' | 'card' | 'wallet' | 'credit' = posMode === 'purchase' ? 'cash' : method;
       let paidNow = parsedCash;
@@ -1387,26 +1392,27 @@ export default function POSSystem({ language }: POSSystemProps) {
       let debtCurrency: Currency | undefined;
       const customer = selectedCustomer;
 
-      if (posMode === 'sale' && isCashSale && parsedCash < grandTotal - 1e-6) {
+      const applyCreditDebt = (paid: number): boolean => {
         if (!customer) {
-          setIsSubmitting(false);
-          submitLockRef.current = false;
           playBeep('error');
           toast.error(isRtl
-            ? 'المبلغ أقل من الإجمالي. اختر عميلاً لتسجيل الباقي ديناً، أو أدخل المبلغ كاملاً.'
-            : 'Amount is less than the total. Select a customer to put the remainder on account, or take full payment.');
-          return;
+            ? 'البيع الآجل يحتاج زبونًا مسجّلًا. اختر العميل أولًا.'
+            : 'Credit sales need a registered customer. Select the customer first.');
+          return false;
         }
-        paidNow = roundMoney(Math.max(0, parsedCash), activeCurrency);
+        paidNow = roundMoney(Math.max(0, paid), activeCurrency);
         const payErr = checkSalePayment('credit', grandTotal, paidNow, activeCurrency as Currency, customer.id);
         if (payErr) {
-          setIsSubmitting(false);
-          submitLockRef.current = false;
           playBeep('error');
-          toast.error(isRtl ? 'تعذّر تسجيل الدفع الجزئي.' : 'Could not record the partial payment.');
-          return;
+          toast.error(isRtl ? 'تعذّر تسجيل البيع الآجل.' : 'Could not record the credit sale.');
+          return false;
         }
         const owed = roundMoney(grandTotal - paidNow, activeCurrency);
+        if (!(owed > 0)) {
+          playBeep('error');
+          toast.error(isRtl ? 'لا يوجد مبلغ آجل لتسجيله.' : 'There is no on-account amount to record.');
+          return false;
+        }
         const custCurrency = (customer.currency || activeCurrency) as Currency;
         const debtPlan = planPosCreditDebt({
           owed,
@@ -1418,18 +1424,40 @@ export default function POSSystem({ language }: POSSystemProps) {
           usdUnitRates,
         });
         if (!debtPlan.ok) {
-          setIsSubmitting(false);
-          submitLockRef.current = false;
           playBeep('error');
           toast.error(isRtl
             ? `لا يوجد سعر صرف موثوق من ${activeCurrency} إلى ${custCurrency} لتسجيل الدين. حدّث الأسعار أو أدخل أسعارك من الإعدادات، أو اجعل الفاتورة بعملة العميل.`
             : `No trusted ${activeCurrency} → ${custCurrency} rate to record this debt. Refresh rates, set manual rates in Settings, or bill in the customer's currency.`);
-          return;
+          return false;
         }
         debtAmount = debtPlan.debtAmount;
         debtCurrency = debtPlan.debtCurrency;
         saleMethod = 'credit';
         changeDue = 0;
+        return true;
+      };
+
+      if (posMode === 'sale' && isFullCredit) {
+        if (!applyCreditDebt(0)) {
+          setIsSubmitting(false);
+          submitLockRef.current = false;
+          return;
+        }
+      } else if (posMode === 'sale' && isCashSale && parsedCash < grandTotal - 1e-6) {
+        if (!customer) {
+          setIsSubmitting(false);
+          submitLockRef.current = false;
+          playBeep('error');
+          toast.error(isRtl
+            ? 'المبلغ أقل من الإجمالي. اختر عميلاً لتسجيل الباقي ديناً، أو أدخل المبلغ كاملاً، أو اختر «آجل».'
+            : 'Amount is less than the total. Select a customer for the remainder, take full payment, or choose Credit.');
+          return;
+        }
+        if (!applyCreditDebt(parsedCash)) {
+          setIsSubmitting(false);
+          submitLockRef.current = false;
+          return;
+        }
       } else if (isCashSale) {
         paidNow = parsedCash;
         changeDue = roundMoney(Math.max(0, parsedCash - grandTotal), activeCurrency);
@@ -2399,7 +2427,7 @@ export default function POSSystem({ language }: POSSystemProps) {
                 </span>
                 
                 {/* Gateway Selector Tabs */}
-                <div className="grid grid-cols-3 gap-1 px-0.5">
+                <div className="grid grid-cols-4 gap-1 px-0.5">
                   <button
                     type="button"
                     onClick={() => {
@@ -2419,6 +2447,22 @@ export default function POSSystem({ language }: POSSystemProps) {
                   <button
                     type="button"
                     onClick={() => {
+                      setPaymentMethod('credit');
+                      setReceivedAmount('');
+                    }}
+                    className={`py-1.5 text-[10px] font-black rounded-lg border flex flex-col items-center gap-1 transition-all active:scale-95 cursor-pointer ${
+                      paymentMethod === 'credit'
+                        ? 'bg-amber-600 text-white border-amber-500 shadow-sm'
+                        : 'bg-white dark:bg-white/[0.02] border-slate-200 dark:border-white/5 text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-white/5'
+                    }`}
+                  >
+                    <FileText size={12} />
+                    <span>{isRtl ? 'آجل' : 'Credit'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
                       setPaymentMethod('card');
                       setReceivedAmount(grandTotal.toFixed(currencyDecimals(activeCurrency)));
                     }}
@@ -2429,7 +2473,7 @@ export default function POSSystem({ language }: POSSystemProps) {
                     }`}
                   >
                     <CreditCard size={12} />
-                    <span>{isRtl ? 'بطاقة بنكية' : 'Card'}</span>
+                    <span>{isRtl ? 'بطاقة' : 'Card'}</span>
                   </button>
 
                   <button
@@ -2445,9 +2489,21 @@ export default function POSSystem({ language }: POSSystemProps) {
                     }`}
                   >
                     <Smartphone size={12} />
-                    <span>{isRtl ? 'محفظة جوال' : 'Wallet'}</span>
+                    <span>{isRtl ? 'محفظة' : 'Wallet'}</span>
                   </button>
                 </div>
+
+                {paymentMethod === 'credit' && (
+                  <p className="text-[10px] font-bold leading-snug text-amber-800 dark:text-amber-300 px-0.5">
+                    {selectedCustomer
+                      ? (isRtl
+                        ? `البيع آجل بالكامل على حساب «${selectedCustomer.name}». المبلغ يظهر في بطاقته ويمكن سداده جزئيًا أو كليًا لاحقًا.`
+                        : `Full sale on account for “${selectedCustomer.name}”. The amount appears on their card and can be paid later in part or in full.`)
+                      : (isRtl
+                        ? 'اختر زبونًا مسجّلًا أولًا. بدون عميل لا يُسجَّل دين.'
+                        : 'Select a registered customer first. Without a customer, no debt is recorded.')}
+                  </p>
+                )}
 
                 {(paymentMethod === 'card' || paymentMethod === 'wallet') && (
                   <p className="text-[10px] font-bold leading-snug text-slate-500 dark:text-slate-400 px-0.5">
@@ -2498,12 +2554,14 @@ export default function POSSystem({ language }: POSSystemProps) {
                     }`}>
                       <div className="text-[9px] font-bold">
                         {!hasRec
-                          ? (isRtl ? 'المبلغ المتبقي للعميل:' : 'Change to return:')
+                          ? (selectedCustomer
+                            ? (isRtl ? 'فارغ = نقد كامل. للآجل اختر «آجل» أو أدخل 0' : 'Empty = full cash. For credit choose Credit or type 0')
+                            : (isRtl ? 'المبلغ المتبقي للعميل:' : 'Change to return:'))
                           : over
                             ? (isRtl ? 'الباقي للعميل:' : 'Change to return:')
                             : onAccount
                               ? (isRtl ? 'نقد الآن · الباقي ديناً على العميل' : 'Cash now · remainder on account')
-                              : (isRtl ? 'اختر عميلاً لتسجيل الباقي ديناً، أو أكمل المبلغ' : 'Select a customer for the remainder, or take full payment')
+                              : (isRtl ? 'اختر عميلاً لتسجيل الباقي ديناً، أو أكمل المبلغ، أو اختر «آجل»' : 'Select a customer for the remainder, take full payment, or choose Credit')
                         }
                       </div>
                       <div className="font-mono font-black text-sm mt-0.5">
@@ -2581,9 +2639,14 @@ export default function POSSystem({ language }: POSSystemProps) {
                 disabled={
                   isSubmitting ||
                   scannedItems.length === 0 ||
+                  (posMode === 'sale' && paymentMethod === 'credit' && !selectedCustomerId) ||
                   (posMode === 'sale' && paymentMethod === 'cash' && receivedAmount !== '' && parseFloat(receivedAmount) < grandTotal - 1e-6 && !selectedCustomerId)
                 }
-                className="py-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-black transition-all flex items-center justify-center gap-1.5 text-xs shadow-lg shadow-emerald-500/20 cursor-pointer disabled:opacity-50"
+                className={`py-3 rounded-xl text-white font-black transition-all flex items-center justify-center gap-1.5 text-xs shadow-lg cursor-pointer disabled:opacity-50 ${
+                  paymentMethod === 'credit'
+                    ? 'bg-amber-600 hover:bg-amber-700 shadow-amber-500/20'
+                    : 'bg-emerald-600 hover:bg-emerald-700 shadow-emerald-500/20'
+                }`}
               >
                 {isSubmitting ? (
                   <>
@@ -2592,9 +2655,11 @@ export default function POSSystem({ language }: POSSystemProps) {
                   </>
                 ) : (
                   <span>
-                    {posMode === 'sale' && paymentMethod === 'cash' && selectedCustomerId && receivedAmount !== '' && parseFloat(receivedAmount) < grandTotal - 1e-6
-                      ? (isRtl ? 'نقد + آجل وطباعة' : 'Cash + credit & print')
-                      : (isRtl ? 'إتمام وطباعة [Enter]' : 'Pay & Print [Enter]')}
+                    {posMode === 'sale' && paymentMethod === 'credit'
+                      ? (isRtl ? 'بيع آجل وطباعة' : 'Credit sale & print')
+                      : posMode === 'sale' && paymentMethod === 'cash' && selectedCustomerId && receivedAmount !== '' && parseFloat(receivedAmount) < grandTotal - 1e-6
+                        ? (isRtl ? 'نقد + آجل وطباعة' : 'Cash + credit & print')
+                        : (isRtl ? 'إتمام وطباعة [Enter]' : 'Pay & Print [Enter]')}
                   </span>
                 )}
               </button>
@@ -2725,6 +2790,8 @@ export default function POSSystem({ language }: POSSystemProps) {
                     type="button"
                     onClick={() => {
                       setSelectedCustomerId(lastSaleCustomer.id);
+                      setPaymentMethod('credit');
+                      setReceivedAmount('');
                       setShowSuccessModal(false);
                       focusScanner();
                     }}
