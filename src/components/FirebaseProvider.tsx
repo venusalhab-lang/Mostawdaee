@@ -981,9 +981,12 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     lastUidRef.current = uid;
     migrateLegacyUserCache(uid);
     const bootQueue = readQueue(uid);
+    const bootOwnerId = currentWorkspace()?.ownerId;
+    const bootInvoices = readUserCache<Invoice[]>(uid, 'invoices', []);
+    const bootSyncedIds = bootInvoices.map((inv) => inv.id);
     setSettings(readUserCache(uid, 'settings', null));
-    setProducts(applyQueuedSalesToProducts(readUserCache(uid, 'products', []), bootQueue));
-    setInvoices(mergeQueuedInvoices(readUserCache(uid, 'invoices', []), bootQueue));
+    setProducts(applyQueuedSalesToProducts(readUserCache(uid, 'products', []), bootQueue, bootOwnerId, bootSyncedIds));
+    setInvoices(mergeQueuedInvoices(bootInvoices, bootQueue, bootOwnerId));
     setEmployees(readUserCache(uid, 'employees', []));
     setPayrollRecords(readUserCache(uid, 'payroll', []));
     setCustomers(readUserCache(uid, 'customers', []));
@@ -993,9 +996,9 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     setShifts(readUserCache(uid, 'shifts', []));
     setOrders(readUserCache(uid, 'orders', []));
     const bootVault = readUserCache(uid, 'vault', null);
-    setVaultTransactions(mergeQueuedVaultRecords(readUserCache(uid, 'vault_records', []), bootQueue, undefined, bootVault));
+    setVaultTransactions(mergeQueuedVaultRecords(readUserCache(uid, 'vault_records', []), bootQueue, bootOwnerId, bootVault, bootSyncedIds));
     setWarehouses(readUserCache(uid, 'warehouses', []));
-    setVault(applyQueuedSalesToVault(bootVault, bootQueue) as Vault | null);
+    setVault(applyQueuedSalesToVault(bootVault, bootQueue, bootOwnerId, bootSyncedIds) as Vault | null);
     setAuditLogs(readUserCache(uid, 'audit_logs', []));
     let isMounted = true;
     const onSyncProblem = (event: Event) => {
@@ -1189,7 +1192,9 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       snap.forEach(doc => items.push({ ...doc.data() } as Product));
       // Cache the server snapshot only. Queue deductions are applied for display, never persisted
       // into the cache — otherwise a reload would subtract the same offline sales twice.
-      const merged = applyQueuedSalesToProducts(items, readQueue(uid), currentWorkspace()?.ownerId);
+      // Skip ids already on the server so a synced-but-not-yet-pruned queue entry cannot double-cut stock.
+      const syncedIds = readUserCache<Invoice[]>(uid, 'invoices', []).map((inv) => inv.id);
+      const merged = applyQueuedSalesToProducts(items, readQueue(uid), currentWorkspace()?.ownerId, syncedIds);
       setProducts(merged);
       try {
         writeUserCache(uid, 'products', items);
@@ -1364,12 +1369,14 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       const items: VaultTransaction[] = [];
       snap.forEach(doc => items.push({ ...doc.data() } as VaultTransaction));
       const serverRows = items.sort((a, b) => b.timestamp - a.timestamp);
+      const syncedIds = readUserCache<Invoice[]>(uid, 'invoices', []).map((inv) => inv.id);
       const sorted = mergeQueuedVaultRecords(
         serverRows,
         readQueue(uid),
         currentWorkspace()?.ownerId,
         // Prefer live vault state when present; otherwise the last server vault cache.
         vault || readUserCache(uid, 'vault', null),
+        syncedIds,
       );
       setVaultTransactions(sorted);
       // Cache server rows only — boot merges the queue once.
@@ -1391,10 +1398,12 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       if (snap.exists()) {
         const snapData = snap.data();
         const serverVault = buildVaultDoc(readVaultBalances(snapData), snapData.lastUpdated || Date.now());
+        const syncedIds = readUserCache<Invoice[]>(uid, 'invoices', []).map((inv) => inv.id);
         const stateObj = applyQueuedSalesToVault(
           serverVault,
           readQueue(uid),
           currentWorkspace()?.ownerId,
+          syncedIds,
         ) as Vault;
         setVault(stateObj);
         // Persist the server vault only; boot re-applies the offline queue once.
@@ -1456,15 +1465,17 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       if (!isMounted) return;
       const ownerId = currentWorkspace()?.ownerId;
       const queue = readQueue(uid);
+      const serverInvoices = readUserCache<Invoice[]>(uid, 'invoices', []);
+      const syncedIds = serverInvoices.map((inv) => inv.id);
       const rawProducts = readUserCache<Product[]>(uid, 'products', []);
-      setProducts(applyQueuedSalesToProducts(rawProducts, queue, ownerId));
+      setProducts(applyQueuedSalesToProducts(rawProducts, queue, ownerId, syncedIds));
       const rawVault = readUserCache(uid, 'vault', null);
       if (rawVault) {
-        setVault(applyQueuedSalesToVault(rawVault, queue, ownerId) as Vault);
+        setVault(applyQueuedSalesToVault(rawVault, queue, ownerId, syncedIds) as Vault);
       }
       const serverVaultRows = readUserCache<VaultTransaction[]>(uid, 'vault_records', []);
-      setVaultTransactions(mergeQueuedVaultRecords(serverVaultRows, queue, ownerId, rawVault));
-      setInvoices(mergeQueuedInvoices(readUserCache<Invoice[]>(uid, 'invoices', []), queue, ownerId));
+      setVaultTransactions(mergeQueuedVaultRecords(serverVaultRows, queue, ownerId, rawVault, syncedIds));
+      setInvoices(mergeQueuedInvoices(serverInvoices, queue, ownerId));
     };
     const onQueueChanged = (ev: Event) => {
       const detail = (ev as CustomEvent<{ uid?: string }>).detail;
@@ -1491,7 +1502,16 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       let sent = 0;
       try {
         await withQueueLock(uid, async () => {
-          const queue = readQueue(uid);
+          let queue = readQueue(uid);
+          if (queue.length === 0) return;
+          // Drop entries already on the server (crash between commit and prune) before projecting or retrying.
+          const knownServerIds = new Set(readUserCache<Invoice[]>(uid, 'invoices', []).map((inv) => inv.id));
+          const alreadyOnServer = queue.filter((q) => knownServerIds.has(q.invoice.id));
+          if (alreadyOnServer.length > 0) {
+            queue = queue.filter((q) => !knownServerIds.has(q.invoice.id));
+            writeQueue(uid, queue);
+            sent += alreadyOnServer.filter((q) => belongsToStore(q, store.ownerId) || (!q.storeId && uid === store.ownerId)).length;
+          }
           if (queue.length === 0) return;
           const startIds = new Set(queue.map((q) => q.invoice.id));
           const remaining: QueuedInvoice[] = [];
@@ -2182,8 +2202,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     // --- No connection / deferred cash sale ---
     if (!canQueueOffline(invoice)) {
       throw notify(ar
-        ? 'انقطع الاتصال بالإنترنت قبل تأكيد الحفظ. فواتير الشراء والبيع الآجل تحتاج اتصالاً لأنها تمسّ الخزنة أو ديون الزبائن. أعد المحاولة عند عودة الاتصال؛ لن تُسجَّل الفاتورة مرتين.'
-        : 'The connection dropped before the save was confirmed. Purchases and credit sales need a connection because they touch the vault or customer debt. Try again when you are back online; the invoice will not be recorded twice.', { code: 'offline' });
+        ? 'انقطع الاتصال قبل تأكيد الحفظ. أثناء انقطاع الإنترنت يُسمح فقط بالبيع النقدي. الشراء والآجل والبطاقة والمحفظة تحتاج اتصالاً. أعد المحاولة عند عودة الشبكة؛ لن تُسجَّل الفاتورة مرتين.'
+        : 'The connection dropped before the save was confirmed. Offline, only cash sales can be kept on this device. Purchases, credit, card and wallet need a connection. Try again when online; the invoice will not be recorded twice.', { code: 'offline' });
     }
     const productsById = new Map(products.map((p) => [p.id, p]));
     const queuedInvoice: Invoice = { ...invoice, items: snapshotLineCosts(invoice.items, productsById, defaultCurrency) };
@@ -2198,7 +2218,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       // Shortage check + enqueue under one lock so two tabs cannot both sell the last unit.
       queued = await withQueueLock(uid, () => {
         const rawProducts = readUserCache<Product[]>(uid, 'products', []);
-        const projected = applyQueuedSalesToProducts(rawProducts, readQueue(uid), ownerId);
+        const syncedIds = readUserCache<Invoice[]>(uid, 'invoices', []).map((inv) => inv.id);
+        const projected = applyQueuedSalesToProducts(rawProducts, readQueue(uid), ownerId, syncedIds);
         const shortages = localSaleShortages(queuedInvoice, projected);
         if (shortages.length > 0) {
           const s = shortages[0];
@@ -2229,22 +2250,25 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
 
     // Display-only: queue event also reprojects from raw caches; do not persist merged books.
+    const serverInvoices = readUserCache<Invoice[]>(uid, 'invoices', []);
+    const syncedIds = serverInvoices.map((inv) => inv.id);
     const rawProducts = readUserCache<Product[]>(uid, 'products', []);
-    setProducts(applyQueuedSalesToProducts(rawProducts, readQueue(uid), ownerId));
+    setProducts(applyQueuedSalesToProducts(rawProducts, readQueue(uid), ownerId, syncedIds));
     const plan = planInvoiceVaultEntry(invoice);
     if (plan) {
       const rawVault = readUserCache(uid, 'vault', null) ?? vault;
-      const nextDoc = applyQueuedSalesToVault(rawVault, readQueue(uid), ownerId) as Vault;
+      const nextDoc = applyQueuedSalesToVault(rawVault, readQueue(uid), ownerId, syncedIds) as Vault;
       setVault(nextDoc);
       setVaultTransactions(mergeQueuedVaultRecords(
         readUserCache<VaultTransaction[]>(uid, 'vault_records', []),
         readQueue(uid),
         ownerId,
         rawVault,
+        syncedIds,
       ));
     }
     setInvoices(mergeQueuedInvoices(
-      readUserCache<Invoice[]>(uid, 'invoices', []).filter((inv) => inv.id !== queuedInvoice.id),
+      serverInvoices.filter((inv) => inv.id !== queuedInvoice.id),
       readQueue(uid),
       ownerId,
     ));

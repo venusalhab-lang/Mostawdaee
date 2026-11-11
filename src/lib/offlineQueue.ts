@@ -33,10 +33,13 @@ export function canDeferSaleToQueue(error: unknown): boolean {
   return (error as { code?: string } | null)?.code === 'unauthenticated';
 }
 
-/** Only immediate cash-type sales may wait for the network: purchases need a vault check and
- *  credit sales also write a customer debt, so both must be saved online in one transaction. */
+/**
+ * Only cash sales may wait for the network.
+ * Purchases need a vault check; credit writes customer debt; card/wallet have no offline capture proof.
+ */
 export function canQueueOffline(invoice: Pick<Invoice, 'type' | 'paymentMethod'>): boolean {
-  return invoice.type === 'sale' && invoice.paymentMethod !== 'credit';
+  const method = invoice.paymentMethod || 'cash';
+  return invoice.type === 'sale' && method === 'cash';
 }
 
 export interface QueuedInvoice {

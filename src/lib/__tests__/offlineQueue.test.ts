@@ -61,10 +61,12 @@ describe('offline queue', () => {
     expect(canDeferSaleToQueue({ code: 'aborted' })).toBe(false);
   });
 
-  it('only lets cash-type sales wait for the network', () => {
+  it('only lets cash sales wait for the network', () => {
     expect(canQueueOffline({ type: 'sale', paymentMethod: 'cash' })).toBe(true);
     expect(canQueueOffline({ type: 'sale', paymentMethod: undefined })).toBe(true);
     expect(canQueueOffline({ type: 'sale', paymentMethod: 'credit' })).toBe(false);
+    expect(canQueueOffline({ type: 'sale', paymentMethod: 'card' })).toBe(false);
+    expect(canQueueOffline({ type: 'sale', paymentMethod: 'wallet' })).toBe(false);
     expect(canQueueOffline({ type: 'purchase', paymentMethod: 'cash' })).toBe(false);
   });
 
