@@ -4,7 +4,7 @@ import {
   Sparkles, Palette, Zap, Moon, Sun, Monitor, 
   ShieldCheck, Bell, Database, Download, RefreshCw, Upload,
   Type, Volume2, Info, Copy, Check, FileText, DatabaseZap, CheckSquare, AlertTriangle,
-  Phone, MapPin, Mail, Crown, Users, LifeBuoy, UserCog, FileCheck2, Printer, Clock
+  Phone, MapPin, Mail, Crown, Users, LifeBuoy, UserCog, FileCheck2, Printer, Clock, BookOpen
 } from 'lucide-react';
 import SubscriptionSettings from './SubscriptionSettings';
 import EInvoiceSettings from './EInvoiceSettings';
@@ -12,6 +12,7 @@ import AccountSettings from './AccountSettings';
 import ReceiptPrinterSettings from './ReceiptPrinterSettings';
 import { TeamManager } from './TeamSettings';
 import SupportCenter from './SupportCenter';
+import UserGuide from './UserGuide';
 import { Language, AppSettings, Currency } from '../types';
 import { CURRENCY_SYMBOLS, POS_CURRENCY_CODES, formatMoney, roundMoney } from '../lib/exchangeRates';
 import { readVaultBalances } from '../lib/vaultMath';
@@ -33,10 +34,10 @@ interface Props {
   onSaveSettings: (settings: AppSettings) => Promise<void> | void;
 }
 
-type SettingsSection = 'profile' | 'visuals' | 'inventory' | 'notifications' | 'printing' | 'subscription' | 'team' | 'einvoice' | 'support' | 'account' | 'system';
+type SettingsSection = 'profile' | 'visuals' | 'inventory' | 'notifications' | 'printing' | 'subscription' | 'team' | 'einvoice' | 'guide' | 'support' | 'account' | 'system';
 
 // These sections save their own changes; inside the settings form their forms would also submit it.
-const SELF_CONTAINED_SECTIONS = new Set<SettingsSection>(['printing', 'subscription', 'team', 'einvoice', 'support', 'account']);
+const SELF_CONTAINED_SECTIONS = new Set<SettingsSection>(['printing', 'subscription', 'team', 'einvoice', 'guide', 'support', 'account']);
 
 export default function Settings({ language, onLanguageToggle, settings, onSaveSettings }: Props) {
   const t = translations[language];
@@ -174,6 +175,7 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
     { id: 'subscription', label: language === 'ar' ? 'الاشتراك' : 'Subscription', icon: Crown },
     { id: 'team', label: language === 'ar' ? 'الفريق' : 'Team', icon: Users },
     ...(user ? [{ id: 'einvoice' as const, label: language === 'ar' ? 'الفوترة الوطنية' : 'E-invoicing', icon: FileCheck2 }] : []),
+    { id: 'guide', label: language === 'ar' ? 'دليل الاستخدام' : 'User guide', icon: BookOpen },
     { id: 'support', label: language === 'ar' ? 'الدعم الفني' : 'Support', icon: LifeBuoy },
     { id: 'account', label: language === 'ar' ? 'الحساب والخصوصية' : 'Account & privacy', icon: UserCog },
     { id: 'system', label: t.systemManagement, icon: Database },
@@ -371,6 +373,12 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
               {activeSection === 'subscription' && <SubscriptionSettings language={language} />}
               {activeSection === 'team' && <TeamManager language={language} />}
               {activeSection === 'einvoice' && user && <EInvoiceSettings language={language} />}
+              {activeSection === 'guide' && (
+                <UserGuide
+                  language={language}
+                  onOpenSettingsSection={(section) => setActiveSection(section)}
+                />
+              )}
               {activeSection === 'support' && <SupportCenter language={language} />}
               {activeSection === 'account' && <AccountSettings language={language} />}
             </motion.div>
