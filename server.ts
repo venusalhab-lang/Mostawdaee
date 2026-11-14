@@ -105,7 +105,7 @@ function getSupabaseServiceClient() {
 }
 
 /** Must match Google Play Console SKU and src/services/billing.ts PLAY_PREMIUM_PRODUCT_ID. Billed amount is set in Play Console (USD 169/year). */
-const PLAY_PRODUCT_ID = "mostawdaee_premium_100";
+const PLAY_PRODUCT_ID = "mostawdaee_supscription_169";
 const PLAY_PACKAGE_NAME = process.env.GOOGLE_PLAY_PACKAGE_NAME || "com.mostawdaee.app";
 
 type PlayFetch =

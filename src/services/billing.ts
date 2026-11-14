@@ -16,10 +16,10 @@ export interface DigitalProduct {
 
 /**
  * Google Play subscription SKU (must match Play Console exactly).
- * The trailing "_100" is the original product id; the billed amount is set in Play Console and
- * mirrored below for UI fallbacks only — do not rename the SKU or existing subscribers break.
+ * The billed amount is set in Play Console and mirrored below for UI fallbacks only —
+ * do not rename the SKU or existing subscribers break.
  */
-export const PLAY_PREMIUM_PRODUCT_ID = 'mostawdaee_premium_100';
+export const PLAY_PREMIUM_PRODUCT_ID = 'mostawdaee_supscription_169';
 /** Display fallback when Play has not returned a localized price yet. Must match Play Console base price. */
 export const PLAY_PREMIUM_FALLBACK_PRICE = '$169';
 export const PLAY_PREMIUM_AMOUNT_USD = 169;
