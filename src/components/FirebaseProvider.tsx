@@ -7,6 +7,7 @@ import { Product, AppSettings, Transaction, Employee, Customer, CustomerTransact
 import { normalizeStoreNote, validateStoreNoteInput } from '../lib/storeNotes';
 import { toast } from 'sonner';
 import { setDriveAccessToken } from '../services/googleDrive';
+import { resolveBootSession } from '../lib/authSession';
 import { completeOAuthSessionFromLocation, oauthProviderError, urlLooksLikeOAuthCallback } from '../lib/completeOAuthSession';
 import { clearUserCache, migrateLegacyUserCache, readUserCache, removeUserCache, writeUserCache } from '../lib/userStorage';
 import { readHeldBills } from '../lib/heldBills';
@@ -871,15 +872,30 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           }
         }
 
-        const { data, error: sessionError } = await supabase.auth.getSession();
-        let session = data?.session;
+        // Validate / refresh the persisted session. Dead refresh tokens are cleared so login
+        // works without the merchant having to wipe site data by hand.
+        const online = typeof navigator === 'undefined' || navigator.onLine !== false;
+        let session: any = null;
+        try {
+          const resolved = await resolveBootSession(supabase, { online });
+          session = resolved.session;
+          if (resolved.clearedStale) {
+            console.warn('[FirebaseProvider] Cleared stale Supabase auth session from browser storage.');
+          }
+        } catch (bootError) {
+          if (isOfflineError(bootError) || !online) {
+            session = readStoredSession();
+          } else {
+            throw bootError;
+          }
+        }
         if (session && (await finishDriveConnect(session, returnedFromGoogle)) === 'wrong-account') {
           session = (await supabase.auth.getSession()).data.session;
         }
 
-        // Offline with an expired token: Supabase keeps the stored session but cannot refresh it.
-        // Keep the merchant signed in on this device; writes go to the offline queue until it refreshes.
-        if (!session && (isOfflineError(sessionError) || (typeof navigator !== 'undefined' && navigator.onLine === false))) {
+        // Offline with an expired token: keep the merchant signed in on this device;
+        // writes go to the offline queue until refresh succeeds.
+        if (!session && !online) {
           session = readStoredSession();
         }
 

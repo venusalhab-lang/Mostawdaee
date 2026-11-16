@@ -42,13 +42,15 @@ try {
   const oauthErr = params.get('error') || params.get('error_code');
   if (oauthErr) {
     console.warn('[Auth] Detected OAuth error in URL:', oauthErr);
-    try {
-      Object.keys(localStorage).forEach(k => {
-        if (/^sb-.*-auth-token|^sb-.*-code-verifier/i.test(k)) {
-          localStorage.removeItem(k);
-        }
-      });
-    } catch(e) {}
+    import('./lib/authSession').then(({ clearSupabaseAuthStorage }) => {
+      clearSupabaseAuthStorage();
+    }).catch(() => {
+      try {
+        Object.keys(localStorage).forEach((k) => {
+          if (/^sb-.*-auth-token|^sb-.*-code-verifier/i.test(k)) localStorage.removeItem(k);
+        });
+      } catch { /* storage unavailable */ }
+    });
   }
 } catch(e) {}
 

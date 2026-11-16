@@ -1,6 +1,15 @@
 import { createClient } from '@supabase/supabase-js';
 import { getSupabaseCredentials } from './lib/supabaseConfig';
 
+/**
+ * Shared browser Auth client.
+ * - persistSession: keep the merchant signed in across reloads
+ * - autoRefreshToken: renew access tokens before they expire
+ * - detectSessionInUrl: finish PKCE (?code=) returns from Google / password reset
+ * - flowType pkce: required for browser OAuth (no implicit tokens in the URL)
+ *
+ * Stale / corrupt tokens are recovered in src/lib/authSession.ts (boot + login failure).
+ */
 const actualSupabaseGetter = () => {
   const { url, key } = getSupabaseCredentials();
   return createClient(url, key, {
@@ -9,7 +18,8 @@ const actualSupabaseGetter = () => {
       autoRefreshToken: true,
       detectSessionInUrl: true,
       flowType: 'pkce',
-    }
+      storage: typeof window !== 'undefined' ? window.localStorage : undefined,
+    },
   });
 };
 

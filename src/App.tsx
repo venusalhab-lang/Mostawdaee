@@ -26,6 +26,7 @@ import CommandPalette from './components/CommandPalette';
 import { isVerifiedAdmin } from './lib/adminAccess';
 import { NATIVE_OAUTH_REDIRECT, authRedirectTo } from './lib/nativeAuth';
 import { usePasswordRecovery } from './lib/passwordRecovery';
+import { prepareOAuthSignIn, recoverFromStaleAuthSession, signInWithPasswordRecovering } from './lib/authSession';
 import { claimOAuthCallback, oauthProviderError, readOAuthCallbackParams, urlLooksLikeOAuthCallback } from './lib/completeOAuthSession';
 import { Browser } from '@capacitor/browser';
 import { useSubscriptionSync } from './hooks/useSubscriptionSync';
@@ -486,6 +487,7 @@ export default function App() {
 
   // Auth Context actions for Login (Auth.tsx)
   const signInWithGoogle = async () => {
+    await prepareOAuthSignIn(supabase);
     if (Capacitor.isNativePlatform()) {
       // Google blocks OAuth inside embedded WebViews (403 disallowed_useragent), so the flow
       // must run in the system browser and return via the appUrlOpen deep link.
@@ -497,7 +499,10 @@ export default function App() {
           queryParams: { prompt: 'select_account' },
         },
       });
-      if (error) throw error;
+      if (error) {
+        await recoverFromStaleAuthSession(supabase);
+        throw error;
+      }
       if (!data?.url) throw new Error('Google sign-in could not start. Try again.');
       await Browser.open({ url: data.url, presentationStyle: 'fullscreen' });
       return data;
@@ -510,12 +515,15 @@ export default function App() {
         queryParams: { prompt: 'select_account' },
       },
     });
-    if (error) throw error;
+    if (error) {
+      await recoverFromStaleAuthSession(supabase);
+      throw error;
+    }
     return data;
   };
 
   const signInWithEmail = async (emailVal: string, passwordVal: string) => {
-    const { data, error } = await supabase.auth.signInWithPassword({
+    const { data, error } = await signInWithPasswordRecovering(supabase, {
       email: emailVal,
       password: passwordVal,
     });
@@ -530,7 +538,10 @@ export default function App() {
       email: emailVal,
       password: passwordVal,
     });
-    if (error) throw error;
+    if (error) {
+      await recoverFromStaleAuthSession(supabase);
+      throw error;
+    }
     // Supabase returns an obfuscated user with no identities (and no error) when the email already exists.
     if (data.user && Array.isArray(data.user.identities) && data.user.identities.length === 0) {
       throw new Error('User already registered');
