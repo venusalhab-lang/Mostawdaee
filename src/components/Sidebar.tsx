@@ -24,6 +24,7 @@ import {
   ClipboardCheck,
   Banknote,
   BookOpen,
+  NotebookPen,
 } from 'lucide-react';
 import Logo from './Logo';
 import CurrencySwitcher from './CurrencySwitcher';
@@ -124,6 +125,7 @@ export default function Sidebar({
     { id: 'warehouses', icon: Building2, label: isRtl ? "إدارة المستودعات" : "Warehouses System" },
     { id: 'invoices', icon: FileText, label: t.invoices },
     { id: 'customers', icon: Users, label: isRtl ? "العملاء والديون" : "Customers & Debt" },
+    { id: 'notes', icon: NotebookPen, label: isRtl ? "الملاحظات" : "Notes" },
     { id: 'cheques', icon: Banknote, label: isRtl ? "إدارة الشيكات" : "Cheques" },
     { id: 'employees', icon: Briefcase, label: isRtl ? "الموظفون والرواتب" : "Employees & Payroll" },
     { id: 'vault', icon: Shield, label: t.vault },

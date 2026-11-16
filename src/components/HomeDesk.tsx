@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Barcode, ChevronLeft, ChevronRight, ClipboardCheck, ShoppingBag, Users } from 'lucide-react';
+import { Barcode, ChevronLeft, ChevronRight, ClipboardCheck, NotebookPen, ShoppingBag, Users } from 'lucide-react';
 import {
   Area,
   CartesianGrid,
@@ -11,7 +11,7 @@ import {
   YAxis,
 } from 'recharts';
 import type {
-  AppSettings, Cheque, Currency, Customer, CustomerTransaction, Invoice, Language, PayrollRecord, Product, StockMovement, Vault, VaultTransaction,
+  AppSettings, Cheque, Currency, Customer, CustomerTransaction, Invoice, Language, PayrollRecord, Product, StockMovement, StoreNote, Vault, VaultTransaction,
 } from '../types';
 import { useFirebase } from './FirebaseProvider';
 import { usePreferredCurrency } from './CurrencyContext';
@@ -324,6 +324,7 @@ function taskTitle(task: HomeTask, isRtl: boolean): string {
     case 'payroll_due': return isRtl ? 'رواتب مستحقة لم تُدفع' : 'Salaries due, not paid';
     case 'stale_debts': return isRtl ? `ديون بلا دفعة منذ ${STALE_DEBT_DAYS} يوماً أو أكثر` : `Debts with no payment for ${STALE_DEBT_DAYS}+ days`;
     case 'low_stock': return isRtl ? 'أصناف تحت الحد' : 'Low stock';
+    case 'notes_due': return isRtl ? 'ملاحظات بتذكير مستحق' : 'Notes with due reminders';
   }
 }
 
@@ -435,6 +436,7 @@ export default function HomeDesk({ language, settings }: Props) {
     vault,
     vaultTransactions = [],
     stockMovements = [],
+    storeNotes = [],
     canOpenScreen,
     workspace,
   } = useFirebase() as unknown as {
@@ -448,6 +450,7 @@ export default function HomeDesk({ language, settings }: Props) {
     vault: Vault | null;
     vaultTransactions: VaultTransaction[];
     stockMovements: StockMovement[];
+    storeNotes: StoreNote[];
     canOpenScreen: (screen: string) => boolean;
   };
 
@@ -583,6 +586,14 @@ export default function HomeDesk({ language, settings }: Props) {
         paymentDate: record.paymentDate,
       }))
       : null,
+    notes: canOpenScreen('notes')
+      ? storeNotes.map((note) => ({
+        title: note.title,
+        body: note.body,
+        linkName: note.linkName,
+        remindAt: note.remindAt,
+      }))
+      : null,
     pendingUploads: pendingSales.length,
   });
   const isNewStore = products.length === 0;
@@ -636,6 +647,7 @@ export default function HomeDesk({ language, settings }: Props) {
     { id: 'pos', icon: Barcode, title: isRtl ? 'البيع' : 'Sell', text: isRtl ? 'نقطة البيع والباركود' : 'POS and barcode' },
     { id: 'inventory-audit', icon: ClipboardCheck, title: isRtl ? 'الجرد' : 'Count', text: isRtl ? 'الجرد والتسوية' : 'Stocktaking' },
     { id: 'customers', icon: Users, title: isRtl ? 'تحصيل' : 'Collect', text: isRtl ? 'ديون العملاء' : 'Customer debts' },
+    { id: 'notes', icon: NotebookPen, title: isRtl ? 'ملاحظة' : 'Note', text: isRtl ? 'تسجيل حر وتذكير' : 'Free log and reminder' },
     { id: 'purchases-expenses', icon: ShoppingBag, title: isRtl ? 'شراء' : 'Buy', text: isRtl ? 'مشتريات ومصروف' : 'Purchases and expenses' },
   ].filter((action) => canOpenScreen(action.id));
 

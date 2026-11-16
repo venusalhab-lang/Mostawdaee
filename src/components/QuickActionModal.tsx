@@ -1,6 +1,6 @@
 import React from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { X, ShoppingCart, PlusSquare, Wallet, BarChart3, HelpCircle, Sparkles } from 'lucide-react';
+import { X, ShoppingCart, PlusSquare, Wallet, BarChart3, HelpCircle, Sparkles, NotebookPen } from 'lucide-react';
 import { Language } from '../types';
 import { sounds } from '../lib/sounds';
 
@@ -52,6 +52,16 @@ export default function QuickActionModal({
       color: 'from-amber-500 to-orange-600',
       textColor: 'text-amber-500',
       bgColor: 'bg-amber-500/10 border-amber-500/20 hover:border-amber-500/35',
+    },
+    {
+      id: 'notes',
+      screen: 'notes',
+      title: isRtl ? 'ملاحظة' : 'Note',
+      desc: isRtl ? 'تسجيل حر وتذكير تشغيلي' : 'Free log and ops reminder',
+      icon: NotebookPen,
+      color: 'from-slate-600 to-slate-800',
+      textColor: 'text-slate-600',
+      bgColor: 'bg-slate-500/10 border-slate-500/20 hover:border-slate-500/35',
     },
     {
       id: 'reports',

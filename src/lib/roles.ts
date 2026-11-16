@@ -12,7 +12,7 @@ export function isWorkspaceRole(value: unknown): value is WorkspaceRole {
 
 // Salaries (also inside the accounting books), full backups and the platform console stay with the owner.
 const OWNER_ONLY_SCREENS = new Set(['employees', 'accounting', 'google-drive', 'admin-dashboard']);
-const CASHIER_SCREENS = new Set(['pos', 'invoices', 'settings']);
+const CASHIER_SCREENS = new Set(['pos', 'invoices', 'notes', 'settings']);
 
 export function canOpenScreen(role: WorkspaceRole, screen: string): boolean {
   if (role === 'owner') return true;

@@ -3,7 +3,8 @@ import { OperationType, handleFirestoreError, type User } from '../lib/storeErro
 import { clearDriveConnect, finishDriveConnect, isDriveConnectPending } from '../lib/driveConnect';
 import { supabase } from '../supabaseClient';
 import { SYNC_PROBLEM_EVENT, collection, db, deleteDoc, doc, onSnapshot, resetSync, runTransaction, setDoc, updateDoc } from '../lib/supabaseDocs';
-import { Product, AppSettings, Transaction, Employee, Customer, CustomerTransaction, VaultTransaction, Vault, StockMovement, Invoice, Currency, PayrollRecord, Warehouse, AuditLog, Supplier, SupplierTransaction, Shift, TradeOrder } from '../types';
+import { Product, AppSettings, Transaction, Employee, Customer, CustomerTransaction, VaultTransaction, Vault, StockMovement, Invoice, Currency, PayrollRecord, Warehouse, AuditLog, Supplier, SupplierTransaction, Shift, TradeOrder, StoreNote } from '../types';
+import { normalizeStoreNote, validateStoreNoteInput } from '../lib/storeNotes';
 import { toast } from 'sonner';
 import { setDriveAccessToken } from '../services/googleDrive';
 import { completeOAuthSessionFromLocation, oauthProviderError, urlLooksLikeOAuthCallback } from '../lib/completeOAuthSession';
@@ -98,6 +99,8 @@ interface FirebaseContextType {
   shifts: Shift[];
   /** Purchase orders and quotations, newest first. */
   orders: TradeOrder[];
+  /** Free-form store notes, newest / pinned first after normalize. */
+  storeNotes: StoreNote[];
   vaultTransactions: VaultTransaction[];
   warehouses: Warehouse[];
   auditLogs: AuditLog[];
@@ -132,6 +135,9 @@ interface FirebaseContextType {
   saveCustomerTransaction: (tx: CustomerTransaction) => Promise<void>;
   deleteCustomerTransaction: (id: string) => Promise<void>;
   deleteCustomerLedgerTransaction: (txId: string, options?: { reverseVault?: boolean }) => Promise<void>;
+  /** Creates or updates a store note. Authorship is stamped by the server on create. */
+  saveStoreNote: (note: StoreNote) => Promise<void>;
+  deleteStoreNote: (id: string) => Promise<void>;
   saveWarehouse: (warehouse: Warehouse) => Promise<void>;
   transferStock: (productId: string, toWarehouseId: string, quantity: number) => Promise<void>;
   /**
@@ -801,6 +807,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [supplierTransactions, setSupplierTransactions] = useState<SupplierTransaction[]>([]);
   const [shifts, setShifts] = useState<Shift[]>([]);
   const [orders, setOrders] = useState<TradeOrder[]>([]);
+  const [storeNotes, setStoreNotes] = useState<StoreNote[]>([]);
   const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
   const [vault, setVault] = useState<Vault | null>(null);
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
@@ -817,6 +824,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     setSuppliers([]);
     setSupplierTransactions([]);
     setShifts([]);
+    setOrders([]);
+    setStoreNotes([]);
     setWarehouses([]);
     setVault(null);
     setAuditLogs([]);
@@ -995,6 +1004,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     setSupplierTransactions(readUserCache(uid, 'supplier_transactions', []));
     setShifts(readUserCache(uid, 'shifts', []));
     setOrders(readUserCache(uid, 'orders', []));
+    setStoreNotes(readUserCache(uid, 'store_notes', []));
     const bootVault = readUserCache(uid, 'vault', null);
     setVaultTransactions(mergeQueuedVaultRecords(readUserCache(uid, 'vault_records', []), bootQueue, bootOwnerId, bootVault, bootSyncedIds));
     setWarehouses(readUserCache(uid, 'warehouses', []));
@@ -1361,6 +1371,23 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }, (error) => {
       console.warn('[FirebaseProvider] orders stream error:', error?.code || error);
     });
+    // Store notes (non-critical until collection is allowed on the server)
+    const unsubscribeStoreNotes = onSnapshot(collection(db, 'users', uid, 'store_notes'), (snap) => {
+      if (!isMounted) return;
+      const items: StoreNote[] = [];
+      snap.forEach((d) => {
+        const normalized = normalizeStoreNote({ id: d.id, ...(d.data() as Partial<StoreNote>) });
+        if (normalized) items.push(normalized);
+      });
+      items.sort((a, b) => {
+        if (!!a.pinned !== !!b.pinned) return a.pinned ? -1 : 1;
+        return String(b.updatedAt || b.createdAt).localeCompare(String(a.updatedAt || a.createdAt));
+      });
+      setStoreNotes(items);
+      writeUserCache(uid, 'store_notes', items);
+    }, (error) => {
+      console.warn('[FirebaseProvider] store_notes stream error:', error?.code || error);
+    });
 
     // Listen to Vault Transactions
     const vaultRef = collection(db, 'users', uid, 'vault_records');
@@ -1618,6 +1645,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       unsubscribeSupplierTransactions();
       unsubscribeShifts();
       unsubscribeOrders();
+      unsubscribeStoreNotes();
       unsubscribeVaultState();
       unsubscribeWarehouses();
       unsubscribeAuditLogs();
@@ -2926,6 +2954,81 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
   };
 
+  const saveStoreNote = async (note: StoreNote) => {
+    if (!user) throw guestWriteBlocked();
+    const uid = user.uid;
+    const ar = settings?.defaultLanguage !== 'en';
+    const fail = (message: string, code: string) => Object.assign(new Error(message), { code });
+    const invalid = validateStoreNoteInput({
+      title: note.title,
+      body: note.body,
+      kind: note.kind,
+      remindAt: note.remindAt,
+    });
+    if (invalid) {
+      throw fail(
+        ar ? 'تحقق من نص الملاحظة قبل الحفظ.' : 'Check the note text before saving.',
+        invalid,
+      );
+    }
+    const now = new Date().toISOString();
+    const existing = storeNotes.find((n) => n.id === note.id);
+    const role = currentWorkspace()?.role ?? 'owner';
+    const canManage = roleCan(role, 'delete_records');
+    if (existing && existing.createdBy && existing.createdBy !== user.uid && !canManage) {
+      throw fail(
+        ar ? 'لا يمكنك تعديل ملاحظة كتبها زميل.' : 'You cannot edit a note written by a colleague.',
+        'role-denied',
+      );
+    }
+    const payload: StoreNote = {
+      ...note,
+      title: String(note.title || '').trim().slice(0, 120),
+      body: String(note.body || '').trim().slice(0, 4000),
+      createdAt: existing?.createdAt || note.createdAt || now,
+      updatedAt: now,
+      createdBy: existing?.createdBy || user.uid,
+      createdByName: existing?.createdByName
+        || note.createdByName
+        || settings?.userName
+        || user.displayName
+        || user.email
+        || (ar ? 'مستخدم' : 'User'),
+    };
+    try {
+      await setDoc(doc(db, 'users', uid, 'store_notes', payload.id), removeUndefined(payload));
+    } catch (error: any) {
+      if (isOfflineError(error)) throw fail(ar ? 'لا يوجد اتصال؛ لم تُحفظ الملاحظة.' : 'No connection: the note was not saved.', 'offline');
+      const rejection = syncRejectionMessage(error?.code);
+      if (rejection) throw fail(rejection, error.code);
+      throw error;
+    }
+  };
+
+  const deleteStoreNote = async (id: string) => {
+    if (!user) throw guestWriteBlocked();
+    const uid = user.uid;
+    const ar = settings?.defaultLanguage !== 'en';
+    const fail = (message: string, code: string) => Object.assign(new Error(message), { code });
+    const existing = storeNotes.find((n) => n.id === id);
+    const role = currentWorkspace()?.role ?? 'owner';
+    const canManage = roleCan(role, 'delete_records');
+    if (existing && existing.createdBy && existing.createdBy !== user.uid && !canManage) {
+      throw fail(
+        ar ? 'لا يمكنك حذف ملاحظة كتبها زميل.' : 'You cannot delete a note written by a colleague.',
+        'role-denied',
+      );
+    }
+    try {
+      await deleteDoc(doc(db, 'users', uid, 'store_notes', id));
+    } catch (error: any) {
+      if (isOfflineError(error)) throw fail(ar ? 'لا يوجد اتصال؛ لم تُحذف الملاحظة.' : 'No connection: the note was not deleted.', 'offline');
+      const rejection = syncRejectionMessage(error?.code);
+      if (rejection) throw fail(rejection, error.code);
+      throw error;
+    }
+  };
+
   const saveCustomerTransaction = async (tx: CustomerTransaction) => {
     if (!user) throw guestWriteBlocked();
     try {
@@ -3753,6 +3856,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       supplierTransactions,
       shifts,
       orders,
+      storeNotes,
       vaultTransactions,
       stockMovements,
       warehouses,
@@ -3776,6 +3880,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       saveCustomerTransaction,
       deleteCustomerTransaction,
       deleteCustomerLedgerTransaction,
+      saveStoreNote,
+      deleteStoreNote,
       saveWarehouse,
       transferStock,
       applyStocktake,
@@ -3803,7 +3909,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       platformRoleReady: activePlatformRoleReady,
 }), [
     user, loading, settings, products, invoices, employees, payrollRecords, customers,
-    customerTransactions, suppliers, supplierTransactions, shifts, orders, vaultTransactions, stockMovements, warehouses, vault, auditLogs, activeWorkspace,
+    customerTransactions, suppliers, supplierTransactions, shifts, orders, storeNotes, vaultTransactions, stockMovements, warehouses, vault, auditLogs, activeWorkspace,
     activePlatformRole, activePlatformRoleReady,
   ]); // eslint-disable-line react-hooks/exhaustive-deps
 

@@ -21,7 +21,8 @@ export type TaskKind =
   | 'expiring'
   | 'stale_debts'
   | 'payroll_due'
-  | 'low_stock';
+  | 'low_stock'
+  | 'notes_due';
 
 export interface TaskMoney {
   currency: string;
@@ -82,6 +83,14 @@ export interface TaskPayroll {
   paymentDate: number;
 }
 
+export interface TaskStoreNote {
+  title?: string;
+  body: string;
+  linkName?: string;
+  /** YYYY-MM-DD when set. */
+  remindAt?: string | null;
+}
+
 export interface HomeTaskInput {
   now: number;
   storeCurrency: string;
@@ -93,6 +102,8 @@ export interface HomeTaskInput {
   customerTransactions: TaskCustomerTransaction[];
   /** null when this role does not see salaries. */
   payroll: TaskPayroll[] | null;
+  /** null when the role cannot open notes. */
+  notes: TaskStoreNote[] | null;
   pendingUploads: number;
 }
 
@@ -196,8 +207,27 @@ function payrollDue(input: HomeTaskInput): HomeTask | null {
   };
 }
 
+function notesDue(input: HomeTaskInput): HomeTask | null {
+  if (!input.notes) return null;
+  const today = startOfLocalDay(input.now);
+  const due = input.notes
+    .map((note) => ({ note, day: note.remindAt ? localDay(note.remindAt) : Number.NaN }))
+    .filter(({ day }) => Number.isFinite(day) && day <= today)
+    .sort((a, b) => a.day - b.day);
+  if (due.length === 0) return null;
+  return {
+    kind: 'notes_due',
+    severity: 'soon',
+    count: due.length,
+    names: due.slice(0, 3).map(({ note }) => note.title || note.linkName || note.body.slice(0, 40)).filter(Boolean),
+    money: [],
+    overdue: due.filter(({ day }) => day < today).length,
+    screen: 'notes',
+  };
+}
+
 const ORDER: TaskKind[] = [
-  'pending_uploads', 'cheques_in', 'cheques_out', 'out_of_stock', 'expiring', 'payroll_due', 'stale_debts', 'low_stock',
+  'pending_uploads', 'cheques_in', 'cheques_out', 'out_of_stock', 'expiring', 'payroll_due', 'notes_due', 'stale_debts', 'low_stock',
 ];
 
 export function homeTasks(input: HomeTaskInput): HomeTask[] {
@@ -239,6 +269,9 @@ export function homeTasks(input: HomeTaskInput): HomeTask[] {
 
   const payroll = payrollDue(input);
   if (payroll) tasks.push(payroll);
+
+  const notes = notesDue(input);
+  if (notes) tasks.push(notes);
 
   const debts = staleDebts(input);
   if (debts) tasks.push(debts);

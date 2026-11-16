@@ -382,7 +382,7 @@ CREATE TABLE IF NOT EXISTS public.merchant_documents (
     CONSTRAINT merchant_documents_collection_check CHECK (collection IN (
         'settings', 'inventory', 'invoices', 'employees', 'payroll', 'customers',
         'customer_transactions', 'stock_movements', 'vault_records', 'warehouses', 'audit_logs',
-        'invoice_numbers', 'suppliers', 'supplier_transactions', 'shifts', 'orders'
+        'invoice_numbers', 'suppliers', 'supplier_transactions', 'shifts', 'orders', 'store_notes'
     ))
 );
 
@@ -391,7 +391,7 @@ ALTER TABLE public.merchant_documents DROP CONSTRAINT IF EXISTS merchant_documen
 ALTER TABLE public.merchant_documents ADD CONSTRAINT merchant_documents_collection_check CHECK (collection IN (
     'settings', 'inventory', 'invoices', 'employees', 'payroll', 'customers',
     'customer_transactions', 'stock_movements', 'vault_records', 'warehouses', 'audit_logs',
-    'invoice_numbers', 'suppliers', 'supplier_transactions', 'shifts', 'orders'
+    'invoice_numbers', 'suppliers', 'supplier_transactions', 'shifts', 'orders', 'store_notes'
 ));
 
 ALTER TABLE public.merchant_documents ENABLE ROW LEVEL SECURITY;
@@ -461,6 +461,23 @@ BEGIN
     END IF;
     IF p_role = 'manager' THEN
         RETURN;
+    END IF;
+
+    -- Free-form store notes: cashiers may create, and may edit/delete only their own.
+    IF p_col = 'store_notes' THEN
+        IF p_op = 'set' AND p_old IS NULL THEN
+            RETURN;
+        END IF;
+        IF COALESCE(p_old->>'createdBy', '') = COALESCE(auth.uid()::text, '') THEN
+            IF p_op = 'delete' THEN
+                RETURN;
+            END IF;
+            IF p_op = 'set'
+               AND COALESCE(p_new->>'createdBy', p_old->>'createdBy') IS NOT DISTINCT FROM p_old->>'createdBy' THEN
+                RETURN;
+            END IF;
+        END IF;
+        RAISE EXCEPTION 'role not allowed';
     END IF;
 
     IF p_op <> 'set' THEN
@@ -715,6 +732,15 @@ BEGIN
                 ELSE
                     payload := (payload - 'actorId' - 'actorEmail')
                         || jsonb_strip_nulls(jsonb_build_object('actorId', existing->'actorId', 'actorEmail', existing->'actorEmail'));
+                END IF;
+            END IF;
+            -- Store notes: authorship is server-stamped so a cashier cannot claim another writer's note.
+            IF col = 'store_notes' THEN
+                IF existing IS NULL THEN
+                    payload := payload || jsonb_build_object('createdBy', actor::text);
+                ELSE
+                    payload := (payload - 'createdBy')
+                        || jsonb_build_object('createdBy', COALESCE(existing->>'createdBy', actor::text));
                 END IF;
             END IF;
             IF col = 'shifts' THEN

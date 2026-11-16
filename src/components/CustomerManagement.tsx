@@ -22,7 +22,8 @@ import {
   Loader2,
   ShoppingCart,
   Package,
-  ListOrdered
+  ListOrdered,
+  NotebookPen,
 } from 'lucide-react';
 import { Language, Customer, CustomerTransaction, AppSettings, Currency, Invoice } from '../types';
 import { motion, AnimatePresence } from 'motion/react';
@@ -58,6 +59,7 @@ import {
   type StatementPeriodPreset,
 } from '../lib/customerStatement';
 import { requestPosSale } from '../lib/posIntent';
+import { requestStoreNote } from '../lib/noteIntent';
 
 interface Props {
   language: Language;
@@ -964,6 +966,18 @@ export default function CustomerManagement({ language, settings }: Props) {
                       {isRtl ? 'كشف الحساب والأصناف' : 'Statement & items'}
                     </button>
                   </div>
+                  <button
+                    type="button"
+                    onClick={() => requestStoreNote({
+                      linkType: 'customer',
+                      linkId: customer.id,
+                      linkName: customer.name,
+                    })}
+                    className="mt-2 w-full h-[34px] bg-white hover:bg-slate-50 dark:bg-slate-950/40 dark:hover:bg-slate-900 text-slate-600 dark:text-slate-300 rounded-xl text-[10px] font-bold border border-dashed border-slate-200 dark:border-slate-700 inline-flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                  >
+                    <NotebookPen size={12} className="text-indigo-500" />
+                    {isRtl ? 'ملاحظة مرتبطة بهذا الزبون' : 'Note linked to this customer'}
+                  </button>
 
                 </motion.div>
               );

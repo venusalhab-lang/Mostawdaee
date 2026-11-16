@@ -137,6 +137,27 @@ export interface Customer {
   currency: Currency;
 }
 
+/** Free-form operational note for the store (not a money or stock ledger entry). */
+export type StoreNoteKind = 'general' | 'debt' | 'stock' | 'ops' | 'reminder';
+export type StoreNoteLinkType = 'none' | 'customer' | 'supplier';
+
+export interface StoreNote {
+  id: string;
+  title: string;
+  body: string;
+  kind: StoreNoteKind;
+  linkType: StoreNoteLinkType;
+  linkId?: string;
+  linkName?: string;
+  /** Local calendar day YYYY-MM-DD when set. */
+  remindAt?: string | null;
+  pinned?: boolean;
+  createdAt: string;
+  updatedAt: string;
+  createdBy: string;
+  createdByName: string;
+}
+
 export interface Supplier {
   id: string;
   name: string;

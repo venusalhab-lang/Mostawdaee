@@ -3,6 +3,7 @@
 export type GuideScreen =
   | 'pos'
   | 'customers'
+  | 'notes'
   | 'inventory'
   | 'inventory-audit'
   | 'warehouses'
@@ -202,6 +203,26 @@ export const USER_GUIDE_TOPICS: GuideTopic[] = [
       { ar: 'الكاشير لا يصل عادةً للنسخ الاحتياطي أو إعدادات الاشتراك.', en: 'A cashier usually cannot access backup or subscription settings.' },
     ],
     openSettings: 'team',
+  },
+  {
+    id: 'store-notes',
+    group: 'more',
+    title: { ar: 'ملاحظات المتجر والتذكير', en: 'Store notes and reminders' },
+    summary: {
+      ar: 'سجّل وعود التحصيل ونقص الرف وتذكيرات التشغيل دون تغيير المخزون أو الديون.',
+      en: 'Log collection promises, shelf gaps, and ops reminders without changing stock or debts.',
+    },
+    steps: [
+      { ar: 'افتح «الملاحظات» من القائمة أو من الرئيسية.', en: 'Open Notes from the menu or Home.' },
+      { ar: 'اكتب جملة واضحة، واختر النوع، واختياريًا اربط عميلًا أو موردًا وتاريخ تذكير.', en: 'Write a clear line, pick a kind, and optionally link a customer or supplier and a remind date.' },
+      { ar: 'من بطاقة الزبون يمكن فتح ملاحظة مرتبطة مباشرة.', en: 'From a customer card you can open a note already linked to them.' },
+      { ar: 'الكاشير يضيف ويعدّل ملاحظاته؛ المدير/المالك يعدّل أو يحذف أي ملاحظة.', en: 'A cashier adds and edits their own notes; a manager/owner can edit or delete any note.' },
+    ],
+    warning: {
+      ar: 'الملاحظة ليست قيد محاسبي: الدين والمخزون لا يتغيّران منها.',
+      en: 'A note is not a ledger entry: debt and stock do not change from it.',
+    },
+    openScreen: 'notes',
   },
   {
     id: 'invoices',

@@ -62,6 +62,7 @@ const AIAssistant = lazyWithRetry(() => import('./components/AIAssistant'));
 const LandedCostCalculator = lazyWithRetry(() => import('./components/LandedCostCalculator'));
 const ProfitsDashboard = lazyWithRetry(() => import('./components/ProfitsDashboard'));
 const AccountingDashboard = lazyWithRetry(() => import('./components/AccountingDashboard'));
+const StoreNotes = lazyWithRetry(() => import('./components/StoreNotes'));
 
 export default function App() {
   const { 
@@ -774,6 +775,8 @@ export default function App() {
         return <InvoiceSystem language={language} />;
       case 'customers':
         return <CustomerManagement language={language} settings={screenSettings} />;
+      case 'notes':
+        return <StoreNotes language={language} />;
       case 'cheques':
         return <ChequesManagement language={language} settings={screenSettings} />;
       case 'employees':

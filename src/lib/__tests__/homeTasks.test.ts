@@ -18,6 +18,7 @@ const base = (patch: Partial<HomeTaskInput> = {}): HomeTaskInput => ({
   customers: [],
   customerTransactions: [],
   payroll: [],
+  notes: [],
   pendingUploads: 0,
   ...patch,
 });
