@@ -2,11 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { WEB_AUTH_ORIGIN, authRedirectTo } from '../nativeAuth';
 
 describe('authRedirectTo', () => {
-  it('maps production hosts to the canonical www origin', () => {
-    expect(authRedirectTo('https://mostawdaee.com')).toBe(WEB_AUTH_ORIGIN);
-    expect(authRedirectTo('https://www.mostawdaee.com')).toBe(WEB_AUTH_ORIGIN);
-    expect(authRedirectTo('https://app.mostawdaee.com')).toBe(WEB_AUTH_ORIGIN);
-    expect(authRedirectTo('https://www.mostawdaee.com/settings')).toBe(WEB_AUTH_ORIGIN);
+  it('maps production hosts to the canonical www root (not /auth/callback)', () => {
+    expect(authRedirectTo('https://mostawdaee.com')).toBe(`${WEB_AUTH_ORIGIN}/`);
+    expect(authRedirectTo('https://www.mostawdaee.com')).toBe(`${WEB_AUTH_ORIGIN}/`);
+    expect(authRedirectTo('https://app.mostawdaee.com')).toBe(`${WEB_AUTH_ORIGIN}/`);
+    expect(authRedirectTo('https://www.mostawdaee.com/settings')).toBe(`${WEB_AUTH_ORIGIN}/`);
   });
 
   it('keeps local and preview origins unchanged', () => {

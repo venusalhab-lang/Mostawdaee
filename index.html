@@ -2,6 +2,19 @@
 <html lang="ar">
   <head>
     <meta charset="UTF-8" />
+    <!--
+      base is "./" for Capacitor. Serving the SPA at /auth/callback via rewrite makes
+      relative ./assets/* resolve under /auth/assets (404 → blank page). Bounce to /
+      before any module scripts run; keep query/hash for the OAuth code exchange.
+    -->
+    <script>
+      (function () {
+        var path = location.pathname;
+        if (path === '/auth/callback' || path === '/auth/callback/') {
+          location.replace('/' + location.search + location.hash);
+        }
+      })();
+    </script>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
     <meta name="google" content="notranslate" />
     <meta name="theme-color" content="#4f46e5" />

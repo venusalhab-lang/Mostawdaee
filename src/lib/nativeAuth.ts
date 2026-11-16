@@ -18,8 +18,10 @@ export function authRedirectTo(origin = typeof window !== 'undefined' ? window.l
       return '';
     }
   })();
+  // Always the site root — never /auth/callback. Relative Vite assets (base "./")
+  // break when the SPA HTML is served under /auth/*, which produces a blank page.
   if (host === 'mostawdaee.com' || host === 'www.mostawdaee.com' || host === 'app.mostawdaee.com') {
-    return WEB_AUTH_ORIGIN;
+    return `${WEB_AUTH_ORIGIN}/`;
   }
-  return origin || WEB_AUTH_ORIGIN;
+  return origin || `${WEB_AUTH_ORIGIN}/`;
 }

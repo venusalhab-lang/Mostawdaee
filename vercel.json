@@ -3,11 +3,22 @@
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
   "framework": "vite",
+  "redirects": [
+    {
+      "source": "/auth/callback",
+      "destination": "/",
+      "permanent": false
+    },
+    {
+      "source": "/auth/callback/",
+      "destination": "/",
+      "permanent": false
+    }
+  ],
   "rewrites": [
     { "source": "/api", "destination": "/api" },
     { "source": "/api/:path*", "destination": "/api?__p=:path*" },
-    { "source": "/auth/callback", "destination": "/index.html" },
-    { "source": "/auth/callback/", "destination": "/index.html" },
+    { "source": "/auth/assets/:path*", "destination": "/assets/:path*" },
     { "source": "/((?!api(?:/|$)|assets(?:/|$)|.*\\..*).*)", "destination": "/index.html" }
   ],
   "functions": {
