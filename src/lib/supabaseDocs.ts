@@ -5,11 +5,14 @@ import { allowRows, readRows, writeRows } from './rowCache';
 
 export const db = { kind: 'supabase-docs' as const };
 
-const COLLECTIONS = new Set([
+/** Every merchant_documents collection the client may read/write. Keep in sync with SQL allowlists. */
+export const MERCHANT_COLLECTIONS = [
   'settings', 'inventory', 'invoices', 'employees', 'payroll', 'customers',
   'customer_transactions', 'stock_movements', 'vault_records', 'warehouses', 'audit_logs',
   'invoice_numbers', 'suppliers', 'supplier_transactions', 'shifts', 'orders', 'store_notes',
-]);
+] as const;
+
+const COLLECTIONS = new Set<string>(MERCHANT_COLLECTIONS);
 
 export interface DocRef {
   kind: 'doc';
