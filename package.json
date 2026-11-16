@@ -10,7 +10,8 @@
     "lint": "tsc --noEmit",
     "cap:assets": "npx @capacitor/assets generate --assetPath assets",
     "cap:sync": "npx cap sync",
-    "android:sync": "npm run build && npx cap sync android",
+    "android:sync": "VITE_BASE=./ npm run build && npx cap sync android",
+    "ios:sync": "VITE_BASE=./ npm run build && npx cap sync ios",
     "cap:open:android": "npx cap open android",
     "cap:open:ios": "npx cap open ios",
     "test": "vitest run"

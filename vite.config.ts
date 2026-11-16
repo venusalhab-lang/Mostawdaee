@@ -7,7 +7,9 @@ import { VitePWA } from 'vite-plugin-pwa';
 export default defineConfig(({mode}) => {
   const env = loadEnv(mode, '.', '');
   return {
-    base: './',
+    // Web (Vercel) needs absolute "/" so /auth/* and deep links still load /assets/*.
+    // Capacitor file:// builds pass VITE_BASE=./ via android:sync / ios sync scripts.
+    base: process.env.VITE_BASE || '/',
     appType: 'spa',
     build: {
       chunkSizeWarningLimit: 1800,

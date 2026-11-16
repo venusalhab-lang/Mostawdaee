@@ -458,6 +458,17 @@ export default function App() {
 
   const isAdmin = isVerifiedAdmin(user as any);
   const hasRealSession = !!user && !user.isAnonymous;
+  const waitingForWorkspace = hasRealSession && !workspace;
+  const [workspaceWaitMs, setWorkspaceWaitMs] = useState(0);
+  useEffect(() => {
+    if (!waitingForWorkspace) {
+      setWorkspaceWaitMs(0);
+      return;
+    }
+    const started = Date.now();
+    const tick = window.setInterval(() => setWorkspaceWaitMs(Date.now() - started), 500);
+    return () => window.clearInterval(tick);
+  }, [waitingForWorkspace]);
 
   useEffect(() => {
     if (hasRealSession && isGuestModeActive) setIsGuestModeActive(false);
@@ -619,7 +630,8 @@ export default function App() {
   if (recoveringPassword) return loginScreen;
 
   // 1. Loading State Splash (members must not glimpse owner screens before their role is known)
-  if (dbLoading || (hasRealSession && !workspace)) {
+  if (dbLoading || waitingForWorkspace) {
+    const stuck = waitingForWorkspace && workspaceWaitMs >= 12_000;
     return (
       <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center p-4 text-white font-sans selection:bg-indigo-500/20">
         <div className="relative w-16 h-16 mb-6">
@@ -627,8 +639,35 @@ export default function App() {
           <div className="absolute inset-0 rounded-2xl border-4 border-t-indigo-500 animate-spin" />
         </div>
         <p className="text-sm font-bold text-slate-300 tracking-wide animate-pulse">
-          {isRtl ? 'جارٍ تحميل مستودعي...' : 'Loading Mostawdaee...'}
+          {stuck
+            ? (isRtl ? 'تعذّر تجهيز المتجر بعد الدخول' : 'Could not open the store after sign-in')
+            : waitingForWorkspace
+              ? (isRtl ? 'جارٍ تجهيز المتجر...' : 'Preparing your store...')
+              : (isRtl ? 'جارٍ تحميل مستودعي...' : 'Loading Mostawdaee...')}
         </p>
+        {stuck && (
+          <div className="mt-6 flex flex-col items-center gap-3 max-w-sm text-center">
+            <p className="text-xs text-slate-400 leading-relaxed">
+              {isRtl
+                ? 'الاتصال بقاعدة المتجر لم يكتمل. أعد التحميل، أو امسح بيانات الموقع إن تكرر ذلك.'
+                : 'The store context did not finish loading. Reload, or clear site data if this keeps happening.'}
+            </p>
+            <button
+              type="button"
+              onClick={() => window.location.assign('/')}
+              className="h-11 px-5 rounded-2xl bg-indigo-600 hover:bg-indigo-700 text-sm font-bold"
+            >
+              {isRtl ? 'إعادة التحميل' : 'Reload'}
+            </button>
+            <button
+              type="button"
+              onClick={() => { void handleSignOut(); }}
+              className="text-xs font-semibold text-slate-400 hover:text-white underline"
+            >
+              {isRtl ? 'تسجيل الخروج' : 'Sign out'}
+            </button>
+          </div>
+        )}
       </div>
     );
   }

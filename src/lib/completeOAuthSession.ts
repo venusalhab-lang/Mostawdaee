@@ -78,9 +78,14 @@ export async function completeOAuthSessionFromLocation(): Promise<boolean> {
   const { code } = readOAuthCallbackParams();
   try {
     if (!code) return false;
-    const { error } = await supabase.auth.exchangeCodeForSession(code);
-    if (error) throw error;
-    return true;
+    const { data, error } = await supabase.auth.exchangeCodeForSession(code);
+    if (error) {
+      // detectSessionInUrl may have won the race and already consumed the code.
+      const { data: again } = await supabase.auth.getSession();
+      if (again.session?.access_token) return true;
+      throw error;
+    }
+    return !!data.session?.access_token;
   } finally {
     // A code works once; leaving a used or rejected one in the address bar fails again on every reload.
     cleanOAuthParamsFromUrl();
