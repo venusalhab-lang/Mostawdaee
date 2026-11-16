@@ -24,11 +24,19 @@ export function usePlayBillingSync(userId: string | null | undefined, onChanged:
       );
     }
 
-    if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
-    syncPaidSubscription()
-      .then(() => { if (!cancelled) return onChangedRef.current(); })
-      .catch((error) => console.warn('[Billing] Subscription sync skipped:', error?.message || error));
+    const runSync = () => {
+      if (cancelled) return;
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+      syncPaidSubscription()
+        .then(() => { if (!cancelled) return onChangedRef.current(); })
+        .catch((error) => console.warn('[Billing] Subscription sync skipped:', error?.message || error));
+    };
 
-    return () => { cancelled = true; };
+    runSync();
+    window.addEventListener('online', runSync);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('online', runSync);
+    };
   }, [userId]);
 }

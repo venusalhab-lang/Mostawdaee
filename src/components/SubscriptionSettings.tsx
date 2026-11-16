@@ -4,6 +4,7 @@ import { Capacitor } from '@capacitor/core';
 import { Browser } from '@capacitor/browser';
 import { useSubscriptionSync } from '../hooks/useSubscriptionSync';
 import { useAuth } from './AuthContext';
+import { useFirebase } from './FirebaseProvider';
 import PremiumUpgradeModal from './PremiumUpgradeModal';
 import { sounds } from '../lib/sounds';
 import { arCount } from '../lib/arabicPlural';
@@ -23,6 +24,8 @@ const PLAY_SUBSCRIPTIONS_URL =
 export default function SubscriptionSettings({ language }: Props) {
   const isRtl = language === 'ar';
   const { isGuest } = useAuth();
+  const { can, workspace } = useFirebase();
+  const canManageBilling = can('billing');
   const { loading, isPremiumActive, isTrialActive, daysRemaining, subscription, refreshSubscription } = useSubscriptionSync();
   const [modalOpen, setModalOpen] = useState(false);
   const [showExpiryNotice, setShowExpiryNotice] = useState(false);
@@ -98,13 +101,17 @@ export default function SubscriptionSettings({ language }: Props) {
         <div className="p-4 rounded-2xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200/80 dark:border-amber-800/40 flex items-start gap-3">
           <CalendarClock size={18} className="text-amber-700 dark:text-amber-400 shrink-0 mt-0.5" />
           <p className="flex-1 text-sm font-medium text-amber-950 dark:text-amber-100 leading-relaxed">
-            {isPremiumActive
+            {!canManageBilling
               ? (isRtl
-                  ? `ينتهي اشتراكك خلال ${arCount(daysRemaining, WITHIN_DAYS)}. جدّده الآن حتى لا يتوقف العمل.`
-                  : `Your subscription ends in ${daysRemaining} days. Renew now so work is not interrupted.`)
-              : (isRtl
-                  ? `تنتهي الفترة التجريبية خلال ${daysRemaining} أيام. رقِّ الحساب من هنا قبل أن تُقفل الشاشات.`
-                  : `Your free trial ends in ${daysRemaining} days. Upgrade here before the app locks.`)}
+                  ? `ينتهي اشتراك المتجر خلال ${arCount(daysRemaining, WITHIN_DAYS)}. اطلب من المالك التجديد حتى لا يتوقف العمل.`
+                  : `This store's plan ends in ${daysRemaining} days. Ask the owner to renew so work is not interrupted.`)
+              : isPremiumActive
+                ? (isRtl
+                    ? `ينتهي اشتراكك خلال ${arCount(daysRemaining, WITHIN_DAYS)}. جدّده الآن حتى لا يتوقف العمل.`
+                    : `Your subscription ends in ${daysRemaining} days. Renew now so work is not interrupted.`)
+                : (isRtl
+                    ? `تنتهي الفترة التجريبية خلال ${daysRemaining} أيام. رقِّ الحساب من هنا قبل أن تُقفل الشاشات.`
+                    : `Your free trial ends in ${daysRemaining} days. Upgrade here before the app locks.`)}
           </p>
           <button
             type="button"
@@ -145,17 +152,21 @@ export default function SubscriptionSettings({ language }: Props) {
           </div>
         ) : (
           <p className="text-sm text-gray-600 dark:text-gray-400 font-medium leading-relaxed">
-            {isPremiumActive
+            {!canManageBilling
               ? (isRtl
-                  ? 'اشتراكك السنوي فعّال. يتجدد تلقائياً عبر Google Play ما لم تلغِه.'
-                  : 'Your annual subscription is active. It renews automatically through Google Play unless you cancel it.')
-              : (isRtl
-                  ? 'الاشتراك السنوي يبقي البيع والمخزون والخزنة متاحة، مع المزامنة السحابية وتطبيق الهاتف وتعدد العملات والتقارير.'
-                  : 'The annual plan keeps sales, stock and vault available, with cloud sync, the mobile app, multi-currency and reports.')}
+                  ? `اشتراك هذا المتجر يديره المالك${workspace?.ownerEmail ? ` (${workspace.ownerEmail})` : ''}. يمكنك متابعة الحالة هنا دون الدفع من حسابك.`
+                  : `This store's subscription is managed by the owner${workspace?.ownerEmail ? ` (${workspace.ownerEmail})` : ''}. You can view status here; billing stays with the owner.`)
+              : isPremiumActive
+                ? (isRtl
+                    ? 'اشتراكك السنوي فعّال. يتجدد تلقائياً عبر Google Play ما لم تلغِه.'
+                    : 'Your annual subscription is active. It renews automatically through Google Play unless you cancel it.')
+                : (isRtl
+                    ? 'الاشتراك السنوي يبقي البيع والمخزون والخزنة متاحة، مع المزامنة السحابية وتطبيق الهاتف وتعدد العملات والتقارير.'
+                    : 'The annual plan keeps sales, stock and vault available, with cloud sync, the mobile app, multi-currency and reports.')}
           </p>
         )}
 
-        {!isGuest && (
+        {!isGuest && canManageBilling && (
           <div className="flex flex-wrap gap-3">
             {/* An active Google Play subscription renews itself; a second purchase here would only fail or double-charge. */}
             {!isPremiumActive && (
@@ -182,13 +193,15 @@ export default function SubscriptionSettings({ language }: Props) {
         )}
       </div>
 
-      <PremiumUpgradeModal
-        isOpen={modalOpen}
-        onClose={() => setModalOpen(false)}
-        language={language}
-        isRenewal={isPremiumActive}
-        onUpgradeSuccess={() => { refreshSubscription(); }}
-      />
+      {canManageBilling && (
+        <PremiumUpgradeModal
+          isOpen={modalOpen}
+          onClose={() => setModalOpen(false)}
+          language={language}
+          isRenewal={false}
+          onUpgradeSuccess={() => { refreshSubscription(); }}
+        />
+      )}
     </div>
   );
 }
