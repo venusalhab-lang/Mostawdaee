@@ -888,17 +888,22 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           if (mapped) {
             lastUidRef.current = mapped.uid;
             setUser((prev) => (prev && prev.uid === mapped.uid ? prev : wrapUserWithId(mapped as any)));
-          } else {
+          } else if (!lastUidRef.current) {
             setUser(null);
           }
-        } else {
+        } else if (!lastUidRef.current) {
+          // Do not wipe a SIGNED_IN that won the race while PKCE/getSession was still settling.
           setUser(null);
         }
       } catch (e) {
         console.warn('[FirebaseProvider] Supabase initial session check failed:', e);
         const mapped = isOfflineError(e) ? mapSessionUser(readStoredSession()) : null;
-        if (mapped) lastUidRef.current = mapped.uid;
-        setUser(mapped ? wrapUserWithId(mapped as any) : null);
+        if (mapped) {
+          lastUidRef.current = mapped.uid;
+          setUser(wrapUserWithId(mapped as any));
+        } else if (!lastUidRef.current) {
+          setUser(null);
+        }
       } finally {
         setLoading(false);
       }
@@ -907,12 +912,26 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     // Subscribe to future auth state changes from Supabase
     // IMPORTANT: Supabase holds its auth lock while this callback runs. Awaiting network calls
     // here would block every other supabase request (getSession, queries...) and freeze the app,
-    // so the real work is deferred with setTimeout.
+    // so Drive connect / logout bookkeeping is deferred with setTimeout.
+    // Apply the signed-in user synchronously so email/Google login never flashes back to the form.
     // INITIAL_SESSION often arrives empty while Google PKCE is still exchanging ?code=.
     // Treating that as a logout sent users back to the login screen after a successful browser return.
     const { data } = supabase.auth.onAuthStateChange((event: any, session: any) => {
       if (event === 'PASSWORD_RECOVERY') setPasswordRecovery(true);
       if (event === 'SIGNED_OUT') setPasswordRecovery(false);
+
+      if (event !== 'INITIAL_SESSION' && session?.access_token) {
+        const mapped = mapSessionUser(session);
+        if (mapped) {
+          if (lastUidRef.current && lastUidRef.current !== mapped.uid) {
+            resetSync();
+            resetLocalBusinessState();
+          }
+          lastUidRef.current = mapped.uid;
+          setUser((prev) => (prev && prev.uid === mapped.uid ? prev : wrapUserWithId(mapped as any)));
+        }
+      }
+
       setTimeout(async () => {
         if (event === 'INITIAL_SESSION') return;
 
@@ -1371,23 +1390,28 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }, (error) => {
       console.warn('[FirebaseProvider] orders stream error:', error?.code || error);
     });
-    // Store notes (non-critical until collection is allowed on the server)
-    const unsubscribeStoreNotes = onSnapshot(collection(db, 'users', uid, 'store_notes'), (snap) => {
-      if (!isMounted) return;
-      const items: StoreNote[] = [];
-      snap.forEach((d) => {
-        const normalized = normalizeStoreNote({ id: d.id, ...(d.data() as Partial<StoreNote>) });
-        if (normalized) items.push(normalized);
+    // Store notes — never let a path/schema miss abort the rest of the session boot.
+    let unsubscribeStoreNotes = () => {};
+    try {
+      unsubscribeStoreNotes = onSnapshot(collection(db, 'users', uid, 'store_notes'), (snap) => {
+        if (!isMounted) return;
+        const items: StoreNote[] = [];
+        snap.forEach((d) => {
+          const normalized = normalizeStoreNote({ id: d.id, ...(d.data() as Partial<StoreNote>) });
+          if (normalized) items.push(normalized);
+        });
+        items.sort((a, b) => {
+          if (!!a.pinned !== !!b.pinned) return a.pinned ? -1 : 1;
+          return String(b.updatedAt || b.createdAt).localeCompare(String(a.updatedAt || a.createdAt));
+        });
+        setStoreNotes(items);
+        writeUserCache(uid, 'store_notes', items);
+      }, (error) => {
+        console.warn('[FirebaseProvider] store_notes stream error:', error?.code || error);
       });
-      items.sort((a, b) => {
-        if (!!a.pinned !== !!b.pinned) return a.pinned ? -1 : 1;
-        return String(b.updatedAt || b.createdAt).localeCompare(String(a.updatedAt || a.createdAt));
-      });
-      setStoreNotes(items);
-      writeUserCache(uid, 'store_notes', items);
-    }, (error) => {
-      console.warn('[FirebaseProvider] store_notes stream error:', error?.code || error);
-    });
+    } catch (error) {
+      console.warn('[FirebaseProvider] store_notes stream could not start:', (error as any)?.code || error);
+    }
 
     // Listen to Vault Transactions
     const vaultRef = collection(db, 'users', uid, 'vault_records');

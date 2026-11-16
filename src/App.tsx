@@ -520,7 +520,9 @@ export default function App() {
       password: passwordVal,
     });
     if (error) throw error;
-    return data.user;
+    // Prefer the session user; onAuthStateChange also applies it, but waiting only on that
+    // callback can briefly bounce the merchant back to the login form after a successful sign-in.
+    return data.session?.user ?? data.user;
   };
 
   const signUpWithEmail = async (emailVal: string, passwordVal: string) => {

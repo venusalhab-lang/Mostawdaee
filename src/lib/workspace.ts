@@ -174,6 +174,8 @@ export function currentWorkspace(): Workspace | null {
 
 export function subscribeWorkspace(listener: (workspace: Workspace | null) => void): () => void {
   listeners.add(listener);
+  // Catch up immediately — otherwise a workspace published before subscribe leaves the UI stuck.
+  try { listener(current); } catch { /* listener errors must not break publish */ }
   return () => { listeners.delete(listener); };
 }
 
