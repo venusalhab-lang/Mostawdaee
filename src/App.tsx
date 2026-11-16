@@ -24,7 +24,7 @@ import { LayoutDashboard, Package, Users, Plus, Settings as SettingsIcon } from 
 import QuickActionModal from './components/QuickActionModal';
 import CommandPalette from './components/CommandPalette';
 import { isVerifiedAdmin } from './lib/adminAccess';
-import { NATIVE_OAUTH_REDIRECT } from './lib/nativeAuth';
+import { NATIVE_OAUTH_REDIRECT, authRedirectTo } from './lib/nativeAuth';
 import { usePasswordRecovery } from './lib/passwordRecovery';
 import { claimOAuthCallback, oauthProviderError, readOAuthCallbackParams, urlLooksLikeOAuthCallback } from './lib/completeOAuthSession';
 import { Browser } from '@capacitor/browser';
@@ -494,7 +494,7 @@ export default function App() {
     const { data, error } = await supabase.auth.signInWithOAuth({
       provider: 'google',
       options: {
-        redirectTo: window.location.origin,
+        redirectTo: authRedirectTo(),
         queryParams: { prompt: 'select_account' },
       },
     });

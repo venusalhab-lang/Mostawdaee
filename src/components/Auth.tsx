@@ -19,7 +19,7 @@ import Logo from './Logo';
 import { useAuth } from './AuthContext';
 import { supabase } from '../supabaseClient';
 import { APP_NAME_EN, appName } from '../lib/brand';
-import { NATIVE_OAUTH_REDIRECT } from '../lib/nativeAuth';
+import { NATIVE_OAUTH_REDIRECT, authRedirectTo } from '../lib/nativeAuth';
 import { isPasswordRecovery, setPasswordRecovery } from '../lib/passwordRecovery';
 import PrivacyPolicyBody from './PrivacyPolicyBody';
 
@@ -167,7 +167,7 @@ export default function Auth({ language = 'ar', onLanguageToggle = () => {}, onL
       setAuthError(null);
       try {
         const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), {
-          redirectTo: Capacitor.isNativePlatform() ? NATIVE_OAUTH_REDIRECT : window.location.origin,
+          redirectTo: Capacitor.isNativePlatform() ? NATIVE_OAUTH_REDIRECT : authRedirectTo(),
         });
         if (error) throw error;
         setSuccessKey('reset_sent');

@@ -3,7 +3,7 @@ import { Browser } from '@capacitor/browser';
 import type { Session } from '@supabase/supabase-js';
 import { toast } from 'sonner';
 import { supabase } from '../supabaseClient';
-import { NATIVE_OAUTH_REDIRECT } from './nativeAuth';
+import { NATIVE_OAUTH_REDIRECT, authRedirectTo } from './nativeAuth';
 import { setDriveAccessToken } from '../services/googleDrive';
 
 /** Only files this app creates; the full Drive scope is "restricted" and needs a paid Google security review. */
@@ -64,7 +64,7 @@ export async function startDriveConnect(uid: string): Promise<void> {
   const hint = (googleIdentity?.identity_data?.email as string | undefined) || session.user.email;
   const native = Capacitor.isNativePlatform();
   const options = {
-    redirectTo: native ? NATIVE_OAUTH_REDIRECT : window.location.origin,
+    redirectTo: native ? NATIVE_OAUTH_REDIRECT : authRedirectTo(),
     scopes: DRIVE_SCOPE,
     skipBrowserRedirect: native,
     queryParams: {

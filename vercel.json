@@ -5,7 +5,10 @@
   "framework": "vite",
   "rewrites": [
     { "source": "/api", "destination": "/api" },
-    { "source": "/api/:path*", "destination": "/api?__p=:path*" }
+    { "source": "/api/:path*", "destination": "/api?__p=:path*" },
+    { "source": "/auth/callback", "destination": "/index.html" },
+    { "source": "/auth/callback/", "destination": "/index.html" },
+    { "source": "/((?!api(?:/|$)|assets(?:/|$)|.*\\..*).*)", "destination": "/index.html" }
   ],
   "functions": {
     "api/index.ts": {
