@@ -36,9 +36,21 @@ export default defineConfig(({mode}) => {
           mode: 'development',
           disableDevLogs: true,
           maximumFileSizeToCacheInBytes: 4000000,
-          navigateFallback: './index.html',
+          // After a deploy, a stale precached index.html can point at deleted hashed assets → white screen.
+          cleanupOutdatedCaches: true,
+          navigateFallback: 'index.html',
           navigateFallbackDenylist: [/^\/api/, /^\/auth/],
           runtimeCaching: [
+            {
+              // Prefer a fresh document when online so deploys win over an old shell.
+              urlPattern: ({ request }) => request.mode === 'navigate',
+              handler: 'NetworkFirst',
+              options: {
+                cacheName: 'pages',
+                networkTimeoutSeconds: 3,
+                expiration: { maxEntries: 8, maxAgeSeconds: 60 * 60 * 24 },
+              },
+            },
             {
               urlPattern: ({ request }) => request.destination === 'font',
               handler: 'CacheFirst',
@@ -53,8 +65,8 @@ export default defineConfig(({mode}) => {
           name: 'مستودعي - Mostawdaee',
           short_name: 'مستودعي',
           description: 'نظام إدارة التجارة والمخزون الذكي',
-          theme_color: '#4f46e5',
-          background_color: '#ffffff',
+          theme_color: '#0f172a',
+          background_color: '#0f172a',
           display: 'standalone',
           orientation: 'portrait',
           scope: './',

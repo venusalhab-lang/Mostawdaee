@@ -17,17 +17,174 @@
     </script>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
     <meta name="google" content="notranslate" />
-    <meta name="theme-color" content="#4f46e5" />
+    <meta name="theme-color" content="#0f172a" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="مستودعي" />
     <link rel="apple-touch-icon" href="./icon.svg" />
     <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,&lt;svg width='100' height='100' viewBox='0 0 100 100' fill='none' xmlns='http://www.w3.org/2000/svg'&gt;&lt;defs&gt;&lt;linearGradient id='g' x1='5' y1='95' x2='95' y2='5' gradientUnits='userSpaceOnUse'&gt;&lt;stop offset='0%' stop-color='%2300E5FF' /&gt;&lt;stop offset='42%' stop-color='%232b66f5' /&gt;&lt;stop offset='78%' stop-color='%234f46e5' /&gt;&lt;stop offset='100%' stop-color='%236A1B9A' /&gt;&lt;/linearGradient&gt;&lt;/defs&gt;&lt;path d='M 50,5 C 80,5 95,20 95,50 C 95,80 80,95 50,95 C 20,95 5,80 5,50 C 5,20 20,5 50,5 Z' fill='url(%23g)' /&gt;&lt;g stroke='%23FFFFFF' stroke-width='5.5' stroke-linecap='round' stroke-linejoin='round' fill='none'&gt;&lt;path d='M 32,44 L 32,58.5 M 50,52.5 L 50,67 M 68,44 L 68,58.5' /&gt;&lt;path d='M 32,58.5 L 50,67 L 68,58.5' /&gt;&lt;path d='M 32,44 L 50,52.5 L 68,44' /&gt;&lt;path d='M 32,44 L 50,35.5 L 68,44' /&gt;&lt;path d='M 41,39.5 L 59,48.5' stroke-width='4.5' /&gt;&lt;path d='M 44.5,41 L 62.5,50' stroke-width='4.5' /&gt;&lt;/g&gt;&lt;/svg&gt;" />
     <title>مستودعي - إدارة المنتجات والمحاسبة</title>
+    <style>
+      html, body {
+        margin: 0;
+        min-height: 100%;
+        background: #0f172a;
+        color: #e2e8f0;
+      }
+      #root:empty {
+        min-height: 100vh;
+      }
+      #boot-shell {
+        position: fixed;
+        inset: 0;
+        z-index: 2147483000;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 1rem;
+        padding: 1.5rem;
+        box-sizing: border-box;
+        background: #0f172a;
+        color: #e2e8f0;
+        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+        text-align: center;
+      }
+      #boot-shell[hidden] { display: none !important; }
+      #boot-shell .boot-spin {
+        width: 3rem;
+        height: 3rem;
+        border-radius: 1rem;
+        border: 3px solid rgba(99, 102, 241, 0.18);
+        border-top-color: #6366f1;
+        animation: boot-spin 0.8s linear infinite;
+      }
+      #boot-shell .boot-title {
+        margin: 0;
+        font-size: 0.95rem;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+      }
+      #boot-shell .boot-help {
+        display: none;
+        max-width: 22rem;
+        margin: 0;
+        font-size: 0.8rem;
+        line-height: 1.55;
+        color: #94a3b8;
+      }
+      #boot-shell.boot-stuck .boot-help { display: block; }
+      #boot-shell.boot-stuck .boot-spin { display: none; }
+      #boot-shell .boot-actions {
+        display: none;
+        flex-direction: column;
+        gap: 0.65rem;
+        width: min(100%, 16rem);
+        margin-top: 0.35rem;
+      }
+      #boot-shell.boot-stuck .boot-actions { display: flex; }
+      #boot-shell button {
+        appearance: none;
+        border: 0;
+        border-radius: 1rem;
+        height: 2.75rem;
+        font-size: 0.875rem;
+        font-weight: 700;
+        cursor: pointer;
+      }
+      #boot-reload {
+        background: #4f46e5;
+        color: #fff;
+      }
+      #boot-repair {
+        background: transparent;
+        color: #94a3b8;
+        text-decoration: underline;
+        height: auto;
+        font-weight: 600;
+        font-size: 0.75rem;
+      }
+      @keyframes boot-spin {
+        to { transform: rotate(360deg); }
+      }
+    </style>
   </head>
   <body class="notranslate">
+    <div id="boot-shell" role="status" aria-live="polite">
+      <div class="boot-spin" aria-hidden="true"></div>
+      <p class="boot-title">جارٍ تحميل مستودعي…</p>
+      <p class="boot-help">
+        تعذّر إقلاع التطبيق (غالباً نسخة قديمة محفوظة في المتصفح). أعد التحميل، أو أصلح التخزين المؤقت ثم أعد المحاولة.
+      </p>
+      <div class="boot-actions">
+        <button type="button" id="boot-reload">إعادة التحميل</button>
+        <button type="button" id="boot-repair">إصلاح التخزين المؤقت</button>
+      </div>
+    </div>
     <div id="root"></div>
+    <script>
+      (function () {
+        var shell = document.getElementById('boot-shell');
+        if (!shell) return;
+        var reloadBtn = document.getElementById('boot-reload');
+        var repairBtn = document.getElementById('boot-repair');
+        var stuckTimer = null;
+        var hideBoot = function () {
+          if (stuckTimer) clearTimeout(stuckTimer);
+          shell.hidden = true;
+          shell.classList.remove('boot-stuck');
+        };
+        window.__mostawdaeeHideBoot = hideBoot;
+        var markStuck = function () {
+          if (shell.hidden) return;
+          if (document.getElementById('root') && document.getElementById('root').childElementCount > 0) {
+            hideBoot();
+            return;
+          }
+          shell.classList.add('boot-stuck');
+          var title = shell.querySelector('.boot-title');
+          if (title) title.textContent = 'تعذّر تحميل مستودعي';
+        };
+        stuckTimer = setTimeout(markStuck, 10000);
+        var root = document.getElementById('root');
+        if (root && typeof MutationObserver !== 'undefined') {
+          var obs = new MutationObserver(function () {
+            if (root.childElementCount > 0) {
+              hideBoot();
+              obs.disconnect();
+            }
+          });
+          obs.observe(root, { childList: true });
+        }
+        if (reloadBtn) {
+          reloadBtn.addEventListener('click', function () {
+            location.reload();
+          });
+        }
+        if (repairBtn) {
+          repairBtn.addEventListener('click', function () {
+            var done = function () { location.replace('/?boot_repair=' + Date.now()); };
+            var clearCaches = (window.caches && caches.keys)
+              ? caches.keys().then(function (keys) {
+                  return Promise.all(keys.map(function (k) { return caches.delete(k); }));
+                }).catch(function () {})
+              : Promise.resolve();
+            var clearSw = ('serviceWorker' in navigator)
+              ? navigator.serviceWorker.getRegistrations().then(function (regs) {
+                  return Promise.all(regs.map(function (r) { return r.unregister(); }));
+                }).catch(function () {})
+              : Promise.resolve();
+            Promise.all([clearCaches, clearSw]).then(done, done);
+          });
+        }
+        // If a previous deploy left a broken shell, one automatic repair pass helps.
+        try {
+          if (/[?&]boot_repair=/.test(location.search)) {
+            history.replaceState(null, '', location.pathname + location.hash);
+          }
+        } catch (e) {}
+      })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
-

@@ -632,13 +632,31 @@ export default function App() {
   // 1. Loading State Splash (members must not glimpse owner screens before their role is known)
   if (dbLoading || waitingForWorkspace) {
     const stuck = waitingForWorkspace && workspaceWaitMs >= 12_000;
+    const repairClientShell = async () => {
+      try {
+        if ('caches' in window) {
+          const keys = await caches.keys();
+          await Promise.all(keys.map((key) => caches.delete(key)));
+        }
+        if ('serviceWorker' in navigator) {
+          const regs = await navigator.serviceWorker.getRegistrations();
+          await Promise.all(regs.map((reg) => reg.unregister()));
+        }
+      } catch { /* best-effort */ }
+      window.location.replace(`/?boot_repair=${Date.now()}`);
+    };
     return (
-      <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center p-4 text-white font-sans selection:bg-indigo-500/20">
-        <div className="relative w-16 h-16 mb-6">
-          <div className="absolute inset-0 rounded-2xl border-4 border-indigo-500/10" />
-          <div className="absolute inset-0 rounded-2xl border-4 border-t-indigo-500 animate-spin" />
-        </div>
-        <p className="text-sm font-bold text-slate-300 tracking-wide animate-pulse">
+      <div
+        className="min-h-screen bg-slate-950 flex flex-col items-center justify-center p-4 text-white font-sans selection:bg-indigo-500/20"
+        style={{ minHeight: '100vh', background: '#0f172a', color: '#e2e8f0', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 16, textAlign: 'center' }}
+      >
+        {!stuck && (
+          <div className="relative w-16 h-16 mb-6">
+            <div className="absolute inset-0 rounded-2xl border-4 border-indigo-500/10" />
+            <div className="absolute inset-0 rounded-2xl border-4 border-t-indigo-500 animate-spin" />
+          </div>
+        )}
+        <p className="text-sm font-bold text-slate-300 tracking-wide animate-pulse" style={{ margin: 0, fontWeight: 700, fontSize: 14 }}>
           {stuck
             ? (isRtl ? 'تعذّر تجهيز المتجر بعد الدخول' : 'Could not open the store after sign-in')
             : waitingForWorkspace
@@ -646,23 +664,33 @@ export default function App() {
               : (isRtl ? 'جارٍ تحميل مستودعي...' : 'Loading Mostawdaee...')}
         </p>
         {stuck && (
-          <div className="mt-6 flex flex-col items-center gap-3 max-w-sm text-center">
-            <p className="text-xs text-slate-400 leading-relaxed">
+          <div className="mt-6 flex flex-col items-center gap-3 max-w-sm text-center" style={{ marginTop: 24, display: 'flex', flexDirection: 'column', gap: 12, maxWidth: 384 }}>
+            <p className="text-xs text-slate-400 leading-relaxed" style={{ margin: 0, fontSize: 12, color: '#94a3b8', lineHeight: 1.6 }}>
               {isRtl
-                ? 'الاتصال بقاعدة المتجر لم يكتمل. أعد التحميل، أو امسح بيانات الموقع إن تكرر ذلك.'
-                : 'The store context did not finish loading. Reload, or clear site data if this keeps happening.'}
+                ? 'الاتصال بقاعدة المتجر لم يكتمل، أو المتصفح يمسك نسخة قديمة. أعد التحميل أو أصلح التخزين المؤقت.'
+                : 'Store context did not finish, or the browser is holding a stale shell. Reload or repair the cache.'}
             </p>
             <button
               type="button"
               onClick={() => window.location.assign('/')}
               className="h-11 px-5 rounded-2xl bg-indigo-600 hover:bg-indigo-700 text-sm font-bold"
+              style={{ height: 44, padding: '0 20px', borderRadius: 16, background: '#4f46e5', color: '#fff', border: 0, fontWeight: 700, fontSize: 14, cursor: 'pointer' }}
             >
               {isRtl ? 'إعادة التحميل' : 'Reload'}
             </button>
             <button
               type="button"
+              onClick={() => { void repairClientShell(); }}
+              className="text-xs font-semibold text-slate-300 hover:text-white underline"
+              style={{ background: 'transparent', border: 0, color: '#cbd5e1', fontSize: 12, fontWeight: 600, textDecoration: 'underline', cursor: 'pointer' }}
+            >
+              {isRtl ? 'إصلاح التخزين المؤقت' : 'Repair cache'}
+            </button>
+            <button
+              type="button"
               onClick={() => { void handleSignOut(); }}
               className="text-xs font-semibold text-slate-400 hover:text-white underline"
+              style={{ background: 'transparent', border: 0, color: '#94a3b8', fontSize: 12, fontWeight: 600, textDecoration: 'underline', cursor: 'pointer' }}
             >
               {isRtl ? 'تسجيل الخروج' : 'Sign out'}
             </button>

@@ -105,7 +105,20 @@ window.addEventListener('vite:preloadError', (event) => {
 
 // Register the PWA service worker with auto-update (not in previews, and not in the native app, which ships its files in the APK)
 if (!isSandboxPreview) {
-  registerSW({ immediate: true });
+  registerSW({
+    immediate: true,
+    onRegisteredSW(_swUrl, registration) {
+      // Catch a new deploy soon after opening the site, before a stale shell can stick.
+      if (!registration) return;
+      const check = () => {
+        try { void registration.update(); } catch { /* ignore */ }
+      };
+      check();
+      window.setInterval(check, 5 * 60_000);
+      window.addEventListener('focus', check);
+      window.addEventListener('online', check);
+    },
+  });
 }
 
 createRoot(document.getElementById('root')!).render(
@@ -124,3 +137,12 @@ createRoot(document.getElementById('root')!).render(
     </HashRouter>
   </StrictMode>,
 );
+
+// Drop the inline HTML shell once React has committed into #root (observer in index.html also watches).
+const hideBootShell = () => {
+  try {
+    (window as Window & { __mostawdaeeHideBoot?: () => void }).__mostawdaeeHideBoot?.();
+  } catch { /* ignore */ }
+};
+queueMicrotask(hideBootShell);
+requestAnimationFrame(hideBootShell);
