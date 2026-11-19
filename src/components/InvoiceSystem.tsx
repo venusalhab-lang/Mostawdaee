@@ -76,6 +76,7 @@ import { csvCell } from '../lib/csv';
 import OrdersPanel from './OrdersPanel';
 import { orderToSaleLines } from '../lib/orders';
 import type { TradeOrder } from '../types';
+import { sellerName, sellerOf, type SellerContext } from '../lib/salesLog';
 
 interface InvoiceSystemProps {
   language: Language;
@@ -97,6 +98,18 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
   const { products, invoices, saveInvoice, deleteInvoice, settings, user, customers, can, workspace, markOrderConverted } = useFirebase();
   const { preferredCurrency } = usePreferredCurrency();
   const activeCurrency = preferredCurrency === 'DEFAULT' ? (settings?.currency || 'JOD') : preferredCurrency;
+  const sellerCtx: SellerContext = {
+    userId: user?.uid || '',
+    userEmail: user?.email || '',
+    ownerId: workspace?.ownerId || user?.uid || '',
+    ownerEmail: workspace?.ownerEmail || (workspace?.role === 'owner' ? user?.email : '') || '',
+    pendingIds: new Set(),
+  };
+  const invoiceSellerLabel = (inv: Invoice) => {
+    if (inv.type !== 'sale' && inv.type !== 'return') return null;
+    if (!inv.actorId && !inv.actorEmail) return null;
+    return sellerName(sellerOf(inv, sellerCtx), isRtl);
+  };
 
   const formatCurrency = (val: number, customCurrency?: string) => {
     return formatMoney(Number(val) || 0, customCurrency || settings?.currency || 'JOD');
@@ -1093,6 +1106,7 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
                       <th className={`py-3 px-4 font-black ${isRtl ? 'text-right' : 'text-left'}`}>{isRtl ? 'الرقم' : '#'}</th>
                       <th className={`py-3 px-4 font-black ${isRtl ? 'text-right' : 'text-left'}`}>{isRtl ? 'النوع' : 'Type'}</th>
                       <th className={`py-3 px-4 font-black ${isRtl ? 'text-right' : 'text-left'}`}>{isRtl ? 'الطرف' : 'Party'}</th>
+                      <th className={`py-3 px-4 font-black ${isRtl ? 'text-right' : 'text-left'}`}>{isRtl ? 'البائع' : 'Seller'}</th>
                       <th className={`py-3 px-4 font-black ${isRtl ? 'text-right' : 'text-left'}`}>{isRtl ? 'الدفع' : 'Payment'}</th>
                       <th className={`py-3 px-4 font-black ${isRtl ? 'text-left' : 'text-right'}`}>{isRtl ? 'الإجمالي' : 'Total'}</th>
                       <th className="py-3 px-4 font-black text-center">{isRtl ? 'إجراء' : 'Action'}</th>
@@ -1101,6 +1115,7 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
                   <tbody className="divide-y divide-gray-50 dark:divide-gray-700/80">
                     {invoicePage.visible.map((inv) => {
                       const hint = tenderHint(inv);
+                      const sellerLabel = invoiceSellerLabel(inv);
                       return (
                         <tr
                           key={inv.id}
@@ -1120,6 +1135,9 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
                           <td className="py-3 px-4 font-mono font-bold text-indigo-600" dir="ltr">#{inv.invoiceNumber}</td>
                           <td className={`py-3 px-4 text-xs font-black ${typeTone(inv.type).text}`}>{invoiceTypeLabel(inv.type, isRtl)}</td>
                           <td className="py-3 px-4 font-bold text-gray-900 dark:text-gray-100 max-w-[12rem] truncate" dir="auto">{partyName(inv)}</td>
+                          <td className="py-3 px-4 text-xs font-bold text-slate-500 dark:text-slate-400 max-w-[10rem] truncate" dir="auto">
+                            {sellerLabel || '—'}
+                          </td>
                           <td className="py-3 px-4">
                             <div className="text-xs font-bold text-gray-700 dark:text-gray-200">{invoicePaymentLabel(inv, isRtl)} · {inv.currency}</div>
                             {hint && <div className="text-[10px] text-amber-700 dark:text-amber-400 font-bold mt-0.5" dir="ltr">{hint}</div>}
@@ -1148,6 +1166,7 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                 {invoicePage.visible.map((inv) => {
                   const hint = tenderHint(inv);
+                  const sellerLabel = invoiceSellerLabel(inv);
                   return (
                     <div
                       key={inv.id}
@@ -1177,6 +1196,11 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
                         <div>
                           <h3 className="text-lg font-bold text-gray-900 dark:text-gray-100 truncate" dir="auto">{partyName(inv)}</h3>
                           <p className="text-[11px] text-gray-400 font-bold mt-1">{invoicePaymentLabel(inv, isRtl)} · {inv.currency}</p>
+                          {sellerLabel && (
+                            <p className="text-[11px] text-slate-500 dark:text-slate-400 font-bold mt-1 truncate" dir="auto">
+                              {isRtl ? 'البائع: ' : 'Seller: '}{sellerLabel}
+                            </p>
+                          )}
                           {hint && <p className="text-[10px] text-amber-700 dark:text-amber-400 font-bold mt-1" dir="ltr">{hint}</p>}
                         </div>
                         <div className="flex items-center justify-between pt-4 border-t border-gray-50 dark:border-gray-700">
@@ -1843,6 +1867,12 @@ export default function InvoiceSystem({ language, initialView = 'list' }: Invoic
                   <p className="text-[11px] text-slate-400 font-bold">{isRtl ? 'العملة' : 'Currency'}</p>
                   <p className="font-semibold font-mono">{selectedInvoice.currency}</p>
                 </div>
+                {invoiceSellerLabel(selectedInvoice) && (
+                  <div>
+                    <p className="text-[11px] text-slate-400 font-bold">{isRtl ? 'البائع' : 'Seller'}</p>
+                    <p className="font-semibold" dir="auto">{invoiceSellerLabel(selectedInvoice)}</p>
+                  </div>
+                )}
                 {isReturnType(selectedInvoice.type) && selectedInvoice.returnOfNumber && (
                   <div>
                     <p className="text-[11px] text-slate-400 font-bold">{isRtl ? 'عن الفاتورة' : 'For invoice'}</p>

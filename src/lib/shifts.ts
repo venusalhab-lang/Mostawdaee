@@ -51,12 +51,18 @@ export function shiftInvoices(
 ): Invoice[] {
   if (!shift.actorId) return [];
   const { start, end } = shiftInvoiceWindow(shift, now, allShifts);
-  if (end < start) return [];
-  return invoices.filter((inv) =>
-    (inv.type === 'sale' || inv.type === 'return')
-    && inv.actorId === shift.actorId
-    && Number(inv.date) >= start
-    && Number(inv.date) <= end);
+  return invoices.filter((inv) => {
+    if (inv.type !== 'sale' && inv.type !== 'return') return false;
+    // Prefer explicit shift link when present (new sales/returns); still require same cashier.
+    if (inv.shiftId) {
+      return inv.shiftId === shift.id && inv.actorId === shift.actorId;
+    }
+    // Legacy: same cashier inside the open→close (or now) window.
+    if (end < start) return false;
+    return inv.actorId === shift.actorId
+      && Number(inv.date) >= start
+      && Number(inv.date) <= end;
+  });
 }
 
 /**

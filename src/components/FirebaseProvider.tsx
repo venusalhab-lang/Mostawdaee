@@ -299,6 +299,8 @@ export interface SalesReturnInput {
   lines: ReturnLineRequest[];
   reason: string;
   invoiceNumber: string;
+  /** Open drawer shift when the return is recorded (optional; sales returns only). */
+  shiftId?: string;
 }
 
 interface SalesReturnResult {
@@ -384,6 +386,7 @@ async function commitSalesReturn(uid: string, input: SalesReturnInput, opts: Com
         returnReason: input.reason.trim(),
         refund,
         vaultPosted: refund.vault > 0,
+        ...(input.shiftId ? { shiftId: input.shiftId } : {}),
       };
 
       const vaultPlan = planInvoiceVaultEntry(returnInvoice);

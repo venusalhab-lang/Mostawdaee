@@ -1491,6 +1491,8 @@ export default function POSSystem({ language }: POSSystemProps) {
           debtAmount,
           debtCurrency,
         } : {}),
+        // Link to the cashier's open drawer when present; omitted for purchases / no-shift stores.
+        ...(posMode === 'sale' && myShift ? { shiftId: myShift.id } : {}),
       };
 
       // Persist first: any failure here aborts checkout (cart is kept) instead of showing a false success.

@@ -42,6 +42,27 @@ describe('shiftInvoices', () => {
   it('a shift without its opener matches nothing', () => {
     expect(shiftInvoices({ ...shift, actorId: undefined }, [sale('a')])).toEqual([]);
   });
+
+  it('prefers shiftId over the time window when present', () => {
+    const stamped = sale('linked', { shiftId: 's1', date: 50 }); // outside window by time
+    const otherShift = sale('other-shift', { shiftId: 's2', date: 2000 });
+    const legacy = sale('legacy', { date: 2000 }); // no shiftId
+    expect(shiftInvoices({ ...shift, closedAt: 5000 }, [stamped, otherShift, legacy]).map((i) => i.id))
+      .toEqual(['linked', 'legacy']);
+  });
+
+  it('ignores a shiftId stamp from a different cashier', () => {
+    const forged = sale('forged', { shiftId: 's1', actorId: 'u-other', date: 2000 });
+    expect(shiftInvoices({ ...shift, closedAt: 5000 }, [forged])).toEqual([]);
+  });
+
+  it('keeps shiftId-linked invoices even when the time window is inverted', () => {
+    const stamped = sale('linked', { shiftId: 's1', date: 9999 });
+    const legacy = sale('legacy', { date: 2000 });
+    // closedAt before openedAt → broken window; only explicit shiftId should match.
+    expect(shiftInvoices({ ...shift, openedAt: 5000, closedAt: 1000 }, [stamped, legacy]).map((i) => i.id))
+      .toEqual(['linked']);
+  });
 });
 
 describe('summarizeShift', () => {

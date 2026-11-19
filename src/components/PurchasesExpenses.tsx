@@ -67,6 +67,14 @@ import ReorderPanel from './ReorderPanel';
 import OrdersPanel from './OrdersPanel';
 import { orderToPurchaseLines } from '../lib/orders';
 import type { TradeOrder } from '../types';
+import PurchaseQuickGrid from './grid/PurchaseQuickGrid';
+import {
+  createEmptyPurchaseRows,
+  purchaseGridErrorMessage,
+  purchaseGridGrandTotal,
+  validatePurchaseGrid,
+  type PurchaseGridRow,
+} from '../lib/grid/purchaseGrid';
 
 interface Props {
   language: Language;
@@ -128,12 +136,45 @@ export default function PurchasesExpenses({ language }: Props) {
   const [paymentMode, setPaymentMode] = useState<'cash' | 'credit' | 'partial'>('cash');
   const [paidNow, setPaidNow] = useState('');
   const [addingSupplier, setAddingSupplier] = useState(false);
+  /** Classic appender vs Excel-like quick grid — optional; classic remains default. */
+  const [purchaseEntryMode, setPurchaseEntryMode] = useState<'classic' | 'grid'>('classic');
+  const [purchaseGridRows, setPurchaseGridRows] = useState<PurchaseGridRow[]>(() => createEmptyPurchaseRows(8));
   // One id per draft: a second click, or a retry after a lost reply, is recognised as the same purchase.
   const purchaseIdRef = useRef<string | null>(null);
   const expenseIdRef = useRef<string | null>(null);
   const savingRef = useRef(false);
   const [isSaving, setIsSaving] = useState(false);
-  useEffect(() => { purchaseIdRef.current = null; }, [purchaseItems, supplierName, purchaseCurrency, purchaseTaxRate, purchaseDiscount, purchaseDate, paymentMode, paidNow]);
+  useEffect(() => { purchaseIdRef.current = null; }, [purchaseItems, purchaseGridRows, supplierName, purchaseCurrency, purchaseTaxRate, purchaseDiscount, purchaseDate, paymentMode, paidNow]);
+
+  const purchaseItemsToGridRows = (items: Omit<InvoiceItem, 'total'>[]): PurchaseGridRow[] => {
+    if (!items.length) return createEmptyPurchaseRows(8);
+    const rows: PurchaseGridRow[] = items.map((item) => {
+      const prod = products.find((p) => p.id === item.productId);
+      return {
+        id: crypto.randomUUID(),
+        code: prod?.sku || item.sku || item.productId,
+        productId: item.productId,
+        description: item.description,
+        quantity: String(item.quantity),
+        unitPrice: String(item.unitPrice),
+        errorKey: null,
+      };
+    });
+    return [...rows, ...createEmptyPurchaseRows(Math.max(2, 8 - rows.length))];
+  };
+
+  const switchPurchaseEntryMode = (mode: 'classic' | 'grid') => {
+    if (mode === purchaseEntryMode) return;
+    sounds.playClick();
+    if (mode === 'grid') {
+      setPurchaseGridRows(purchaseItemsToGridRows(purchaseItems));
+    } else {
+      const result = validatePurchaseGrid(purchaseGridRows, products);
+      // Keep whatever resolved cleanly; leave classic empty if grid had only errors.
+      if (result.items.length) setPurchaseItems(result.items);
+    }
+    setPurchaseEntryMode(mode);
+  };
 
   // Registered suppliers first, then names typed on older purchases.
   const existingSuppliers = useMemo(() => {
@@ -248,6 +289,9 @@ export default function PurchasesExpenses({ language }: Props) {
 
   const purchaseVatRate = resolveVatRate(purchaseTaxRate, 0);
   const purchaseDiscountValue = roundForCurrency(Math.max(0, Number(purchaseDiscount) || 0), purchaseCurrency);
+  const purchaseDraftLinesSubtotal = purchaseEntryMode === 'grid'
+    ? purchaseGridGrandTotal(purchaseGridRows)
+    : purchaseLines.reduce((acc, item) => acc + item.total, 0);
   const {
     subtotal: purchaseDraftSubtotal,
     discount: purchaseDraftDiscount,
@@ -255,12 +299,12 @@ export default function PurchasesExpenses({ language }: Props) {
     total: purchaseDraftTotal,
   } = useMemo(
     () => computeInvoiceTotals({
-      subtotal: purchaseLines.reduce((acc, item) => acc + item.total, 0),
+      subtotal: purchaseDraftLinesSubtotal,
       discount: purchaseDiscountValue,
       vatRate: purchaseVatRate,
       currency: purchaseCurrency,
     }),
-    [purchaseLines, purchaseDiscountValue, purchaseVatRate, purchaseCurrency]
+    [purchaseDraftLinesSubtotal, purchaseDiscountValue, purchaseVatRate, purchaseCurrency]
   );
   const paidNowValue = paymentMode === 'cash' ? purchaseDraftTotal
     : paymentMode === 'credit' ? 0
@@ -285,12 +329,48 @@ export default function PurchasesExpenses({ language }: Props) {
       toast.error(isRtl ? "يرجى تحديد اسم المورّد" : "Please declare the supplier name");
       return;
     }
-    if (purchaseItems.length === 0) {
+
+    let linesForSave = purchaseLines;
+    if (purchaseEntryMode === 'grid') {
+      const result = validatePurchaseGrid(purchaseGridRows, products);
+      setPurchaseGridRows(result.rows);
+      if (!result.ok) {
+        const first = result.errors[0];
+        toast.error(first
+          ? purchaseGridErrorMessage(first.key, isRtl)
+          : (isRtl ? 'أضف بنداً واحداً على الأقل في الجدول.' : 'Add at least one line in the grid.'));
+        return;
+      }
+      linesForSave = result.items.map((item) => ({
+        ...item,
+        quantity: Number(item.quantity) || 0,
+        unitPrice: Number(item.unitPrice) || 0,
+        total: roundForCurrency((Number(item.quantity) || 0) * (Number(item.unitPrice) || 0), purchaseCurrency),
+      }));
+      setPurchaseItems(result.items);
+    } else if (purchaseItems.length === 0) {
       toast.error(isRtl ? "الفاتورة فارغة! يرجى إضافة منتج واحد على الأقل" : "Your invoice draft is empty! Please add items.");
       return;
     }
+
+    const gridSubtotal = linesForSave.reduce((acc, item) => acc + item.total, 0);
+    const gridTotals = computeInvoiceTotals({
+      subtotal: gridSubtotal,
+      discount: purchaseDiscountValue,
+      vatRate: purchaseVatRate,
+      currency: purchaseCurrency,
+    });
+    const saveTotal = purchaseEntryMode === 'grid' ? gridTotals.total : purchaseDraftTotal;
+    const saveSubtotal = purchaseEntryMode === 'grid' ? gridTotals.subtotal : purchaseDraftSubtotal;
+    const saveDiscount = purchaseEntryMode === 'grid' ? gridTotals.discount : purchaseDraftDiscount;
+    const saveTax = purchaseEntryMode === 'grid' ? gridTotals.taxAmount : purchaseDraftTax;
+    const savePaidNow = paymentMode === 'cash' ? saveTotal
+      : paymentMode === 'credit' ? 0
+        : roundForCurrency(Number(paidNow) || 0, purchaseCurrency);
+    const saveOwed = roundForCurrency(Math.max(saveTotal - savePaidNow, 0), purchaseCurrency);
+
     const paymentProblem = checkPurchasePayment(
-      paymentMode === 'cash' || (paymentMode === 'partial' && owedLater <= 0 && paidNowValue <= purchaseDraftTotal) ? 'cash' : 'credit', purchaseDraftTotal, paidNowValue, purchaseCurrency, matchedSupplier?.id);
+      paymentMode === 'cash' || (paymentMode === 'partial' && saveOwed <= 0 && savePaidNow <= saveTotal) ? 'cash' : 'credit', saveTotal, savePaidNow, purchaseCurrency, matchedSupplier?.id);
     if (paymentProblem) {
       toast.error(paymentProblem === 'supplier_required'
         ? (isRtl ? 'الشراء الآجل يحتاج مورداً مسجلاً. أضف المورد أولاً.' : 'A credit purchase needs a registered supplier. Add the supplier first.')
@@ -299,7 +379,8 @@ export default function PurchasesExpenses({ language }: Props) {
           : (isRtl ? 'المبلغ المدفوع الآن غير صالح.' : 'The amount paid now is not valid.'));
       return;
     }
-    if (purchaseVaultShort) {
+    const vaultAvailable = readVaultBalances(vault)[purchaseCurrency] || 0;
+    if (savePaidNow > vaultAvailable + 1e-9) {
       toast.error(isRtl
         ? 'رصيد الخزنة بهذه العملة غير كافٍ للمبلغ المدفوع الآن. أضف رصيداً أو خفّض المدفوع.'
         : 'Vault balance in this currency is not enough for the amount paid now. Deposit funds or pay less.');
@@ -314,7 +395,7 @@ export default function PurchasesExpenses({ language }: Props) {
     const usesSequence = !typedInvoiceNo || typedInvoiceNo === suggestedNo;
     const finalInvoiceNo = usesSequence ? suggestedNo : typedInvoiceNo;
 
-    const parsedItems = purchaseLines;
+    const parsedItems = linesForSave;
 
     purchaseIdRef.current ||= crypto.randomUUID();
     const newInvoice: Invoice = {
@@ -324,14 +405,14 @@ export default function PurchasesExpenses({ language }: Props) {
       ...(matchedSupplier ? { supplierId: matchedSupplier.id } : {}),
       date: timestampForLocalDay(purchaseDate),
       items: parsedItems,
-      subtotal: purchaseDraftSubtotal,
-      discount: purchaseDraftDiscount,
-      taxAmount: purchaseDraftTax,
+      subtotal: saveSubtotal,
+      discount: saveDiscount,
+      taxAmount: saveTax,
       vatRate: purchaseVatRate,
-      totalAmount: purchaseDraftTotal,
+      totalAmount: saveTotal,
       type: 'purchase',
       currency: purchaseCurrency,
-      ...(paymentMode === 'cash' || owedLater <= 0 ? { paymentMethod: 'cash' as const } : { paymentMethod: 'credit' as const, paidAmount: paidNowValue }),
+      ...(paymentMode === 'cash' || saveOwed <= 0 ? { paymentMethod: 'cash' as const } : { paymentMethod: 'credit' as const, paidAmount: savePaidNow }),
     };
 
     savingRef.current = true;
@@ -357,6 +438,8 @@ export default function PurchasesExpenses({ language }: Props) {
       setPurchaseInvoiceNo('');
       setPurchaseDate(localIsoDate());
       setPurchaseItems([]);
+      setPurchaseGridRows(createEmptyPurchaseRows(8));
+      setPurchaseEntryMode('classic');
       setPurchaseDiscount('');
       setPaymentMode('cash');
       setPaidNow('');
@@ -385,6 +468,8 @@ export default function PurchasesExpenses({ language }: Props) {
     setPurchaseCurrency(order.currency);
     setPurchaseTaxRate(resolveVatRate(order.vatRate, 0));
     setPurchaseItems(items);
+    setPurchaseGridRows(purchaseItemsToGridRows(items));
+    setPurchaseEntryMode('classic');
     setPurchaseDate(localIsoDate());
     setPurchaseInvoiceNo('');
     setPurchaseDiscount('');
@@ -618,6 +703,8 @@ export default function PurchasesExpenses({ language }: Props) {
                 setSourceOrder(null);
                 setPurchaseItems([]);
                 setSupplierName('');
+                setPurchaseGridRows(createEmptyPurchaseRows(8));
+                setPurchaseEntryMode('classic');
               }
               setIsPurchaseModalOpen(true);
             }}
@@ -1251,7 +1338,42 @@ export default function PurchasesExpenses({ language }: Props) {
                   </div>
                 </div>
 
-                {/* Sub-Card: Line items dynamic insertion builder */}
+                {/* Entry mode: classic appender (default) or Excel-like quick grid */}
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-[10px] font-black text-slate-400 uppercase tracking-wider">
+                    {isRtl ? 'طريقة الإدخال' : 'Entry mode'}
+                  </span>
+                  <div className="inline-flex rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden text-[11px] font-bold" role="group">
+                    <button
+                      type="button"
+                      aria-pressed={purchaseEntryMode === 'classic'}
+                      onClick={() => switchPurchaseEntryMode('classic')}
+                      className={`px-3 py-1.5 cursor-pointer ${purchaseEntryMode === 'classic' ? 'bg-indigo-600 text-white' : 'text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800'}`}
+                    >
+                      {isRtl ? 'كلاسيكي' : 'Classic'}
+                    </button>
+                    <button
+                      type="button"
+                      aria-pressed={purchaseEntryMode === 'grid'}
+                      onClick={() => switchPurchaseEntryMode('grid')}
+                      className={`px-3 py-1.5 cursor-pointer ${purchaseEntryMode === 'grid' ? 'bg-indigo-600 text-white' : 'text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800'}`}
+                    >
+                      {isRtl ? 'جدول سريع' : 'Quick Grid'}
+                    </button>
+                  </div>
+                </div>
+
+                {purchaseEntryMode === 'grid' ? (
+                  <div className="p-4 sm:p-6 bg-slate-50/50 dark:bg-slate-800/40 border border-slate-200/50 dark:border-slate-800/80 rounded-[2rem]">
+                    <PurchaseQuickGrid
+                      rows={purchaseGridRows}
+                      onRowsChange={setPurchaseGridRows}
+                      products={products}
+                      currency={purchaseCurrency}
+                      isRtl={isRtl}
+                    />
+                  </div>
+                ) : (
                 <div className="p-6 bg-slate-50/50 dark:bg-slate-800/40 border border-slate-200/50 dark:border-slate-800/80 rounded-[2rem] space-y-4">
                   <h4 className="text-xs font-black text-slate-400 uppercase tracking-wide">
                     ➕ {isRtl ? "باني بنود الفاتورة التلقائي" : "Automated Invoice Item Appender"}
@@ -1362,8 +1484,10 @@ export default function PurchasesExpenses({ language }: Props) {
                     </div>
                   </div>
                 </div>
+                )}
 
-                {/* Draft list table */}
+                {/* Draft list table — classic mode only (grid edits live in the table above) */}
+                {purchaseEntryMode === 'classic' && (
                 <div className="border border-slate-200/50 dark:border-slate-800 rounded-2xl overflow-hidden bg-white dark:bg-slate-800">
                   <div className="p-3 bg-slate-50 dark:bg-slate-800 border-b border-slate-200/50 dark:border-slate-700/50 flex justify-between items-center">
                     <span className="text-xs font-black block text-slate-500 uppercase tracking-widest">{isRtl ? "تفاصيل بنود الفاتورة المدخلة" : "Draft Invoice Items Details"}</span>
@@ -1409,6 +1533,7 @@ export default function PurchasesExpenses({ language }: Props) {
                     </div>
                   )}
                 </div>
+                )}
 
                 {/* Calculation breakdown: discount, VAT, totals */}
                 <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-end pt-2">

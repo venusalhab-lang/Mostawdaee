@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Barcode, ClipboardCheck, History, ScanLine, Search, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import type { AppSettings, InventoryAudit, InventoryAuditLine, Language, Product } from '../types';
@@ -26,6 +26,8 @@ import {
   saveAuditDraft,
   type StoredInventoryAudit,
 } from '../lib/inventoryAuditStore';
+import { resolveGridKey } from '../lib/grid/entryGridKeyboard';
+import { parseGridNumber } from '../lib/grid/gridMath';
 
 interface Props {
   language: Language;
@@ -188,6 +190,86 @@ export default function InventoryAudit({ language, settings }: Props) {
         if (line.productId !== productId) return line;
         return { ...line, actualQty, difference: auditDifference(line.expectedQty, actualQty) };
       }),
+    );
+  };
+
+  /** Single editable column (counted qty) — Excel-like nav via shared keyboard module. */
+  const AUDIT_EDITABLE_COLS = useMemo(() => [false, false, true, false, false], []);
+  const actualInputRefs = useRef<Map<number, HTMLInputElement>>(new Map());
+  const [countFocusRow, setCountFocusRow] = useState(0);
+
+  const focusActualRow = useCallback((row: number) => {
+    const clamped = Math.max(0, Math.min(row, Math.max(0, pricedLines.length - 1)));
+    setCountFocusRow(clamped);
+    requestAnimationFrame(() => {
+      const el = actualInputRefs.current.get(clamped);
+      el?.focus();
+      el?.select();
+    });
+  }, [pricedLines.length]);
+
+  const handleCountCellKeyDown = (event: React.KeyboardEvent<HTMLInputElement>, rowIndex: number) => {
+    if (pricedLines.length === 0) return;
+    // Arrow keys move between counted cells even while the input is focused (Excel-like).
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      const delta = event.key === 'ArrowDown' ? 1 : -1;
+      const next = rowIndex + delta;
+      if (next < 0 || next >= pricedLines.length) return;
+      event.preventDefault();
+      focusActualRow(next);
+      return;
+    }
+    const action = resolveGridKey({
+      key: event.key,
+      shiftKey: event.shiftKey,
+      metaKey: event.metaKey,
+      ctrlKey: event.ctrlKey,
+      altKey: event.altKey,
+      editing: true,
+      rowCount: pricedLines.length,
+      colCount: AUDIT_EDITABLE_COLS.length,
+      focus: { row: rowIndex, col: 2 },
+      editableCols: AUDIT_EDITABLE_COLS,
+    });
+    if (action.type === 'none') return;
+    if (action.type === 'commitEdit' || action.type === 'move') {
+      const next = action.type === 'commitEdit' ? action.next : action.focus;
+      if (!next) return;
+      event.preventDefault();
+      focusActualRow(next.row);
+    }
+  };
+
+  /** Paste a column of quantities into Counted, starting at the focused row. */
+  const handleCountPaste = (event: React.ClipboardEvent<HTMLInputElement>, startRow: number) => {
+    const text = event.clipboardData.getData('text');
+    if (!text || (!text.includes('\n') && !text.includes('\t'))) return;
+    const values = text
+      .split(/\r?\n/)
+      .map((line) => line.split(/\t/)[0]?.trim() ?? '')
+      .filter((line, i, arr) => !(i === arr.length - 1 && line === ''));
+    if (values.length <= 1) return;
+    event.preventDefault();
+    setLines((prev) => {
+      const next = [...prev];
+      for (let i = 0; i < values.length; i += 1) {
+        const idx = startRow + i;
+        if (idx >= next.length) break;
+        const parsed = parseGridNumber(values[i]);
+        if (parsed === null || Number.isNaN(parsed) || parsed < 0) continue;
+        const line = next[idx];
+        next[idx] = {
+          ...line,
+          actualQty: parsed,
+          difference: auditDifference(line.expectedQty, parsed),
+        };
+      }
+      return next;
+    });
+    toast.success(
+      isRtl
+        ? `تم لصق ${Math.min(values.length, pricedLines.length - startRow)} كمية.`
+        : `Pasted ${Math.min(values.length, pricedLines.length - startRow)} quantities.`,
     );
   };
 
@@ -523,6 +605,11 @@ export default function InventoryAudit({ language, settings }: Props) {
           </div>
 
           <div className="rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-slate-900 overflow-x-auto">
+            <div className="px-3 py-2 border-b border-slate-100 dark:border-white/10 text-[11px] text-slate-400 font-medium">
+              {isRtl
+                ? 'Enter / ↓ للصف التالي · ↑ للسابق · الصق عمود كميات في خانة الفعلية'
+                : 'Enter / ↓ next row · ↑ previous · paste a column of qtys into Counted'}
+            </div>
             <table className="w-full text-sm">
               <thead className="text-xs uppercase text-slate-400 border-b border-slate-100 dark:border-white/10">
                 <tr>
@@ -540,12 +627,13 @@ export default function InventoryAudit({ language, settings }: Props) {
                     <td colSpan={6} className="px-4 py-8 text-center text-slate-400">{text.sheetEmpty}</td>
                   </tr>
                 )}
-                {pricedLines.map((line) => {
+                {pricedLines.map((line, rowIndex) => {
                   const tone = line.difference < 0 ? 'text-rose-600' : line.difference > 0 ? 'text-emerald-600' : 'text-slate-500';
                   const product = catalog.find((p) => p.id === line.productId);
                   const pack = product ? productPack(product) : null;
                   const counted = Number.isFinite(line.actualQty) ? splitPacks(line.actualQty, pack?.size ?? 0) : null;
                   const countInput = 'rounded-lg border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-white/5 px-2 py-1 text-end font-mono font-bold';
+                  const focusedRing = countFocusRow === rowIndex ? ' ring-2 ring-indigo-400/70' : '';
                   return (
                     <tr key={line.id} className="border-t border-slate-100 dark:border-white/5">
                       <td className="px-3 py-3">
@@ -571,7 +659,14 @@ export default function InventoryAudit({ language, settings }: Props) {
                                   const packs = Math.max(0, Math.floor(Number(event.target.value) || 0));
                                   setActual(line.productId, String(packs * pack.size + (counted?.loose ?? 0)));
                                 }}
-                                className={`w-14 ${countInput}`}
+                                onKeyDown={(event) => handleCountCellKeyDown(event, rowIndex)}
+                                onFocus={() => setCountFocusRow(rowIndex)}
+                                onPaste={(event) => handleCountPaste(event, rowIndex)}
+                                ref={(el) => {
+                                  if (el) actualInputRefs.current.set(rowIndex, el);
+                                  else actualInputRefs.current.delete(rowIndex);
+                                }}
+                                className={`w-14 ${countInput}${focusedRing}`}
                               />
                               {pack.name || (isRtl ? 'عبوة' : 'pack')}
                             </label>
@@ -585,6 +680,8 @@ export default function InventoryAudit({ language, settings }: Props) {
                                   const loose = Math.max(0, Number(event.target.value) || 0);
                                   setActual(line.productId, String((counted?.packs ?? 0) * pack.size + loose));
                                 }}
+                                onKeyDown={(event) => handleCountCellKeyDown(event, rowIndex)}
+                                onFocus={() => setCountFocusRow(rowIndex)}
                                 className={`w-14 ${countInput}`}
                               />
                               {product.unitName?.trim() || (isRtl ? 'وحدة' : 'unit')}
@@ -598,7 +695,14 @@ export default function InventoryAudit({ language, settings }: Props) {
                             step="any"
                             value={Number.isFinite(line.actualQty) ? line.actualQty : ''}
                             onChange={(event) => setActual(line.productId, event.target.value)}
-                            className={`w-16 ${countInput}`}
+                            onKeyDown={(event) => handleCountCellKeyDown(event, rowIndex)}
+                            onFocus={() => setCountFocusRow(rowIndex)}
+                            onPaste={(event) => handleCountPaste(event, rowIndex)}
+                            ref={(el) => {
+                              if (el) actualInputRefs.current.set(rowIndex, el);
+                              else actualInputRefs.current.delete(rowIndex);
+                            }}
+                            className={`w-16 ${countInput}${focusedRing}`}
                           />
                         )}
                       </td>

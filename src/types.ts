@@ -338,6 +338,8 @@ export interface Invoice {
   /** The account that created the invoice. Stamped by merchant_commit; a device cannot set or change it. */
   actorId?: string;
   actorEmail?: string;
+  /** Open shift id at sale time (client-set, optional). Legacy rows omit it; shift reports fall back to actor + time. */
+  shiftId?: string;
   /** Sales and purchases: quantity returned so far per line (same order as items). */
   returnedQty?: number[];
   /** Returns: the sale or purchase this return reverses. */

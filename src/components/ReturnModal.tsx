@@ -10,6 +10,7 @@ import { roundQty } from '../lib/stock';
 import { planSalesReturn, remainingQty, splitRefund, type ReturnLineRequest } from '../lib/salesReturn';
 import { planPurchaseReturn, splitPurchaseRefund } from '../lib/purchaseReturn';
 import { supplierBalance } from '../lib/suppliers';
+import { openShiftOf } from '../lib/shifts';
 
 interface ReturnModalProps {
   /** A sale (goods come back from the customer) or a purchase (goods go back to the supplier). */
@@ -20,7 +21,8 @@ interface ReturnModalProps {
 }
 
 export default function ReturnModal({ original, isRtl, onClose, onSaved }: ReturnModalProps) {
-  const { createSalesReturn, createPurchaseReturn, customers, suppliers } = useFirebase();
+  const { createSalesReturn, createPurchaseReturn, customers, suppliers, shifts, user } = useFirebase();
+  const myShift = openShiftOf(shifts, user?.uid);
   const L = (ar: string, en: string) => (isRtl ? ar : en);
   const isPurchase = original.type === 'purchase';
   const currency = original.currency as Currency;
@@ -77,6 +79,7 @@ export default function ReturnModal({ original, isRtl, onClose, onSaved }: Retur
         originalId: original.id,
         lines: requests,
         reason: reason.trim(),
+        ...(!isPurchase && myShift ? { shiftId: myShift.id } : {}),
       };
       const saved = await (isPurchase ? createPurchaseReturn(input) : createSalesReturn(input));
       onSaved(saved);

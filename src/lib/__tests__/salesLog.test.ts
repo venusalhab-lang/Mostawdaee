@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import type { Invoice } from '../../types';
-import { saleLogRows, sellerName, sellerOf, sellerSummaries, type SellerContext } from '../salesLog';
+import {
+  saleLineRows,
+  saleLogRows,
+  sellerName,
+  sellerOf,
+  sellerSummaries,
+  type SellerContext,
+} from '../salesLog';
 
 const OWNER = 'owner-id';
 const CASHIER = 'cashier-id';
@@ -64,5 +71,33 @@ describe('saleLogRows and sellerSummaries', () => {
       { seller: { key: CASHIER, kind: 'member', email: 'cashier@shop.com' }, count: 3, totals: [{ currency: 'USD', amount: 1.25 }, { currency: 'JOD', amount: 2.6 }] },
       { seller: { key: OWNER, kind: 'you', email: 'owner@shop.com' }, count: 1, totals: [{ currency: 'JOD', amount: 7 }] },
     ]);
+  });
+});
+
+describe('saleLineRows', () => {
+  it('flattens invoice items with seller and totals', () => {
+    const rows = saleLogRows([
+      sale('s1', 120, {
+        actorId: CASHIER,
+        actorEmail: 'cashier@shop.com',
+        items: [
+          { productId: 'p1', description: 'سكر', quantity: 2, unitPrice: 1.5, total: 3 },
+          { productId: 'p2', description: 'شاي', quantity: 1, unitPrice: 2, total: 2 },
+        ],
+        totalAmount: 5,
+      }),
+    ], 100, 200, ctx(OWNER));
+    const lines = saleLineRows(rows, 'JOD');
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toMatchObject({
+      invoiceNumber: 's1',
+      description: 'سكر',
+      quantity: 2,
+      unitPrice: 1.5,
+      lineTotal: 3,
+      currency: 'JOD',
+      seller: { key: CASHIER, kind: 'member' },
+    });
+    expect(lines[1].description).toBe('شاي');
   });
 });

@@ -1,5 +1,8 @@
--- Enable store_notes for Mostawdaee (idempotent pieces).
--- Run in Supabase SQL Editor on the production project.
+-- Enable store_notes for Mostawdaee (idempotent).
+-- Prefer running part1 → part2 → part3 if the SQL Editor truncates a long paste.
+
+-- PART 1/3: allow store_notes collection
+-- Run alone, then Part 2, then Part 3.
 
 ALTER TABLE public.merchant_documents DROP CONSTRAINT IF EXISTS merchant_documents_collection_check;
 ALTER TABLE public.merchant_documents ADD CONSTRAINT merchant_documents_collection_check CHECK (collection IN (
@@ -8,13 +11,16 @@ ALTER TABLE public.merchant_documents ADD CONSTRAINT merchant_documents_collecti
     'invoice_numbers', 'suppliers', 'supplier_transactions', 'shifts', 'orders', 'store_notes'
 ));
 
+-- PART 2/3: assert_role_can_write (store_notes permissions)
+-- Run after Part 1 succeeds.
+
 CREATE OR REPLACE FUNCTION public.assert_role_can_write(
     p_role TEXT, p_op TEXT, p_col TEXT, p_id TEXT, p_old JSONB, p_new JSONB
 )
 RETURNS VOID
 LANGUAGE plpgsql
 IMMUTABLE
-AS $$
+AS $assert_role$
 DECLARE
     k TEXT;
 BEGIN
@@ -122,15 +128,19 @@ BEGIN
 
     RAISE EXCEPTION 'role not allowed';
 END;
-$$;
+$assert_role$;
+
 REVOKE ALL ON FUNCTION public.assert_role_can_write(TEXT, TEXT, TEXT, TEXT, JSONB, JSONB) FROM PUBLIC, anon, authenticated;
+
+-- PART 3/3: merchant_commit (server-stamped createdBy for store_notes)
+-- Run after Part 2 succeeds.
 
 CREATE OR REPLACE FUNCTION public.merchant_commit(p_expected JSONB, p_ops JSONB)
 RETURNS VOID
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public
-AS $$
+AS $merchant_commit$
 DECLARE
     actor UUID := auth.uid();
     uid UUID;
@@ -375,7 +385,6 @@ BEGIN
         ), stamp);
     END IF;
 END;
-$$;
+$merchant_commit$;
 
 REVOKE ALL ON FUNCTION public.merchant_commit(JSONB, JSONB) FROM PUBLIC, anon;
-
