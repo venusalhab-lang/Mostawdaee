@@ -3,6 +3,7 @@ import { storeOwnerId } from './workspace';
 import { getSupabaseClient } from '../services/supabase';
 import { canTransition, chequeRestorePath, validateChequeInput } from './cheques';
 import { roundMoney } from './exchangeRates';
+import { assertRestoreIdle } from './restoreGuard';
 
 export type ChequeStoreErrorCode =
   | 'schema_missing'
@@ -132,12 +133,18 @@ export async function loadCheques(userId: string): Promise<Cheque[]> {
 }
 
 /** Backup export: empty register when cheques cloud is unavailable; other errors still surface. */
+/**
+ * Backup export: empty register only when the cheques table was never deployed.
+ * Missing session fails closed so we never silently ship a file without cheques.
+ */
 export async function loadChequesForBackup(userId: string | undefined | null): Promise<Cheque[]> {
-  if (!userId) return [];
+  if (!userId) {
+    throw new ChequeStoreError('no_session', 'Sign in before exporting a backup that includes cheques.');
+  }
   try {
     return await loadCheques(userId);
   } catch (error) {
-    if (error instanceof ChequeStoreError && (error.code === 'schema_missing' || error.code === 'no_session')) return [];
+    if (error instanceof ChequeStoreError && error.code === 'schema_missing') return [];
     throw error;
   }
 }
@@ -156,6 +163,7 @@ export async function loadChequesForRestore(userId: string): Promise<Cheque[]> {
 }
 
 export async function createCheque(userId: string, input: ChequeInput): Promise<Cheque> {
+  assertRestoreIdle(userId);
   if (validateChequeInput(input)) throw new ChequeStoreError('invalid');
   if ((await mode(userId)) === 'guest') {
     const rows = readGuest();
@@ -177,6 +185,7 @@ export async function createCheque(userId: string, input: ChequeInput): Promise<
 
 /** Corrects a cheque entered with a mistake; only possible while it is still pending (the server locks it afterwards). */
 export async function updateCheque(userId: string, cheque: Cheque, input: ChequeInput): Promise<Cheque> {
+  assertRestoreIdle(userId);
   if (cheque.status !== 'pending') throw new ChequeStoreError('invalid_transition');
   if (input.type !== cheque.type || validateChequeInput(input)) throw new ChequeStoreError('invalid');
   const patch = toRow(input);
@@ -214,6 +223,7 @@ export async function changeChequeStatus(
   endorsedTo = '',
   notes: string = cheque.notes,
 ): Promise<Cheque> {
+  assertRestoreIdle(userId);
   if (!canTransition(cheque.type, cheque.status, next)) throw new ChequeStoreError('invalid_transition');
   if (next === 'endorsed' && !endorsedTo.trim()) throw new ChequeStoreError('invalid');
   const patch = {

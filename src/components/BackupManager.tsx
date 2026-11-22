@@ -1,9 +1,10 @@
 import React, { useState, useRef } from 'react';
 import { useFirebase } from './FirebaseProvider';
 import { db } from '../lib/supabaseDocs';
-import { assertCanRestore, backupDownloadName, buildLiveBooks, makeRestoreActions, restoreBlockedMessage } from '../lib/backupIo';
+import { assertCanRestore, backupDownloadName, buildLiveBooks, makeRestoreActions, restoreBlockedMessage, vaultTransactionsForBackup } from '../lib/backupIo';
+import { exportBackupFile, exportTextFile } from '../lib/backupFile';
 import { loadChequesForBackup, loadChequesForRestore } from '../lib/chequesStore';
-import { backupCounts, buildStoreBackup, isLegacyTableBackup, isStoreBackup, restoreStoreBackup, stockCsv, type RestoreMode } from '../lib/storeBackup';
+import { backupCounts, backupCountsSummary, buildStoreBackup, isLegacyTableBackup, isStoreBackup, restoreStoreBackup, stockCsv, type RestoreMode } from '../lib/storeBackup';
 import { can as roleCan } from '../lib/roles';
 import { 
   Download, Upload, AlertTriangle, CheckCircle, Database, FileSpreadsheet
@@ -15,24 +16,13 @@ interface BackupManagerProps {
   language: 'ar' | 'en';
 }
 
-function downloadFile(content: BlobPart, type: string, filename: string) {
-  const blob = new Blob([content], { type });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = filename;
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  URL.revokeObjectURL(url);
-}
-
 export default function BackupManager({ language }: BackupManagerProps) {
   const isRtl = language === 'ar';
   const {
     user, workspace, settings, products, invoices, employees, payrollRecords, customers, customerTransactions,
-    suppliers, supplierTransactions, shifts, orders, vaultTransactions, stockMovements, warehouses, vault,
+    suppliers, supplierTransactions, shifts, orders, storeNotes, vaultTransactions, stockMovements, warehouses, vault,
     saveSettings, saveWarehouse, saveProduct, saveInvoice, saveEmployee, savePayrollRecord, saveCustomer, saveCustomerTransaction,
+    saveStoreNote,
   } = useFirebase();
   const canStoreBackup = roleCan(workspace?.role || 'cashier', 'store_backup');
 
@@ -47,13 +37,13 @@ export default function BackupManager({ language }: BackupManagerProps) {
   const t = {
     title: isRtl ? 'النسخ الاحتياطي' : 'Backup',
     subtitle: isRtl
-      ? 'احفظ دفاتر متجرك في ملف على جهازك، واستعدها منه عند الحاجة.'
-      : 'Save your store books to a file on this device and restore them when needed.',
+      ? 'احفظ دفاتر متجرك يدوياً في ملف على جهازك أو عبر Google Drive، واستعدها عند الحاجة. لا يوجد نسخ تلقائي مجدول.'
+      : 'Manually save your store books to a file on this device or via Google Drive, and restore when needed. There is no scheduled auto-backup.',
     exportTitle: isRtl ? 'تصدير نسخة' : 'Export a backup',
     exportDesc: isRtl
-      ? 'ملف واحد يحوي الأصناف والمستودعات والفواتير والعملاء وديونهم والموردين وأرصدتهم وحركات الخزنة ورصيدها والورديات والشيكات وأوامر الشراء وعروض الأسعار والموظفين والرواتب والإعدادات.'
-      : 'One file with products, warehouses, invoices, customers and their debts, suppliers and their balances, vault movements and balance, shifts, cheques, purchase orders and quotations, employees, payroll and settings.',
-    btnExport: isRtl ? 'تنزيل نسخة احتياطية' : 'Download backup',
+      ? 'ملف واحد يحوي الأصناف والمستودعات والفواتير والعملاء وديونهم والموردين وأرصدتهم وحركات الخزنة ورصيدها والورديات والشيكات والملاحظات وأوامر الشراء وعروض الأسعار والموظفين والرواتب والإعدادات.'
+      : 'One file with products, warehouses, invoices, customers and their debts, suppliers and their balances, vault movements and balance, shifts, cheques, notes, purchase orders and quotations, employees, payroll and settings.',
+    btnExport: isRtl ? 'حفظ نسخة احتياطية' : 'Save backup',
     preparingBackup: isRtl ? 'جارٍ تجهيز النسخة...' : 'Preparing the backup...',
     importTitle: isRtl ? 'استعادة من ملف' : 'Restore from a file',
     importDesc: isRtl
@@ -74,8 +64,8 @@ export default function BackupManager({ language }: BackupManagerProps) {
     invalidFile: isRtl ? 'هذا الملف ليس نسخة احتياطية من مستودعي.' : 'This file is not a Mostawdaee backup.',
     csvTitle: isRtl ? 'تقرير وجرد المخزون (Excel)' : 'Stock sheet (CSV/Excel)',
     csvDesc: isRtl 
-      ? 'جدول يفتح في Excel: اسم الصنف والقسم والمستودع والكمية وسعر البيع بعملته وتاريخ الإضافة.'
-      : 'A sheet that opens in Excel: item name, category, warehouse, quantity, selling price in its currency and date added.',
+      ? 'جدول تقرير فقط (ليس مسار استعادة): اسم الصنف والقسم والمستودع والكمية وسعر البيع بعملته وتاريخ الإضافة.'
+      : 'Report-only sheet (not a restore path): item name, category, warehouse, quantity, selling price in its currency and date added.',
     btnCsv: isRtl ? 'تحميل جدول جرد المنتجات الحالي (Excel)' : 'Download stock sheet (Excel CSV)',
     csvPreparing: isRtl ? 'جارٍ تجهيز تقرير المخزون...' : 'Preparing the stock sheet...',
     csvSuccess: isRtl ? 'تم تحميل تقرير جرد المخزون (صيغة Excel).' : 'Stock sheet downloaded (Excel CSV).',
@@ -88,31 +78,40 @@ export default function BackupManager({ language }: BackupManagerProps) {
       toast.error(isRtl ? 'النسخ الاحتياطي متاح لصاحب المتجر فقط.' : 'Backup is available to the store owner only.');
       return;
     }
+    if (!user?.uid) {
+      toast.error(isRtl ? 'سجّل الدخول قبل تصدير نسخة.' : 'Sign in before exporting a backup.');
+      return;
+    }
     sounds.playClick();
     setStatus({ type: '', message: '' });
     setLoading(true);
     try {
-      const cheques = await loadChequesForBackup(user?.uid);
-      const backup = buildStoreBackup({
+      const cheques = await loadChequesForBackup(user.uid);
+      const vaultTxs = vaultTransactionsForBackup(user.uid, vaultTransactions, workspace?.ownerId, vault);
+      const backup = await buildStoreBackup({
         creator: user?.email,
         settings, products, invoices, employees, payrollRecords, customers, customerTransactions,
-        suppliers, supplierTransactions, shifts, orders, cheques, vaultTransactions, warehouses, vault,
+        suppliers, supplierTransactions, shifts, orders, cheques, vaultTransactions: vaultTxs, warehouses, vault,
+        storeNotes,
       });
-      downloadFile(JSON.stringify(backup, null, 2), 'application/json', backupDownloadName());
+      const counts = backupCounts(backup);
+      await exportBackupFile(JSON.stringify(backup, null, 2), backupDownloadName());
       sounds.playSuccess();
+      const summary = backupCountsSummary(counts, isRtl);
+      toast.success(isRtl ? `تم حفظ النسخة · ${summary}` : `Backup saved · ${summary}`);
       setStatus({
         type: 'success',
-        message: isRtl ? 'تم تنزيل النسخة. احتفظ بالملف في مكان آمن.' : 'Backup downloaded. Keep the file somewhere safe.',
+        message: isRtl ? `تم حفظ النسخة. ${summary}` : `Backup saved. ${summary}`,
       });
-      setBackupStats(backupCounts(backup));
+      setBackupStats(counts);
       setBackupDate(new Date().toLocaleString(isRtl ? 'ar-EG' : 'en-US'));
     } catch (err) {
       console.error(err);
       sounds.playError();
-      setStatus({
-        type: 'error',
-        message: isRtl ? 'تعذّر تجهيز النسخة. تحقق من الاتصال ثم أعد المحاولة.' : 'Could not prepare the backup. Check your connection and try again.',
-      });
+      const message = restoreBlockedMessage(err as any, isRtl)
+        || (isRtl ? 'تعذّر تجهيز النسخة. تحقق من الاتصال ثم أعد المحاولة.' : 'Could not prepare the backup. Check your connection and try again.');
+      toast.error(message);
+      setStatus({ type: 'error', message });
     } finally {
       setLoading(false);
     }
@@ -168,7 +167,10 @@ export default function BackupManager({ language }: BackupManagerProps) {
       return;
     }
     const mode: RestoreMode = window.confirm(t.replaceAsk) ? 'replace' : 'merge';
-    if (!user) return;
+    if (!user?.uid) {
+      toast.error(isRtl ? 'سجّل الدخول قبل الاستعادة.' : 'Sign in before restoring.');
+      return;
+    }
 
     setLoading(true);
     toast.info(t.processingRestore);
@@ -179,10 +181,12 @@ export default function BackupManager({ language }: BackupManagerProps) {
         data,
         makeRestoreActions(db, user.uid, {
           saveSettings, saveWarehouse, saveProduct, saveInvoice, saveEmployee, savePayrollRecord, saveCustomer, saveCustomerTransaction,
+          saveStoreNote,
         }),
         buildLiveBooks({
           invoices, vaultTransactions, customerTransactions, supplierTransactions, stockMovements,
           cheques: liveCheques, vault, products, customers, suppliers, employees, payrollRecords, warehouses, orders, shifts,
+          storeNotes,
         }),
         { mode, uid: user.uid },
       );
@@ -204,18 +208,28 @@ export default function BackupManager({ language }: BackupManagerProps) {
     }
   };
 
-  const handleExportCSV = () => {
+  const handleExportCSV = async () => {
     sounds.playClick();
     setStatus({ type: '', message: '' });
     if (products.length === 0) {
       setStatus({ type: 'error', message: t.csvNoData });
       return;
     }
-    const csv = stockCsv(products, warehouses, isRtl, settings?.currency || 'JOD');
-    const dateStr = new Date().toISOString().slice(0, 10);
-    downloadFile(csv, 'text/csv;charset=utf-8;', isRtl ? `تقرير_جرد_المخزون_${dateStr}.csv` : `inventory_stock_report_${dateStr}.csv`);
-    sounds.playSuccess();
-    setStatus({ type: 'success', message: t.csvSuccess });
+    try {
+      const csv = stockCsv(products, warehouses, isRtl, settings?.currency || 'JOD');
+      const dateStr = new Date().toISOString().slice(0, 10);
+      await exportTextFile(
+        csv,
+        isRtl ? `تقرير_جرد_المخزون_${dateStr}.csv` : `inventory_stock_report_${dateStr}.csv`,
+        'text/csv;charset=utf-8;',
+      );
+      sounds.playSuccess();
+      setStatus({ type: 'success', message: t.csvSuccess });
+    } catch (err) {
+      console.error(err);
+      sounds.playError();
+      setStatus({ type: 'error', message: isRtl ? 'تعذّر تصدير تقرير المخزون.' : 'Could not export the stock sheet.' });
+    }
   };
 
   const handleDrag = (e: React.DragEvent) => {
@@ -253,6 +267,7 @@ export default function BackupManager({ language }: BackupManagerProps) {
     { key: 'customers', ar: 'العملاء', en: 'Customers' },
     { key: 'cheques', ar: 'الشيكات', en: 'Cheques' },
     { key: 'vaultTransactions', ar: 'حركات الخزنة', en: 'Vault movements' },
+    { key: 'storeNotes', ar: 'الملاحظات', en: 'Notes' },
   ];
 
   return (
@@ -322,7 +337,7 @@ export default function BackupManager({ language }: BackupManagerProps) {
             <input
               ref={fileInputRef}
               type="file"
-              accept=".json"
+              accept="application/json,.json"
               onChange={handleFileChange}
               disabled={loading}
               className="absolute inset-0 opacity-0 cursor-pointer hidden"

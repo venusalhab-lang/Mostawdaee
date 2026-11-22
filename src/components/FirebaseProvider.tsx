@@ -1444,7 +1444,9 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       if (!isMounted) return;
       const items: VaultTransaction[] = [];
       snap.forEach(doc => items.push({ ...doc.data() } as VaultTransaction));
-      const serverRows = items.sort((a, b) => (Number(b.timestamp) || 0) - (Number(a.timestamp) || 0)).slice(0, 2000);
+      // Persist the full ledger for backup export; keep only the newest 2000 in UI state.
+      const allServerRows = items.sort((a, b) => (Number(b.timestamp) || 0) - (Number(a.timestamp) || 0));
+      const serverRows = allServerRows.slice(0, 2000);
       const sorted = mergeQueuedVaultRecords(
         serverRows,
         readQueue(uid),
@@ -1454,8 +1456,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         syncedInvoiceIdsRef.current,
       );
       setVaultTransactions(sorted);
-      // Cache server rows only — boot merges the queue once.
-      writeUserCache(uid, 'vault_records', serverRows);
+      // Full server rows in cache — boot merges the queue once; exports read this for completeness.
+      writeUserCache(uid, 'vault_records', allServerRows);
     }, (error) => {
       console.error(`[FirebaseProvider] VaultTransactions stream error:`, error);
       if (isMounted) setLoading(false);
@@ -1701,6 +1703,27 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     };
   }, [user]);
 
+  /** Fail closed while a prior restore did not finish — money/stock writers must not run. */
+  const refuseIfRestoreIncomplete = (uid: string, kind: 'invoice' | 'activity' = 'activity') => {
+    try {
+      assertRestoreIdle(uid);
+    } catch (error: any) {
+      if (error?.code === 'restore-incomplete') {
+        const ar = settings?.defaultLanguage !== 'en';
+        const message = kind === 'invoice'
+          ? (ar
+            ? 'توقفت استعادة سابقة قبل اكتمالها. أكمل الاستعادة من نسخة سليمة قبل تسجيل فواتير جديدة.'
+            : 'A previous restore did not finish. Complete a full restore before recording new invoices.')
+          : (ar
+            ? 'توقفت استعادة سابقة قبل اكتمالها. أكمل الاستعادة من نسخة سليمة قبل تسجيل عمليات مالية أو مخزنية.'
+            : 'A previous restore did not finish. Complete a full restore before recording money or stock changes.');
+        toast.error(message, { duration: 10000 });
+        throw Object.assign(new Error(message), { code: 'restore-incomplete', notified: true });
+      }
+      throw error;
+    }
+  };
+
   const logUserActivity = async (
     action: string,
     details: string,
@@ -1869,6 +1892,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     absoluteQuantity?: boolean;
   }) => {
     if (!user) throw guestWriteBlocked();
+    // Restore path writes absolute books; live qty changes must wait until restore finishes.
+    if (!options?.skipMovement) refuseIfRestoreIncomplete(user.uid);
     // Determine action for logging before state updates
     const exists = products.some(p => p.id === product.id);
     const actionLabel = exists ? 'تعديل منتج' : 'إضافة منتج';
@@ -1957,6 +1982,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const transferStock = async (productId: string, toWarehouseId: string, quantity: number) => {
     if (!user) throw guestWriteBlocked();
     const uid = user.uid;
+    refuseIfRestoreIncomplete(uid);
     const ar = settings?.defaultLanguage !== 'en';
     const qty = roundQty(Number(quantity) || 0);
     if (qty <= 0) throw new Error(ar ? 'كمية النقل يجب أن تكون أكبر من صفر.' : 'Transfer quantity must be greater than zero.');
@@ -2056,6 +2082,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   }) => {
     if (!user) throw guestWriteBlocked();
     const uid = user.uid;
+    refuseIfRestoreIncomplete(uid);
     const ar = settings?.defaultLanguage !== 'en';
     const lines = input.lines.filter((line) => roundQty(line.expectedQty) !== roundQty(line.actualQty));
     if (!lines.length) return;
@@ -2135,6 +2162,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   };
 
   const deleteProduct = async (id: string) => {
+    if (!user) throw guestWriteBlocked();
+    refuseIfRestoreIncomplete(user.uid);
     const prod = products.find(p => p.id === id);
     const prodName = prod ? prod.name : id;
     const finalActionLabel = settings?.defaultLanguage === 'ar' ? 'حذف منتج' : 'Delete Product';
@@ -2146,14 +2175,13 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     setProducts(prev => {
       const updated = prev.filter(p => p.id !== id);
       try {
-        if (user?.uid) writeUserCache(user.uid, 'products', updated);
+        writeUserCache(user.uid, 'products', updated);
       } catch (e) {
         console.error("Local caching for deleteProduct failed", e);
       }
       return updated;
     });
 
-    if (!user) throw guestWriteBlocked();
     try {
       await deleteDoc(doc(db, 'users', user.uid, 'inventory', id));
       logUserActivity(finalActionLabel, finalDetails, 'product');
@@ -2180,19 +2208,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       return invoice.invoiceNumber;
     }
 
+    refuseIfRestoreIncomplete(uid, 'invoice');
     const ar = settings?.defaultLanguage !== 'en';
-    try {
-      assertRestoreIdle(uid);
-    } catch (error: any) {
-      if (error?.code === 'restore-incomplete') {
-        const message = ar
-          ? 'توقفت استعادة سابقة قبل اكتمالها. أكمل الاستعادة من نسخة سليمة قبل تسجيل فواتير جديدة.'
-          : 'A previous restore did not finish. Complete a full restore before recording new invoices.';
-        toast.error(message, { duration: 10000 });
-        throw Object.assign(new Error(message), { code: 'restore-incomplete', notified: true });
-      }
-      throw error;
-    }
     const defaultCurrency = settings?.currency || 'JOD';
     const notify = (message: string, extra: Record<string, unknown> = {}) => {
       toast.error(message, { duration: 7000 });
@@ -2735,12 +2752,14 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const recordVaultTransaction = async (record: Omit<VaultTransaction, 'id' | 'timestamp' | 'balanceAfter'> & { id?: string }) => {
     if (!user) throw guestWriteBlocked();
     const uid = user.uid;
+    refuseIfRestoreIncomplete(uid);
 
     try {
       await runTransaction(db, async (transaction) => {
         await commitVaultRecordTransaction(transaction, uid, record);
       });
     } catch (error: any) {
+      if (error?.code === 'restore-incomplete') throw error;
       if (String(error?.message || '').startsWith(INSUFFICIENT_VAULT_FUNDS)) throw error;
       handleFirestoreError(error, OperationType.WRITE, `users/${uid}/vault_records/transaction`);
     }
@@ -2813,6 +2832,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const payPayroll = async (payroll: PayrollRecord) => {
     if (!user) throw guestWriteBlocked();
     const uid = user.uid;
+    refuseIfRestoreIncomplete(uid);
     const currency = (payroll.currency || settings?.currency || 'JOD') as Currency;
     const amount = roundForCurrency(Number(payroll.netSalary) || 0, currency);
     if (amount <= 0) throw new Error('Net salary must be greater than zero');
@@ -3102,6 +3122,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const deleteCustomerLedgerTransaction = async (txId: string, options?: { reverseVault?: boolean }) => {
     if (!user) throw guestWriteBlocked();
     const uid = user.uid;
+    refuseIfRestoreIncomplete(uid);
     const ar = settings?.defaultLanguage !== 'en';
     const fail = (message: string, code: string) => Object.assign(new Error(message), { code });
     try {
@@ -3231,6 +3252,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     draftId?: string,
   ) => {
     if (!user) throw guestWriteBlocked();
+    refuseIfRestoreIncomplete(user.uid);
     const ar = settings?.defaultLanguage !== 'en';
     const fail = (message: string, code: string) => Object.assign(new Error(message), { code, notified: false });
     if (!Number.isFinite(amount) || amount <= 0) throw fail(ar ? 'المبلغ يجب أن يكون أكبر من صفر.' : 'Amount must be a positive number', 'invalid-amount');
@@ -3519,6 +3541,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const recordSupplierPayment = async (input: { id: string; supplierId: string; amount: number; currency: Currency; notes?: string }) => {
     if (!user) throw guestWriteBlocked();
     const uid = user.uid;
+    refuseIfRestoreIncomplete(uid);
     const ar = settings?.defaultLanguage !== 'en';
     const fail = (message: string, code: string) => Object.assign(new Error(message), { code, notified: false });
     const amount = roundForCurrency(Number(input.amount) || 0, input.currency);

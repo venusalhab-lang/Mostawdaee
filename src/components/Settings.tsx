@@ -22,9 +22,10 @@ import { TactileButton } from './ui/TactileButton';
 import { useFirebase } from './FirebaseProvider';
 import { toast } from 'sonner';
 import { db } from '../lib/supabaseDocs';
-import { assertCanRestore, backupDownloadName, buildLiveBooks, makeRestoreActions, restoreBlockedMessage } from '../lib/backupIo';
+import { assertCanRestore, backupDownloadName, buildLiveBooks, makeRestoreActions, restoreBlockedMessage, vaultTransactionsForBackup } from '../lib/backupIo';
+import { exportBackupFile } from '../lib/backupFile';
 import { loadChequesForBackup, loadChequesForRestore } from '../lib/chequesStore';
-import { buildStoreBackup, isLegacyTableBackup, isStoreBackup, restoreStoreBackup, type RestoreMode } from '../lib/storeBackup';
+import { backupCounts, backupCountsSummary, buildStoreBackup, isLegacyTableBackup, isStoreBackup, restoreStoreBackup, type RestoreMode } from '../lib/storeBackup';
 import { can as roleCan } from '../lib/roles';
 
 interface Props {
@@ -57,6 +58,7 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
     orders = [],
     vaultTransactions = [],
     stockMovements = [],
+    storeNotes = [],
     warehouses = [],
     vault = null,
     saveSettings,
@@ -67,6 +69,7 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
     savePayrollRecord,
     saveCustomer,
     saveCustomerTransaction,
+    saveStoreNote,
     user,
     workspace,
   } = useFirebase();
@@ -186,26 +189,30 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
       toast.error(isRtl ? 'النسخ الاحتياطي متاح لصاحب المتجر فقط.' : 'Backup is available to the store owner only.');
       return;
     }
+    if (!user?.uid) {
+      toast.error(isRtl ? 'سجّل الدخول قبل تصدير نسخة.' : 'Sign in before exporting a backup.');
+      return;
+    }
     try {
-      const cheques = await loadChequesForBackup(user?.uid);
-      const payload = buildStoreBackup({
+      const cheques = await loadChequesForBackup(user.uid);
+      const vaultTxs = vaultTransactionsForBackup(user.uid, vaultTransactions, workspace?.ownerId, vault);
+      const payload = await buildStoreBackup({
         creator: user?.email,
         settings: formData,
         products, invoices, employees, payrollRecords, customers, customerTransactions, suppliers, supplierTransactions, shifts, orders,
-        cheques, vaultTransactions, warehouses, vault,
+        cheques, vaultTransactions: vaultTxs, warehouses, vault, storeNotes,
       });
 
-      const data = JSON.stringify(payload, null, 2);
-      const blob = new Blob([data], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = backupDownloadName();
-      a.click();
-      toast.success(isRtl ? 'تم تنزيل النسخة. احتفظ بالملف في مكان آمن.' : 'Backup downloaded. Keep the file somewhere safe.');
+      await exportBackupFile(JSON.stringify(payload, null, 2), backupDownloadName());
+      toast.success(
+        isRtl
+          ? `تم حفظ النسخة · ${backupCountsSummary(backupCounts(payload), true)}`
+          : `Backup saved · ${backupCountsSummary(backupCounts(payload), false)}`,
+      );
     } catch (err) {
       console.error(err);
-      toast.error(isRtl ? 'تعذّر تجهيز النسخة. تحقق من الاتصال ثم أعد المحاولة.' : 'Could not prepare the backup. Check your connection and try again.');
+      toast.error(restoreBlockedMessage(err as any, isRtl)
+        || (isRtl ? 'تعذّر تجهيز النسخة. تحقق من الاتصال ثم أعد المحاولة.' : 'Could not prepare the backup. Check your connection and try again.'));
     }
   };
 
@@ -260,10 +267,12 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
         selectedBackupForLocalRestore,
         makeRestoreActions(db, user.uid, {
           saveSettings, saveWarehouse, saveProduct, saveInvoice, saveEmployee, savePayrollRecord, saveCustomer, saveCustomerTransaction,
+          saveStoreNote,
         }),
         buildLiveBooks({
           invoices, vaultTransactions, customerTransactions, supplierTransactions, stockMovements,
           cheques: liveCheques, vault, products, customers, suppliers, employees, payrollRecords, warehouses, orders, shifts,
+          storeNotes,
         }),
         { mode: localRestoreMode, uid: user.uid },
       );
@@ -1132,7 +1141,7 @@ export default function Settings({ language, onLanguageToggle, settings, onSaveS
                         <span>{isRtl ? "استيراد نسخة JSON" : "Upload & Restore"}</span>
                         <input
                           type="file"
-                          accept=".json"
+                          accept="application/json,.json"
                           onChange={handleLocalFileSelect}
                           className="hidden"
                         />

@@ -1,16 +1,21 @@
 import type {
-  AppSettings, Cheque, Customer, CustomerTransaction, Employee, Invoice, PayrollRecord, Product, Shift, Supplier, TradeOrder, SupplierTransaction, Vault,
+  AppSettings, Cheque, Customer, CustomerTransaction, Employee, Invoice, PayrollRecord, Product, Shift, StoreNote, Supplier, TradeOrder, SupplierTransaction, Vault,
   VaultTransaction, Warehouse,
 } from '../types';
 import { clearIncompleteRestore, markRestoreIncomplete } from './restoreGuard';
 
 export const BACKUP_APP = 'Mostawdaee System';
+export const BACKUP_SCHEMA_VERSION = 1;
 
 /** One file shape for every backup screen: the store books exactly as the app holds them. */
 export interface StoreBackup {
   app: typeof BACKUP_APP;
+  /** File shape version; older files may omit this. */
+  schemaVersion?: number;
   timestamp: number;
   creator: string;
+  /** SHA-256 hex of the canonical JSON body (everything except this field). Older files may omit it. */
+  checksum?: string;
   settings: AppSettings | null;
   products: Product[];
   invoices: Invoice[];
@@ -26,15 +31,45 @@ export interface StoreBackup {
   vaultTransactions: VaultTransaction[];
   warehouses: Warehouse[];
   vault: Vault | null;
+  storeNotes: StoreNote[];
 }
 
-export type StoreBackupInput = Omit<StoreBackup, 'app' | 'timestamp' | 'creator' | 'suppliers' | 'supplierTransactions' | 'shifts' | 'orders' | 'cheques'>
-  & Partial<Pick<StoreBackup, 'suppliers' | 'supplierTransactions' | 'shifts' | 'orders' | 'cheques'>>
+export type StoreBackupInput = Partial<Omit<StoreBackup, 'app' | 'timestamp' | 'creator' | 'schemaVersion' | 'checksum'>>
   & { creator?: string | null };
 
-export function buildStoreBackup(input: StoreBackupInput, now = Date.now()): StoreBackup {
-  return {
+type BackupBody = Omit<StoreBackup, 'checksum'>;
+
+async function sha256Hex(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+/** Canonical payload hash — checksum field is never part of the hashed body. */
+export async function backupChecksum(body: BackupBody): Promise<string> {
+  return sha256Hex(JSON.stringify(body));
+}
+
+/**
+ * Refuses a file whose checksum does not match.
+ * Older backups without a checksum are accepted.
+ */
+export async function assertBackupIntegrity(data: Partial<StoreBackup>): Promise<void> {
+  const expected = typeof data.checksum === 'string' ? data.checksum.trim() : '';
+  if (!expected) return;
+  const { checksum: _ignored, ...rest } = data as StoreBackup;
+  const body = rest as BackupBody;
+  const actual = await backupChecksum(body);
+  if (actual !== expected) {
+    throw Object.assign(new Error('Backup file checksum mismatch'), { code: 'backup-checksum' });
+  }
+}
+
+export async function buildStoreBackup(input: StoreBackupInput, now = Date.now()): Promise<StoreBackup> {
+  const body: BackupBody = {
     app: BACKUP_APP,
+    schemaVersion: BACKUP_SCHEMA_VERSION,
     timestamp: now,
     creator: input.creator || 'Anonymous',
     settings: input.settings ?? null,
@@ -52,7 +87,10 @@ export function buildStoreBackup(input: StoreBackupInput, now = Date.now()): Sto
     vaultTransactions: input.vaultTransactions ?? [],
     warehouses: input.warehouses ?? [],
     vault: input.vault ?? null,
+    storeNotes: input.storeNotes ?? [],
   };
+  const checksum = await backupChecksum(body);
+  return { ...body, checksum };
 }
 
 /** Files written by the old table export carry `tables` and none of the store books. */
@@ -78,7 +116,16 @@ export function backupCounts(data: Partial<StoreBackup>) {
     shifts: n(data.shifts),
     cheques: n(data.cheques),
     vaultTransactions: n(data.vaultTransactions),
+    storeNotes: n(data.storeNotes),
   };
+}
+
+/** Short summary for the export toast. */
+export function backupCountsSummary(counts: ReturnType<typeof backupCounts>, isRtl: boolean): string {
+  if (isRtl) {
+    return `${counts.products} أصناف · ${counts.invoices} فواتير · ${counts.vaultTransactions} حركات خزنة · ${counts.cheques} شيكات · ${counts.storeNotes} ملاحظات`;
+  }
+  return `${counts.products} products · ${counts.invoices} invoices · ${counts.vaultTransactions} vault txs · ${counts.cheques} cheques · ${counts.storeNotes} notes`;
 }
 
 export type RestoreMode = 'merge' | 'replace';
@@ -102,6 +149,8 @@ export interface RestoreActions {
   saveCheque: (cheque: Cheque) => Promise<void>;
   saveVaultRecord: (tx: VaultTransaction) => Promise<void>;
   restoreVault: (vault: Vault) => Promise<void>;
+  /** Desk notes; optional so older restore wiring still compiles until wired. */
+  saveStoreNote?: (note: StoreNote) => Promise<void>;
   /**
    * Raw merchant_documents delete (no vault/stock reversal). Used only by replace mode
    * after backup rows were upserted. Collection names match the live store paths.
@@ -139,6 +188,7 @@ export interface LiveBooks {
   shifts?: Pick<Shift, 'id' | 'status'>[];
   /** Cheque id + status for replace undeletable checks and pending deletes. */
   chequeRows?: Pick<Cheque, 'id' | 'status'>[];
+  storeNotes?: Pick<StoreNote, 'id'>[];
 }
 
 const time = (v: unknown): number => {
@@ -256,6 +306,7 @@ export async function restoreStoreBackup(
   if (!isStoreBackup(data)) {
     throw Object.assign(new Error('This file is not a Mostawdaee backup'), { code: 'invalid-backup' });
   }
+  await assertBackupIntegrity(data);
   const mode: RestoreMode = options?.mode === 'replace' ? 'replace' : 'merge';
   const newer = newerLiveActivity(data.timestamp, live);
   if (newer !== null) {
@@ -316,6 +367,13 @@ export async function restoreStoreBackup(
         if (error?.code !== 'cheque-already-final') throw error;
       }
     }
+    for (const note of list<StoreNote>(data.storeNotes)) {
+      if (!note?.id) continue;
+      if (!actions.saveStoreNote) {
+        throw Object.assign(new Error('Store notes restore is not wired'), { code: 'replace-unavailable' });
+      }
+      await actions.saveStoreNote(note);
+    }
     for (const tx of list<VaultTransaction>(data.vaultTransactions)) {
       if (tx?.id) await actions.saveVaultRecord(tx);
     }
@@ -333,6 +391,7 @@ export async function restoreStoreBackup(
       await deleteOrphans(actions, 'shifts', live.shifts, list(data.shifts));
       await deleteOrphans(actions, 'orders', live.orders, list(data.orders));
       await deleteOrphans(actions, 'vault_records', live.vaultTransactions, list(data.vaultTransactions));
+      await deleteOrphans(actions, 'store_notes', live.storeNotes, list(data.storeNotes));
 
       const backupChequeIds = new Set(list<Cheque>(data.cheques).map((c) => c.id).filter(Boolean));
       for (const cheque of live.chequeRows || []) {

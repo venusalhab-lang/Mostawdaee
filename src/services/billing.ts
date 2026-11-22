@@ -29,7 +29,7 @@ export const PLAY_STORE_PRODUCTS: DigitalProduct[] = [
   {
     id: PLAY_PREMIUM_PRODUCT_ID,
     name: 'Mostawdaee Premium (Annual)',
-    description: '1-Year Unified premium commercial access, auto-backups and mobile dashboard access.',
+    description: '1-Year Unified premium commercial access, manual device and Google Drive backup, and mobile dashboard access.',
     price: '$169.00',
     currency: 'USD',
     amount: PLAY_PREMIUM_AMOUNT_USD,

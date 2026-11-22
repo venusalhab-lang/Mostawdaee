@@ -1,8 +1,9 @@
-import type { AppSettings, Cheque, Customer, CustomerTransaction, Employee, Invoice, PayrollRecord, Product, Shift, Supplier, SupplierTransaction, TradeOrder, Vault, VaultTransaction, Warehouse } from '../types';
+import type { AppSettings, Cheque, Customer, CustomerTransaction, Employee, Invoice, PayrollRecord, Product, Shift, StoreNote, Supplier, SupplierTransaction, TradeOrder, Vault, VaultTransaction, Warehouse } from '../types';
 import { deleteCheque, restoreCheque } from './chequesStore';
-import { readQueue } from './offlineQueue';
+import { mergeQueuedVaultRecords, readQueue } from './offlineQueue';
 import type { LiveBooks, RestoreActions } from './storeBackup';
 import { deleteDoc, doc, setDoc } from './supabaseDocs';
+import { readUserCache } from './userStorage';
 import { restoreVaultBalance, vaultRestoreMessage } from './vaultRestore';
 
 export {
@@ -52,7 +53,28 @@ export function restoreBlockedMessage(
       ? 'النسخ والاستعادة متاحة لصاحب المتجر فقط.'
       : 'Backup and restore are available to the store owner only.';
   }
+  if (error?.code === 'backup-checksum') {
+    return isRtl
+      ? 'ملف النسخة تالف أو عُدّل (فشل التحقق من السلامة). لم يُستعد منه شيء.'
+      : 'This backup file is corrupt or was altered (integrity check failed). Nothing was restored.';
+  }
   return vaultRestoreMessage(error, isRtl);
+}
+
+/**
+ * Prefer the full vault_records cache over the UI-capped list so exports are not truncated at 2000 rows.
+ * Re-applies the offline sale queue so pending cash rows stay in the file.
+ */
+export function vaultTransactionsForBackup(
+  uid: string | undefined | null,
+  liveUi: VaultTransaction[],
+  ownerId?: string | null,
+  vault?: Vault | null,
+): VaultTransaction[] {
+  if (!uid) return liveUi;
+  const cached = readUserCache<VaultTransaction[]>(uid, 'vault_records', []);
+  if (cached.length <= liveUi.length) return liveUi;
+  return mergeQueuedVaultRecords(cached, readQueue(uid), ownerId, vault);
 }
 
 type AppSaveActions = {
@@ -64,6 +86,7 @@ type AppSaveActions = {
   savePayrollRecord: (payroll: PayrollRecord) => Promise<void>;
   saveCustomer: (customer: Customer, options: { restore: true }) => Promise<void>;
   saveCustomerTransaction: (tx: CustomerTransaction) => Promise<void>;
+  saveStoreNote?: (note: StoreNote) => Promise<void>;
 };
 
 /** Live catalogs passed into restore (age gate + replace orphans). */
@@ -83,6 +106,7 @@ export function buildLiveBooks(input: {
   warehouses: Warehouse[];
   orders: TradeOrder[];
   shifts: Shift[];
+  storeNotes?: StoreNote[];
 }): LiveBooks {
   return {
     invoices: input.invoices,
@@ -101,6 +125,7 @@ export function buildLiveBooks(input: {
     orders: input.orders,
     shifts: input.shifts,
     chequeRows: input.cheques,
+    storeNotes: input.storeNotes,
   };
 }
 
@@ -122,6 +147,9 @@ export function makeRestoreActions(db: unknown, uid: string, app: AppSaveActions
     saveCheque: (cheque: Cheque) => restoreCheque(uid, cheque),
     saveVaultRecord: (tx: VaultTransaction) => setDoc(doc(db, 'users', uid, 'vault_records', tx.id), tx),
     restoreVault: (v: Vault) => restoreVaultBalance(db, uid, v),
+    saveStoreNote: app.saveStoreNote
+      ? (note) => app.saveStoreNote!(note)
+      : (note) => setDoc(doc(db, 'users', uid, 'store_notes', note.id), note),
     deleteBookDoc: (collection: string, id: string) => deleteDoc(doc(db, 'users', uid, collection, id)),
     deletePendingCheque: async (cheque) => {
       await deleteCheque(uid, cheque as Cheque);

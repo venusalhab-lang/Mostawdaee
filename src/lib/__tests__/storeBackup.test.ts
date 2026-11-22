@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
-  BACKUP_APP, assertReplaceAllowed, assertVaultRestoreAllowed, backupCounts, buildStoreBackup, isLegacyTableBackup, isStoreBackup, newerLiveActivity, orphanIds, restoreStoreBackup, stockCsv,
+  BACKUP_APP, BACKUP_SCHEMA_VERSION, assertBackupIntegrity, assertReplaceAllowed, assertVaultRestoreAllowed, backupChecksum, backupCounts, buildStoreBackup, isLegacyTableBackup, isStoreBackup, newerLiveActivity, orphanIds, restoreStoreBackup, stockCsv,
   type RestoreActions,
 } from '../storeBackup';
-import { readIncompleteRestore } from '../restoreGuard';
+import { assertRestoreIdle, markRestoreIncomplete, readIncompleteRestore } from '../restoreGuard';
 
 class MemoryStorage {
   private map = new Map<string, string>();
@@ -64,14 +64,61 @@ describe('store backup', () => {
     expect(readIncompleteRestore('owner-1')).toBeNull();
   });
 
-  it('builds one shape with empty lists for missing books', () => {
-    const b = buildStoreBackup({ creator: null, settings: null, products: [product()] } as any, 42);
+  it('builds one shape with empty lists for missing books', async () => {
+    const b = await buildStoreBackup({ creator: null, settings: null, products: [product()] } as any, 42);
     expect(b.app).toBe(BACKUP_APP);
+    expect(b.schemaVersion).toBe(BACKUP_SCHEMA_VERSION);
     expect(b.timestamp).toBe(42);
     expect(b.creator).toBe('Anonymous');
     expect(b.invoices).toEqual([]);
     expect(b.vault).toBeNull();
-    expect(backupCounts(b)).toMatchObject({ products: 1, invoices: 0, vaultTransactions: 0 });
+    expect(b.storeNotes).toEqual([]);
+    expect(typeof b.checksum).toBe('string');
+    expect(b.checksum!.length).toBe(64);
+    expect(backupCounts(b)).toMatchObject({ products: 1, invoices: 0, vaultTransactions: 0, storeNotes: 0 });
+  });
+
+  it('seals a checksum that round-trips and refuses tampering', async () => {
+    const b = await buildStoreBackup({ creator: 'owner', settings: null, products: [product()], storeNotes: [{ id: 'n1', title: 'T' }] as any }, 99);
+    await expect(assertBackupIntegrity(b)).resolves.toBeUndefined();
+    const tampered = { ...b, products: [product({ name: 'Changed' })] };
+    await expect(assertBackupIntegrity(tampered)).rejects.toMatchObject({ code: 'backup-checksum' });
+    await expect(assertBackupIntegrity({ ...b, checksum: undefined })).resolves.toBeUndefined();
+    const { checksum: _c, ...body } = b;
+    expect(await backupChecksum(body as any)).toBe(b.checksum);
+  });
+
+  it('restores store notes and refuses while restore-incomplete', async () => {
+    const notes: string[] = [];
+    const actions: RestoreActions = {
+      saveSettings: async () => {},
+      saveWarehouse: async () => {},
+      saveProduct: async () => {},
+      saveInvoice: async () => {},
+      saveEmployee: async () => {},
+      savePayrollRecord: async () => {},
+      saveCustomer: async () => {},
+      saveCustomerTransaction: async () => {},
+      saveSupplierRecord: async () => {},
+      saveSupplierTransaction: async () => {},
+      saveShift: async () => {},
+      saveOrder: async () => {},
+      saveCheque: async () => {},
+      saveVaultRecord: async () => {},
+      restoreVault: async () => {},
+      saveStoreNote: async (note) => { notes.push(note.id); },
+    };
+    await restoreStoreBackup(
+      await buildStoreBackup({ creator: 'x', settings: null, products: [], storeNotes: [{ id: 'note-1' }] as any }, 1),
+      actions,
+      noLive,
+      { uid: 'owner-notes' },
+    );
+    expect(notes).toEqual(['note-1']);
+    expect(readIncompleteRestore('owner-notes')).toBeNull();
+
+    markRestoreIncomplete('owner-2', 'merge');
+    expect(() => assertRestoreIdle('owner-2')).toThrowError(/did not finish/);
   });
 
   it('refuses old table exports and unrelated files', () => {
@@ -213,13 +260,37 @@ describe('store backup', () => {
     await expect(restoreStoreBackup(bak({ shifts: [{ id: 's' }] as any }), actions, noLive)).rejects.toMatchObject({ code: 'permission-denied' });
   });
 
-  it('carries shifts and cheques in the backup', () => {
-    const b = buildStoreBackup({ creator: 'x', settings: null, products: [], shifts: [{ id: 'sh1' }], cheques: [{ id: 'ch1' }] } as any, 1);
+  it('carries shifts and cheques in the backup', async () => {
+    const b = await buildStoreBackup({ creator: 'x', settings: null, products: [], shifts: [{ id: 'sh1' }], cheques: [{ id: 'ch1' }] } as any, 1);
     expect(b.shifts).toHaveLength(1);
     expect(b.cheques).toHaveLength(1);
     expect(backupCounts(b).cheques).toBe(1);
-    expect(buildStoreBackup({ creator: 'x', settings: null, products: [] } as any, 1).shifts).toEqual([]);
-    expect(buildStoreBackup({ creator: 'x', settings: null, products: [] } as any, 1).cheques).toEqual([]);
+    expect((await buildStoreBackup({ creator: 'x', settings: null, products: [] } as any, 1)).shifts).toEqual([]);
+    expect((await buildStoreBackup({ creator: 'x', settings: null, products: [] } as any, 1)).cheques).toEqual([]);
+  });
+
+  it('refuses restore when a present checksum does not match', async () => {
+    const actions: RestoreActions = {
+      saveSettings: async () => {},
+      saveWarehouse: async () => {},
+      saveProduct: async () => {},
+      saveInvoice: async () => {},
+      saveEmployee: async () => {},
+      savePayrollRecord: async () => {},
+      saveCustomer: async () => {},
+      saveCustomerTransaction: async () => {},
+      saveSupplierRecord: async () => {},
+      saveSupplierTransaction: async () => {},
+      saveShift: async () => {},
+      saveOrder: async () => {},
+      saveCheque: async () => {},
+      saveVaultRecord: async () => {},
+      restoreVault: async () => {},
+      saveStoreNote: async () => {},
+    };
+    const good = await buildStoreBackup({ creator: 'x', settings: null, products: [product()] } as any, 1);
+    await expect(restoreStoreBackup({ ...good, checksum: '0'.repeat(64) }, actions, noLive))
+      .rejects.toMatchObject({ code: 'backup-checksum' });
   });
 
   it('refuses a newer live vault before writing stock or invoices', async () => {

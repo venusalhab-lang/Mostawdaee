@@ -25,10 +25,10 @@ const premiumFeatures = [
     descEn: 'Keep day-to-day work running after the trial ends, without locked screens.',
   },
   {
-    titleAr: 'مزامنة ونسخ احتياطي سحابي',
-    titleEn: 'Cloud sync and backups',
-    descAr: 'بياناتك محفوظة على السحابة ومتاحة من أي جهاز بنفس الحساب.',
-    descEn: 'Your data stays in the cloud and is available on any device with the same account.',
+    titleAr: 'مزامنة ونسخ احتياطي يدوي',
+    titleEn: 'Cloud sync and manual backups',
+    descAr: 'بياناتك على السحابة، مع نسخ احتياطي يدوي للجهاز أو Google Drive يستعيده صاحب المتجر.',
+    descEn: 'Your data stays in the cloud, with manual device or Google Drive backups the store owner can restore.',
   },
   {
     titleAr: 'تطبيق الهاتف وإدارة الفريق',

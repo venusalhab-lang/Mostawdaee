@@ -19,9 +19,9 @@ import { toast } from 'sonner';
 import { sounds } from '../lib/sounds';
 import { DRIVE_CONNECTED_EVENT, startDriveConnect } from '../lib/driveConnect';
 import { db } from '../lib/supabaseDocs';
-import { assertCanRestore, backupDriveName, buildLiveBooks, makeRestoreActions, restoreBlockedMessage } from '../lib/backupIo';
+import { assertCanRestore, backupDriveName, buildLiveBooks, makeRestoreActions, restoreBlockedMessage, vaultTransactionsForBackup } from '../lib/backupIo';
 import { loadChequesForBackup, loadChequesForRestore } from '../lib/chequesStore';
-import { buildStoreBackup, isLegacyTableBackup, isStoreBackup, restoreStoreBackup, type RestoreMode } from '../lib/storeBackup';
+import { backupCounts, backupCountsSummary, buildStoreBackup, isLegacyTableBackup, isStoreBackup, restoreStoreBackup, type RestoreMode } from '../lib/storeBackup';
 
 interface Props {
   language: Language;
@@ -32,6 +32,7 @@ export default function GoogleDriveBackup({ language }: Props) {
   
   const { 
     user, 
+    workspace,
     products, 
     invoices, 
     employees, 
@@ -42,6 +43,7 @@ export default function GoogleDriveBackup({ language }: Props) {
     supplierTransactions,
     shifts,
     orders,
+    storeNotes,
     warehouses, 
     vault,
     vaultTransactions,
@@ -55,6 +57,7 @@ export default function GoogleDriveBackup({ language }: Props) {
     saveCustomer,
     saveCustomerTransaction,
     saveWarehouse,
+    saveStoreNote,
   } = useFirebase();
 
   const [isConnected, setIsConnected] = useState(hasDriveAccessToken());
@@ -143,11 +146,16 @@ export default function GoogleDriveBackup({ language }: Props) {
     
     setIsBackupInProgress(true);
     try {
-      const cheques = await loadChequesForBackup(user?.uid);
-      const payload = buildStoreBackup({
+      if (!user?.uid) {
+        toast.error(isRtl ? 'سجّل الدخول قبل رفع نسخة.' : 'Sign in before uploading a backup.');
+        return;
+      }
+      const cheques = await loadChequesForBackup(user.uid);
+      const vaultTxs = vaultTransactionsForBackup(user.uid, vaultTransactions, workspace?.ownerId, vault);
+      const payload = await buildStoreBackup({
         creator: user?.email,
         settings, products, invoices, employees, payrollRecords, customers, customerTransactions, suppliers, supplierTransactions, shifts, orders,
-        cheques, vaultTransactions, warehouses, vault,
+        cheques, vaultTransactions: vaultTxs, warehouses, vault, storeNotes,
       });
 
       const filename = backupDriveName();
@@ -157,12 +165,14 @@ export default function GoogleDriveBackup({ language }: Props) {
       
       toast.success(
         isRtl 
-          ? "رُفعت النسخة الاحتياطية إلى Google Drive." 
-          : "Backup uploaded to Google Drive."
+          ? `رُفعت النسخة إلى Google Drive · ${backupCountsSummary(backupCounts(payload), true)}` 
+          : `Backup uploaded to Google Drive · ${backupCountsSummary(backupCounts(payload), false)}`,
       );
       loadBackups();
     } catch (err) {
-      handleDriveError(err, isRtl ? "فشل إنشاء النسخة الاحتياطية" : "Creating backup file failed");
+      const blocked = restoreBlockedMessage(err as any, isRtl);
+      if (blocked) toast.error(blocked);
+      else handleDriveError(err, isRtl ? "فشل إنشاء النسخة الاحتياطية" : "Creating backup file failed");
     } finally {
       setIsBackupInProgress(false);
     }
@@ -192,10 +202,12 @@ export default function GoogleDriveBackup({ language }: Props) {
         backupData,
         makeRestoreActions(db, uid, {
           saveSettings, saveWarehouse, saveProduct, saveInvoice, saveEmployee, savePayrollRecord, saveCustomer, saveCustomerTransaction,
+          saveStoreNote,
         }),
         buildLiveBooks({
           invoices, vaultTransactions, customerTransactions, supplierTransactions, stockMovements,
           cheques: liveCheques, vault, products, customers, suppliers, employees, payrollRecords, warehouses, orders, shifts,
+          storeNotes,
         }),
         { mode: driveRestoreMode, uid },
       );
