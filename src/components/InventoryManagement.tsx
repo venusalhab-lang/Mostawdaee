@@ -47,7 +47,7 @@ import { arCount } from '../lib/arabicPlural';
 import { useScreenSearch } from '../lib/screenSearch';
 import BarcodeScannerScanner from './ui/BarcodeScannerScanner';
 import { parseProductRows, ParsedProductRow } from '../lib/productImport';
-import { computeStockStatus, resolveLowStockThreshold, isExpiryCritical, isExpired } from '../lib/stock';
+import { computeStockStatus, resolveLowStockThreshold, isExpiryCritical, isExpired, formatExpiryIsoDate } from '../lib/stock';
 import { formatPackStock, isValidPackSize, packFields, packIssues, suggestedPackPrice, unitPriceInPack, lineUnits, type PackIssue } from '../lib/packs';
 import { sameSku, skuOwner } from '../lib/productLookup';
 import {
@@ -165,8 +165,9 @@ function ProductRow({
                 return null;
               })()}
               {product.expiryDate && (() => {
+                const dateStr = formatExpiryIsoDate(product.expiryDate);
+                if (!dateStr) return null;
                 const isCritical = isExpiryCritical(product.expiryDate);
-                const dateStr = new Date(product.expiryDate).toISOString().split('T')[0];
                 return (
                   <span className={`text-[9px] px-1.5 py-0.5 rounded-md font-bold flex items-center gap-1 leading-none ${
                     isCritical 
@@ -741,7 +742,7 @@ export default function InventoryManagement({
           String(roundForExport(p.unitCost, cur)),
           String(roundForExport(p.sellingPrice, cur)),
           String(roundForExport((Number(p.quantity) || 0) * (Number(p.unitCost) || 0), cur)),
-          p.expiryDate ? new Date(p.expiryDate).toISOString().split('T')[0] : '',
+          formatExpiryIsoDate(p.expiryDate) || '',
           statusText(p)
         ];
       });

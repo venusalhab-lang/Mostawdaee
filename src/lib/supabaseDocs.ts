@@ -237,14 +237,33 @@ function cachedRows(name: string): CollectionRow[] | null {
   return [...rows.values()].sort((a, b) => (a.doc_id < b.doc_id ? -1 : a.doc_id > b.doc_id ? 1 : 0));
 }
 
+/** Coalesce bursty realtime row updates so React is not rebuilt for every single SKU write. */
+const cachedNotifyTimers = new Map<string, ReturnType<typeof setTimeout>>();
+export const CACHED_NOTIFY_DEBOUNCE_MS = 75;
+
+function scheduleCachedNotify(name: string) {
+  if (cachedNotifyTimers.has(name)) return;
+  cachedNotifyTimers.set(name, setTimeout(() => {
+    cachedNotifyTimers.delete(name);
+    notify(name, 'cached');
+  }, CACHED_NOTIFY_DEBOUNCE_MS));
+}
+
 function applyRow(name: string, id: string, row: CollectionRow | null) {
   const rows = collectionCache.get(name);
   if (rows) {
-    if (row) rows.set(id, row);
-    else rows.delete(id);
+    if (row) {
+      const prev = rows.get(id);
+      // Same server revision → skip React notify (updated_at must be present on both).
+      if (prev && row.updated_at != null && prev.updated_at === row.updated_at) return;
+      rows.set(id, row);
+    } else {
+      if (!rows.has(id)) return;
+      rows.delete(id);
+    }
     schedulePersist(name);
   }
-  notify(name, 'cached');
+  scheduleCachedNotify(name);
 }
 
 /** `<session user>|<store owner>|<role>|`; set once the workspace is known, cleared on sign-out. */
@@ -443,9 +462,16 @@ function notify(collectionName: string, mode: SyncMode = 'fetch') {
 }
 
 /** Catches up every open collection once (changes only), after realtime may have missed some. */
+let refreshOpenTimer: ReturnType<typeof setTimeout> | null = null;
+export const REFRESH_OPEN_DEBOUNCE_MS = 300;
+
 function refreshOpenCollections() {
-  for (const name of [...collectionCache.keys()]) if (!listeners.has(name)) collectionCache.delete(name);
-  for (const name of listeners.keys()) notify(name, 'fetch');
+  if (refreshOpenTimer) return;
+  refreshOpenTimer = setTimeout(() => {
+    refreshOpenTimer = null;
+    for (const name of [...collectionCache.keys()]) if (!listeners.has(name)) collectionCache.delete(name);
+    for (const name of listeners.keys()) notify(name, 'fetch');
+  }, REFRESH_OPEN_DEBOUNCE_MS);
 }
 
 let windowWatchInstalled = false;

@@ -117,11 +117,15 @@ export default function NotificationCenter({ isRtl, subscriptionDaysRemaining = 
   // Platform staff: poll open support tickets into the same header bell (with requester identity).
   useEffect(() => {
     let cancelled = false;
+    let inFlight = false;
     if (!canAnswerTickets || !user?.uid || user?.isAnonymous) {
       setSupportNotices([]);
       return;
     }
     const loadSupport = () => {
+      if (cancelled || inFlight) return;
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      inFlight = true;
       fetchStaffTickets('open')
         .then(({ tickets }) => {
           if (cancelled) return;
@@ -137,15 +141,24 @@ export default function NotificationCenter({ isRtl, subscriptionDaysRemaining = 
         })
         .catch(() => {
           if (!cancelled) setSupportNotices([]);
+        })
+        .finally(() => {
+          inFlight = false;
         });
     };
     loadSupport();
-    const id = window.setInterval(loadSupport, open ? 20_000 : 60_000);
+    // Keep polling gentle: 60s always, pause while the tab is hidden, never overlap requests.
+    const id = window.setInterval(loadSupport, 60_000);
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') loadSupport();
+    };
+    document.addEventListener('visibilitychange', onVisible);
     return () => {
       cancelled = true;
       window.clearInterval(id);
+      document.removeEventListener('visibilitychange', onVisible);
     };
-  }, [canAnswerTickets, user?.uid, user?.isAnonymous, open]);
+  }, [canAnswerTickets, user?.uid, user?.isAnonymous]);
 
   useEffect(() => {
     if (!open) return;

@@ -816,6 +816,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
   const [vault, setVault] = useState<Vault | null>(null);
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
+  /** Server invoice ids already mirrored locally — avoid re-parsing the invoices cache on every stock/vault tick. */
+  const syncedInvoiceIdsRef = useRef<Set<string>>(new Set());
 
   const resetLocalBusinessState = () => {
     setProducts([]);
@@ -835,6 +837,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     setVault(null);
     setAuditLogs([]);
     setSettings(null);
+    syncedInvoiceIdsRef.current = new Set();
   };
 
   useEffect(() => {
@@ -1032,8 +1035,9 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const bootOwnerId = currentWorkspace()?.ownerId;
     const bootInvoices = readUserCache<Invoice[]>(uid, 'invoices', []);
     const bootSyncedIds = bootInvoices.map((inv) => inv.id);
+    syncedInvoiceIdsRef.current = new Set(bootSyncedIds);
     setSettings(readUserCache(uid, 'settings', null));
-    setProducts(applyQueuedSalesToProducts(readUserCache(uid, 'products', []), bootQueue, bootOwnerId, bootSyncedIds));
+    setProducts(applyQueuedSalesToProducts(readUserCache(uid, 'products', []), bootQueue, bootOwnerId, syncedInvoiceIdsRef.current));
     setInvoices(mergeQueuedInvoices(bootInvoices, bootQueue, bootOwnerId));
     setEmployees(readUserCache(uid, 'employees', []));
     setPayrollRecords(readUserCache(uid, 'payroll', []));
@@ -1045,10 +1049,10 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     setOrders(readUserCache(uid, 'orders', []));
     setStoreNotes(readUserCache(uid, 'store_notes', []));
     const bootVault = readUserCache(uid, 'vault', null);
-    setVaultTransactions(mergeQueuedVaultRecords(readUserCache(uid, 'vault_records', []), bootQueue, bootOwnerId, bootVault, bootSyncedIds));
+    setVaultTransactions(mergeQueuedVaultRecords(readUserCache(uid, 'vault_records', []), bootQueue, bootOwnerId, bootVault, syncedInvoiceIdsRef.current));
     setWarehouses(readUserCache(uid, 'warehouses', []));
-    setVault(applyQueuedSalesToVault(bootVault, bootQueue, bootOwnerId, bootSyncedIds) as Vault | null);
-    setAuditLogs(readUserCache(uid, 'audit_logs', []));
+    setVault(applyQueuedSalesToVault(bootVault, bootQueue, bootOwnerId, syncedInvoiceIdsRef.current) as Vault | null);
+    setAuditLogs(readUserCache(uid, 'audit_logs', []).slice(0, 200));
     let isMounted = true;
     const onSyncProblem = (event: Event) => {
       const message = syncRejectionMessage((event as CustomEvent<string>).detail);
@@ -1242,8 +1246,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       // Cache the server snapshot only. Queue deductions are applied for display, never persisted
       // into the cache — otherwise a reload would subtract the same offline sales twice.
       // Skip ids already on the server so a synced-but-not-yet-pruned queue entry cannot double-cut stock.
-      const syncedIds = readUserCache<Invoice[]>(uid, 'invoices', []).map((inv) => inv.id);
-      const merged = applyQueuedSalesToProducts(items, readQueue(uid), currentWorkspace()?.ownerId, syncedIds);
+      const merged = applyQueuedSalesToProducts(items, readQueue(uid), currentWorkspace()?.ownerId, syncedInvoiceIdsRef.current);
       setProducts(merged);
       try {
         writeUserCache(uid, 'products', items);
@@ -1267,7 +1270,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       if (!isMounted) return;
       const items: Invoice[] = [];
       snap.forEach(doc => items.push({ ...doc.data() } as Invoice));
-      const serverRows = items.sort((a, b) => b.date - a.date);
+      const serverRows = items.sort((a, b) => (Number(b.date) || 0) - (Number(a.date) || 0));
+      syncedInvoiceIdsRef.current = new Set(serverRows.map((inv) => inv.id));
       setInvoices(mergeQueuedInvoices(serverRows, readQueue(uid), currentWorkspace()?.ownerId));
       // Cache server rows only — boot/queue merge applies pending offline sales once.
       writeUserCache(uid, 'invoices', serverRows);
@@ -1324,7 +1328,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       if (!isMounted) return;
       const items: Customer[] = [];
       snap.forEach(doc => items.push({ ...doc.data() } as Customer));
-      const sorted = items.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+      const sorted = items.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
       setCustomers(sorted);
       writeUserCache(uid, 'customers', sorted);
     }, (error) => {
@@ -1343,7 +1347,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       if (!isMounted) return;
       const items: CustomerTransaction[] = [];
       snap.forEach(doc => items.push({ ...doc.data() } as CustomerTransaction));
-      const sorted = items.sort((a, b) => b.date.localeCompare(a.date));
+      const sorted = items.sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
       setCustomerTransactions(sorted);
       writeUserCache(uid, 'customer_transactions', sorted);
     }, (error) => {
@@ -1362,7 +1366,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       if (!isMounted) return;
       const items: StockMovement[] = [];
       snap.forEach(d => items.push({ ...d.data() } as StockMovement));
-      setStockMovements(items.sort((a, b) => b.timestamp - a.timestamp));
+      // Keep a bounded live window so years of adjustments do not freeze HomeDesk/audit UIs.
+      setStockMovements(items.sort((a, b) => (Number(b.timestamp) || 0) - (Number(a.timestamp) || 0)).slice(0, 1000));
     }, (error) => {
       console.warn('[FirebaseProvider] stock_movements stream error (rules not deployed?):', error?.code || error);
     });
@@ -1372,7 +1377,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       if (!isMounted) return;
       const items: Supplier[] = [];
       snap.forEach(d => items.push({ ...d.data() } as Supplier));
-      const sorted = items.sort((a, b) => a.name.localeCompare(b.name));
+      const sorted = items.sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' }));
       setSuppliers(sorted);
       writeUserCache(uid, 'suppliers', sorted);
     }, (error) => {
@@ -1439,15 +1444,14 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       if (!isMounted) return;
       const items: VaultTransaction[] = [];
       snap.forEach(doc => items.push({ ...doc.data() } as VaultTransaction));
-      const serverRows = items.sort((a, b) => b.timestamp - a.timestamp);
-      const syncedIds = readUserCache<Invoice[]>(uid, 'invoices', []).map((inv) => inv.id);
+      const serverRows = items.sort((a, b) => (Number(b.timestamp) || 0) - (Number(a.timestamp) || 0)).slice(0, 2000);
       const sorted = mergeQueuedVaultRecords(
         serverRows,
         readQueue(uid),
         currentWorkspace()?.ownerId,
         // Prefer live vault state when present; otherwise the last server vault cache.
         vault || readUserCache(uid, 'vault', null),
-        syncedIds,
+        syncedInvoiceIdsRef.current,
       );
       setVaultTransactions(sorted);
       // Cache server rows only — boot merges the queue once.
@@ -1469,12 +1473,11 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       if (snap.exists()) {
         const snapData = snap.data();
         const serverVault = buildVaultDoc(readVaultBalances(snapData), snapData.lastUpdated || Date.now());
-        const syncedIds = readUserCache<Invoice[]>(uid, 'invoices', []).map((inv) => inv.id);
         const stateObj = applyQueuedSalesToVault(
           serverVault,
           readQueue(uid),
           currentWorkspace()?.ownerId,
-          syncedIds,
+          syncedInvoiceIdsRef.current,
         ) as Vault;
         setVault(stateObj);
         // Persist the server vault only; boot re-applies the offline queue once.
@@ -1499,7 +1502,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       if (!isMounted) return;
       const items: Warehouse[] = [];
       snap.forEach(doc => items.push({ ...doc.data() } as Warehouse));
-      const sorted = items.sort((a,b) => b.createdAt - a.createdAt);
+      const sorted = items.sort((a, b) => (Number(b.createdAt) || 0) - (Number(a.createdAt) || 0));
       setWarehouses(sorted);
       writeUserCache(uid, 'warehouses', sorted);
     }, (error) => {
@@ -1518,7 +1521,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       if (!isMounted) return;
       const items: AuditLog[] = [];
       snap.forEach(doc => items.push({ ...doc.data() } as AuditLog));
-      const sorted = items.sort((a,b) => b.timestamp - a.timestamp);
+      const sorted = items.sort((a, b) => (Number(b.timestamp) || 0) - (Number(a.timestamp) || 0)).slice(0, 200);
       setAuditLogs(sorted);
       writeUserCache(uid, 'audit_logs', sorted);
     }, (error) => {
@@ -1537,7 +1540,9 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       const ownerId = currentWorkspace()?.ownerId;
       const queue = readQueue(uid);
       const serverInvoices = readUserCache<Invoice[]>(uid, 'invoices', []);
-      const syncedIds = serverInvoices.map((inv) => inv.id);
+      // Keep the live id set aligned with the server cache without re-scanning on every inventory tick.
+      syncedInvoiceIdsRef.current = new Set(serverInvoices.map((inv) => inv.id));
+      const syncedIds = syncedInvoiceIdsRef.current;
       const rawProducts = readUserCache<Product[]>(uid, 'products', []);
       setProducts(applyQueuedSalesToProducts(rawProducts, queue, ownerId, syncedIds));
       const rawVault = readUserCache(uid, 'vault', null);
@@ -1576,7 +1581,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           let queue = readQueue(uid);
           if (queue.length === 0) return;
           // Drop entries already on the server (crash between commit and prune) before projecting or retrying.
-          const knownServerIds = new Set(readUserCache<Invoice[]>(uid, 'invoices', []).map((inv) => inv.id));
+          const knownServerIds = syncedInvoiceIdsRef.current;
           const alreadyOnServer = queue.filter((q) => knownServerIds.has(q.invoice.id));
           if (alreadyOnServer.length > 0) {
             queue = queue.filter((q) => !knownServerIds.has(q.invoice.id));
@@ -2290,8 +2295,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       // Shortage check + enqueue under one lock so two tabs cannot both sell the last unit.
       queued = await withQueueLock(uid, () => {
         const rawProducts = readUserCache<Product[]>(uid, 'products', []);
-        const syncedIds = readUserCache<Invoice[]>(uid, 'invoices', []).map((inv) => inv.id);
-        const projected = applyQueuedSalesToProducts(rawProducts, readQueue(uid), ownerId, syncedIds);
+        const projected = applyQueuedSalesToProducts(rawProducts, readQueue(uid), ownerId, syncedInvoiceIdsRef.current);
         const shortages = localSaleShortages(queuedInvoice, projected);
         if (shortages.length > 0) {
           const s = shortages[0];
@@ -2323,7 +2327,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
     // Display-only: queue event also reprojects from raw caches; do not persist merged books.
     const serverInvoices = readUserCache<Invoice[]>(uid, 'invoices', []);
-    const syncedIds = serverInvoices.map((inv) => inv.id);
+    const syncedIds = syncedInvoiceIdsRef.current;
     const rawProducts = readUserCache<Product[]>(uid, 'products', []);
     setProducts(applyQueuedSalesToProducts(rawProducts, readQueue(uid), ownerId, syncedIds));
     const plan = planInvoiceVaultEntry(invoice);

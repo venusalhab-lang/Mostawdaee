@@ -81,6 +81,22 @@ describe('warehouse form', () => {
   });
 });
 
+describe('allWarehouseStats', () => {
+  it('computes every location in one pass', async () => {
+    const { allWarehouseStats } = await import('../warehouses');
+    const products = [
+      product({ id: '1', name: 'A', warehouseId: 'a', quantity: 2, unitCost: 1 }),
+      product({ id: '2', name: 'B', warehouseId: 'a', quantity: 0, unitCost: 1 }),
+      product({ id: '3', name: 'C', quantity: 5, unitCost: 2 }),
+    ];
+    const map = allWarehouseStats(products, ['a', 'b'], 'JOD');
+    expect(map.get('a')?.stocked).toBe(1);
+    expect(map.get('a')?.empty).toBe(1);
+    expect(map.get('')?.stocked).toBe(1);
+    expect(map.get('b')?.stocked).toBe(0);
+  });
+});
+
 describe('stock transfer', () => {
   const products = [
     product({ id: 'z', name: 'Zeta', warehouseId: 'a', quantity: 2.5 }),

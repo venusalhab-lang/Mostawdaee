@@ -609,7 +609,7 @@ export default function HomeDesk({ language, settings }: Props) {
   const now = Date.now();
   const locale = isRtl ? 'ar' : 'en-US';
 
-  const desk = (() => {
+  const desk = useMemo(() => {
     const window = periodWindow(range, now);
     const sales = salesRows(transactions, storeCurrency);
     const credit = creditRows(transactions, storeCurrency);
@@ -645,7 +645,18 @@ export default function HomeDesk({ language, settings }: Props) {
       activity: recentActivity(transactions, vaultTransactions, stockMovements, storeCurrency),
       balanceRows,
     };
-  })();
+  }, [
+    range,
+    now,
+    storeCurrency,
+    transactions,
+    vaultTransactions,
+    stockMovements,
+    products,
+    settings.lowStockThreshold,
+    customers,
+    vault,
+  ]);
 
   const pendingKey = pendingSales.map((entry) => entry.invoice.id).join('|');
   const sellers = useMemo<SellerContext>(() => ({
@@ -656,7 +667,7 @@ export default function HomeDesk({ language, settings }: Props) {
     pendingIds: new Set(pendingKey ? pendingKey.split('|') : []),
   }), [user?.uid, user?.email, workspace?.ownerId, workspace?.ownerEmail, workspace?.role, pendingKey]);
 
-  const tasks = homeTasks({
+  const tasks = useMemo(() => homeTasks({
     now,
     storeCurrency,
     products,
@@ -700,7 +711,19 @@ export default function HomeDesk({ language, settings }: Props) {
       }))
       : null,
     pendingUploads: pendingSales.length,
-  });
+  }), [
+    now,
+    storeCurrency,
+    products,
+    settings.lowStockThreshold,
+    cheques,
+    customers,
+    customerTransactions,
+    payrollRecords,
+    storeNotes,
+    pendingSales.length,
+    canOpenScreen,
+  ]);
   const isNewStore = products.length === 0;
 
   const copy = {

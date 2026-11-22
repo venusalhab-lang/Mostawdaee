@@ -36,7 +36,7 @@ vi.mock('../workspace', () => ({
   resetWorkspace: () => {},
 }));
 
-const settle = () => new Promise((resolve) => setTimeout(resolve, 30));
+const settle = (ms = 30) => new Promise((resolve) => setTimeout(resolve, ms));
 const visibility = (state: 'visible' | 'hidden') => {
   page.visibilityState = state;
   page.dispatchEvent(new Event('visibilitychange'));
@@ -46,7 +46,8 @@ afterAll(() => vi.unstubAllGlobals());
 
 describe('refreshing open collections', () => {
   it('downloads only when realtime may have missed changes, once per collection', async () => {
-    const { collection, onSnapshot, STALE_AFTER_HIDDEN_MS } = await import('../supabaseDocs');
+    const { collection, onSnapshot, STALE_AFTER_HIDDEN_MS, REFRESH_OPEN_DEBOUNCE_MS } = await import('../supabaseDocs');
+    const afterRefresh = () => settle(REFRESH_OPEN_DEBOUNCE_MS + 40);
     const ref = collection(null, 'users', 'u1', 'inventory');
     const seen = { a: 0, b: 0 };
     const stopA = onSnapshot(ref, () => { seen.a += 1; });
@@ -59,7 +60,7 @@ describe('refreshing open collections', () => {
     win.dispatchEvent(new Event('focus'));
     visibility('hidden');
     visibility('visible');
-    await settle();
+    await afterRefresh();
     expect(calls.ranges).toBe(1);
 
     const now = Date.now();
@@ -67,17 +68,17 @@ describe('refreshing open collections', () => {
     const clock = vi.spyOn(Date, 'now').mockReturnValue(now + STALE_AFTER_HIDDEN_MS + 1000);
     visibility('visible');
     clock.mockRestore();
-    await settle();
+    await afterRefresh();
     expect(calls.ranges).toBe(2);
     expect(seen).toEqual({ a: 2, b: 2 });
 
     channelStatus!('CHANNEL_ERROR');
     win.dispatchEvent(new Event('focus'));
-    await settle();
+    await afterRefresh();
     expect(calls.ranges).toBe(3);
 
     channelStatus!('SUBSCRIBED');
-    await settle();
+    await afterRefresh();
     expect(calls.ranges).toBe(4);
 
     const stopC = onSnapshot(ref, () => {});
@@ -85,12 +86,12 @@ describe('refreshing open collections', () => {
     expect(calls.ranges).toBe(4);
 
     win.dispatchEvent(new Event('online'));
-    await settle();
+    await afterRefresh();
     expect(calls.ranges).toBe(5);
 
     stopA(); stopB(); stopC();
     win.dispatchEvent(new Event('online'));
-    await settle();
+    await afterRefresh();
     expect(calls.ranges).toBe(5);
   });
 });

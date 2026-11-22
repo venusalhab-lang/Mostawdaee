@@ -53,6 +53,34 @@ export function warehouseStats(products: Product[], warehouseId: string, default
   };
 }
 
+/** One pass over products for every warehouse id (and general stock). Avoids O(W×P) scans. */
+export function allWarehouseStats(
+  products: Product[],
+  warehouseIds: string[],
+  defaultCurrency: string,
+): Map<string, WarehouseStats> {
+  const buckets = new Map<string, Product[]>();
+  buckets.set(NO_WAREHOUSE, []);
+  for (const id of warehouseIds) buckets.set(id, []);
+  for (const product of products) {
+    const loc = locationOf(product);
+    const list = buckets.get(loc) || buckets.get(NO_WAREHOUSE)!;
+    list.push(product);
+  }
+  const map = new Map<string, WarehouseStats>();
+  for (const [id, here] of buckets) {
+    const stocked = here.filter((p) => num(p.quantity) > 0);
+    map.set(id, {
+      stocked: stocked.length,
+      empty: here.length - stocked.length,
+      quantity: roundQty(stocked.reduce((sum, p) => sum + num(p.quantity), 0)),
+      valueAtCost: stockValueByCurrency(stocked, defaultCurrency),
+      missingCost: stocked.filter((p) => num(p.unitCost ?? p.costPrice) <= 0).length,
+    });
+  }
+  return map;
+}
+
 export interface DeleteBlockers {
   children: number;
   stocked: number;

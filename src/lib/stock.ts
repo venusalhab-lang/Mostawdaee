@@ -59,3 +59,17 @@ export function isExpired(expiry: number | undefined | null, now = Date.now()): 
   const d = daysUntilExpiry(expiry, now);
   return d !== null && d < 0;
 }
+
+/** YYYY-MM-DD for display/export, or null when the stored value is not a real date. */
+export function formatExpiryIsoDate(expiry: number | string | undefined | null): string | null {
+  if (expiry == null || expiry === '') return null;
+  const ms = typeof expiry === 'number' ? expiry : Date.parse(String(expiry));
+  if (!Number.isFinite(ms)) return null;
+  const d = new Date(ms);
+  if (!Number.isFinite(d.getTime())) return null;
+  try {
+    return d.toISOString().split('T')[0];
+  } catch {
+    return null;
+  }
+}

@@ -34,11 +34,14 @@ import {
   transferCandidates,
   validateTransfer,
   validateWarehouse,
+  allWarehouseStats,
   warehouseStats,
   type TransferError,
   type WarehouseInputError,
 } from '../lib/warehouses';
 import { requestScreenSearch } from '../lib/screenSearch';
+import { useProgressiveList } from '../hooks/useProgressiveList';
+import ShowMoreBar from './ui/ShowMoreBar';
 
 interface Props {
   language: Language;
@@ -104,12 +107,10 @@ export default function WarehouseManagement({ language, settings }: Props) {
   const nameOf = (id: string) => (id === NO_WAREHOUSE ? generalName : warehouses.find((w) => w.id === id)?.name || '—');
 
   const ordered = useMemo(() => orderWarehouses(warehouses, locale), [warehouses, locale]);
-  const statsById = useMemo(() => {
-    const map = new Map<string, ReturnType<typeof warehouseStats>>();
-    for (const w of warehouses) map.set(w.id, warehouseStats(products, w.id, defaultCurrency));
-    map.set(NO_WAREHOUSE, warehouseStats(products, NO_WAREHOUSE, defaultCurrency));
-    return map;
-  }, [warehouses, products, defaultCurrency]);
+  const statsById = useMemo(
+    () => allWarehouseStats(products, warehouses.map((w) => w.id), defaultCurrency),
+    [warehouses, products, defaultCurrency],
+  );
 
   const mainCount = warehouses.filter((w) => isMainWarehouse(w, warehouses)).length;
   const assignedStocked = products.filter((p) => locationOf(p) !== NO_WAREHOUSE && Number(p.quantity) > 0).length;
@@ -291,6 +292,7 @@ export default function WarehouseManagement({ language, settings }: Props) {
       .filter((p) => matchesQuery([p.name, p.sku, p.category, p.brand], detailSearch))
       .sort((a, b) => Number(b.quantity > 0) - Number(a.quantity > 0) || a.name.localeCompare(b.name, locale));
   }, [products, detailId, detailSearch, locale]);
+  const detailPage = useProgressiveList(detailProducts, `${detailId || ''}|${detailSearch}`);
 
   const openDetail = (id: string) => {
     setDetailSearch('');
@@ -556,40 +558,50 @@ export default function WarehouseManagement({ language, settings }: Props) {
               {detailProducts.length === 0 ? (
                 <p className="text-center text-slate-400 py-6">{isRtl ? 'لا توجد أصناف هنا.' : 'No items here.'}</p>
               ) : (
-                <ul className="divide-y divide-slate-100 dark:divide-white/5 rounded-2xl border border-slate-100 dark:border-white/5">
-                  {detailProducts.map((p: Product) => {
-                    const qty = Number(p.quantity) || 0;
-                    const cost = Number(p.unitCost ?? p.costPrice) || 0;
-                    return (
-                      <li key={p.id} className="flex items-center justify-between gap-3 px-3 py-2.5">
-                        <button
-                          type="button"
-                          onClick={() => setProductDetailId(p.id)}
-                          className="min-w-0 flex-1 text-start rounded-lg hover:bg-slate-50 dark:hover:bg-white/[0.03] -ms-1 ps-1 py-0.5 transition-colors cursor-pointer"
-                        >
-                          <div className="font-bold truncate">{p.name}</div>
-                          <div className="text-[11px] font-mono text-slate-400 truncate" dir="ltr">{p.sku || '—'}</div>
-                        </button>
-                        <div className="text-end shrink-0">
-                          <div className={`font-black tabular-nums ${qty > 0 ? 'text-slate-900 dark:text-white' : 'text-slate-300 dark:text-slate-600'}`}>{qtyText(qty)}</div>
-                          <div className="text-[11px] text-slate-400 tabular-nums">
-                            {qty > 0 && cost > 0 ? formatMoney(roundQty(qty) * cost, p.currency || defaultCurrency) : qty > 0 ? (isRtl ? 'بلا تكلفة' : 'no cost') : ''}
-                          </div>
-                        </div>
-                        {qty > 0 && (
+                <>
+                  <ul className="divide-y divide-slate-100 dark:divide-white/5 rounded-2xl border border-slate-100 dark:border-white/5">
+                    {detailPage.visible.map((p: Product) => {
+                      const qty = Number(p.quantity) || 0;
+                      const cost = Number(p.unitCost ?? p.costPrice) || 0;
+                      return (
+                        <li key={p.id} className="flex items-center justify-between gap-3 px-3 py-2.5">
                           <button
                             type="button"
-                            onClick={() => openTransfer(detailId, p.id)}
-                            className="shrink-0 p-2 rounded-lg text-slate-400 hover:bg-slate-100 hover:text-indigo-600 dark:hover:bg-white/5"
-                            aria-label={isRtl ? `نقل ${p.name}` : `Move ${p.name}`}
+                            onClick={() => setProductDetailId(p.id)}
+                            className="min-w-0 flex-1 text-start rounded-lg hover:bg-slate-50 dark:hover:bg-white/[0.03] -ms-1 ps-1 py-0.5 transition-colors cursor-pointer"
                           >
-                            <ArrowRightLeft size={15} />
+                            <div className="font-bold truncate">{p.name}</div>
+                            <div className="text-[11px] font-mono text-slate-400 truncate" dir="ltr">{p.sku || '—'}</div>
                           </button>
-                        )}
-                      </li>
-                    );
-                  })}
-                </ul>
+                          <div className="text-end shrink-0">
+                            <div className={`font-black tabular-nums ${qty > 0 ? 'text-slate-900 dark:text-white' : 'text-slate-300 dark:text-slate-600'}`}>{qtyText(qty)}</div>
+                            <div className="text-[11px] text-slate-400 tabular-nums">
+                              {qty > 0 && cost > 0 ? formatMoney(roundQty(qty) * cost, p.currency || defaultCurrency) : qty > 0 ? (isRtl ? 'بلا تكلفة' : 'no cost') : ''}
+                            </div>
+                          </div>
+                          {qty > 0 && (
+                            <button
+                              type="button"
+                              onClick={() => openTransfer(detailId, p.id)}
+                              className="shrink-0 p-2 rounded-lg text-slate-400 hover:bg-slate-100 hover:text-indigo-600 dark:hover:bg-white/5"
+                              aria-label={isRtl ? `نقل ${p.name}` : `Move ${p.name}`}
+                            >
+                              <ArrowRightLeft size={15} />
+                            </button>
+                          )}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                  <ShowMoreBar
+                    isRtl={isRtl}
+                    shown={detailPage.shown}
+                    total={detailPage.total}
+                    pageSize={detailPage.pageSize}
+                    onMore={detailPage.showMore}
+                    onAll={detailPage.showAll}
+                  />
+                </>
               )}
             </section>
 
