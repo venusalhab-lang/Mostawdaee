@@ -115,7 +115,10 @@ function ProductRow({
   onDelete,
   warehouses = []
 }: ProductRowProps) {
-  const longPressProps = useLongPress(() => onShowContextMenu(product));
+  const longPressProps = useLongPress(
+    () => onShowContextMenu(product),
+    () => onShowContextMenu(product),
+  );
   // Always derived from the real quantity so a stale stored status can never contradict the number shown.
   const liveStatus: StockStatus = computeStockStatus(product.quantity, product.lowStockThreshold, lowStockDefault);
 
@@ -296,7 +299,10 @@ function ProductMobileCard({
   onDelete,
   warehouses = [],
 }: ProductRowProps) {
-  const longPressProps = useLongPress(() => onShowContextMenu(product));
+  const longPressProps = useLongPress(
+    () => onShowContextMenu(product),
+    () => onShowContextMenu(product),
+  );
   const liveStatus: StockStatus = computeStockStatus(product.quantity, product.lowStockThreshold, lowStockDefault);
   const wh = warehouses.find((w) => w.id === product.warehouseId);
   const packs = formatPackStock(product.quantity, product, isRtl);
@@ -453,7 +459,13 @@ export default function InventoryManagement({
   const [warehouseFilter, setWarehouseFilter] = useState<string>('all');
   const [expiryFilter, setExpiryFilter] = useState<string>('all');
 
-  useScreenSearch('inventory', ({ query }) => {
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isLogOpen, setIsLogOpen] = useState(false);
+  const [activeAuditTab, setActiveAuditTab] = useState<'costs' | 'movements'>('costs');
+  const [showSuccessVisual, setShowSuccessVisual] = useState(false);
+  const [contextMenuTarget, setContextMenuTarget] = useState<Product | null>(null);
+
+  useScreenSearch('inventory', ({ query, recordId }) => {
     setCategoryFilter('all');
     setStockFilter('all');
     setSearchMode('all');
@@ -464,13 +476,11 @@ export default function InventoryManagement({
     setWarehouseFilter('all');
     setExpiryFilter('all');
     setSearchQuery(query);
+    if (recordId) {
+      const hit = products.find((p) => p.id === recordId);
+      if (hit) setContextMenuTarget(hit);
+    }
   });
-
-  const [isModalOpen, setIsModalOpen] = useState(false);
-  const [isLogOpen, setIsLogOpen] = useState(false);
-  const [activeAuditTab, setActiveAuditTab] = useState<'costs' | 'movements'>('costs');
-  const [showSuccessVisual, setShowSuccessVisual] = useState(false);
-  const [contextMenuTarget, setContextMenuTarget] = useState<Product | null>(null);
   const [labelProducts, setLabelProducts] = useState<Product[] | null>(null);
   const [logTarget, setLogTarget] = useState<Product | null>(null);
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);

@@ -427,7 +427,14 @@ export default function SuppliersPanel({ isRtl, defaultCurrency }: SuppliersPane
             {filtered.map((s) => {
               const owed = owedBalances(s);
               return (
-                <div key={s.id} className="flex flex-wrap items-center gap-3 px-4 py-3">
+                <div
+                  key={s.id}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => setViewing(s)}
+                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setViewing(s); } }}
+                  className="flex flex-wrap items-center gap-3 px-4 py-3 cursor-pointer hover:bg-slate-50/80 dark:hover:bg-white/[0.03] transition-colors"
+                >
                   <div className="flex-1 min-w-[10rem]">
                     <div className="font-bold text-slate-900 dark:text-white">{s.name}</div>
                     {s.phone && <div className="text-[11px] text-slate-500 font-mono" dir="ltr">{s.phone}</div>}
@@ -441,7 +448,7 @@ export default function SuppliersPanel({ isRtl, defaultCurrency }: SuppliersPane
                         </span>
                       ))}
                   </div>
-                  <div className="flex items-center gap-1">
+                  <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
                     <button type="button" onClick={() => setViewing(s)} title={L('كشف حساب', 'Statement')} aria-label={L('كشف حساب', 'Statement')}
                       className="p-2 rounded-xl text-indigo-600 hover:bg-indigo-50 dark:hover:bg-indigo-950/30"><BookOpen size={15} /></button>
                     <button type="button" onClick={() => setPaying(s)} disabled={!owed.some((b) => b.amount > 0)}

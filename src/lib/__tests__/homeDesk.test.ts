@@ -14,6 +14,10 @@ import {
   salesCount,
   salesPulse,
   salesPulseGauge,
+  salesPulseHeat,
+  profitMarginHeat,
+  movementHeat,
+  signedPercentHeat,
   salesRows,
   startOfLocalDay,
   startOfLocalMonth,
@@ -101,6 +105,19 @@ describe('home desk money', () => {
     expect(salesPulse(8, 10)).toEqual({ tone: 'strong-down', percent: -20 });
     expect(salesPulse(90.5, 100).percent).toBe(Math.round(-9.5));
     expect(salesPulse(90.5, 100).tone).toBe('down');
+  });
+
+  it('scales heat intensity with the size of the move', () => {
+    expect(signedPercentHeat(0).intensity).toBeLessThan(0.3);
+    expect(salesPulseHeat('strong-up', 40).intensity).toBe(1);
+    expect(salesPulseHeat('up', 5).intensity).toBeLessThan(salesPulseHeat('strong-up', 40).intensity);
+    expect(salesPulseHeat('down', -5).hex).toContain('hsl(38');
+    expect(salesPulseHeat('strong-down', -40).hex).toContain('hsl(350');
+    expect(profitMarginHeat(25, true).intensity).toBeGreaterThan(0.5);
+    expect(profitMarginHeat(-20, true).hex).toContain('hsl(350');
+    expect(profitMarginHeat(0, false).intensity).toBeLessThan(0.2);
+    expect(movementHeat(10, 5).intensity).toBe(1);
+    expect(movementHeat(0, 0).intensity).toBeLessThan(0.2);
   });
 
   it('places the dial from −100% at the lower left to +100% at the lower right', () => {

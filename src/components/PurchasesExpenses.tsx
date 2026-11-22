@@ -119,6 +119,7 @@ export default function PurchasesExpenses({ language }: Props) {
   const [isPurchaseModalOpen, setIsPurchaseModalOpen] = useState(false);
   const [isExpenseModalOpen, setIsExpenseModalOpen] = useState(false);
   const [invoiceDetail, setInvoiceDetail] = useState<Invoice | null>(null);
+  const [expenseDetail, setExpenseDetail] = useState<VaultTransaction | null>(null);
   const [returnTarget, setReturnTarget] = useState<Invoice | null>(null);
 
   // New Purchase Form state
@@ -966,7 +967,14 @@ export default function PurchasesExpenses({ language }: Props) {
                     </tr>
                   ) : (
                     purchasePage.visible.map((inv) => (
-                      <tr key={inv.id} className="hover:bg-slate-50/80 dark:hover:bg-slate-800/40 transition-colors duration-200">
+                      <tr
+                        key={inv.id}
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => { sounds.playClick(); setInvoiceDetail(inv); }}
+                        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); sounds.playClick(); setInvoiceDetail(inv); } }}
+                        className="hover:bg-slate-50/80 dark:hover:bg-slate-800/40 transition-colors duration-200 cursor-pointer"
+                      >
                         <td className="px-6 py-4 font-mono font-bold text-slate-900 dark:text-white whitespace-nowrap">
                           {inv.invoiceNumber}
                           {inv.type === 'purchase_return' && (
@@ -1006,7 +1014,7 @@ export default function PurchasesExpenses({ language }: Props) {
                             );
                           })()}
                         </td>
-                        <td className="px-6 py-4 whitespace-nowrap">
+                        <td className="px-6 py-4 whitespace-nowrap" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
                           <div className="flex items-center justify-center gap-2">
                             <button
                               onClick={() => {
@@ -1186,7 +1194,14 @@ export default function PurchasesExpenses({ language }: Props) {
                     </tr>
                   ) : (
                     expensePage.visible.map((tx) => (
-                      <tr key={tx.id} className="hover:bg-slate-50/80 dark:hover:bg-slate-800/40 transition-colors duration-200">
+                      <tr
+                        key={tx.id}
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => { sounds.playClick(); setExpenseDetail(tx); }}
+                        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); sounds.playClick(); setExpenseDetail(tx); } }}
+                        className="hover:bg-slate-50/80 dark:hover:bg-slate-800/40 transition-colors duration-200 cursor-pointer"
+                      >
                         <td className="px-6 py-4 font-mono font-extrabold text-xs text-slate-500 whitespace-nowrap">#{tx.id ? tx.id.slice(-8).toUpperCase() : 'N/A'}</td>
                         <td className="px-6 py-4 font-semibold text-slate-800 dark:text-slate-300 max-w-sm truncate whitespace-nowrap">{tx.description}</td>
                         <td className="px-6 py-4 text-xs text-slate-500 whitespace-nowrap">{new Date(tx.timestamp).toLocaleString(isRtl ? 'ar-JO' : 'en-US')}</td>
@@ -1932,6 +1947,50 @@ export default function PurchasesExpenses({ language }: Props) {
                 </button>
               </div>
 
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {expenseDetail && (
+          <div className="fixed inset-0 bg-slate-950/40 backdrop-blur-sm z-[200] flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 15 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 15 }}
+              className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-[2rem] w-full max-w-md shadow-3xl overflow-hidden"
+            >
+              <div className="p-5 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between gap-3">
+                <div>
+                  <h3 className="font-black text-lg text-slate-900 dark:text-white">{isRtl ? 'تفاصيل المصروف' : 'Expense details'}</h3>
+                  <p className="text-[11px] font-mono text-slate-400 mt-0.5" dir="ltr">#{expenseDetail.id?.slice(-10).toUpperCase() || '—'}</p>
+                </div>
+                <button type="button" onClick={() => setExpenseDetail(null)} className="p-2 rounded-xl hover:bg-slate-100 dark:hover:bg-white/5 text-slate-400" aria-label={isRtl ? 'إغلاق' : 'Close'}>
+                  <X size={18} />
+                </button>
+              </div>
+              <div className="p-5 space-y-3 text-sm">
+                {[
+                  { label: isRtl ? 'الوصف' : 'Description', value: expenseDetail.description || '—' },
+                  { label: isRtl ? 'المبلغ' : 'Amount', value: `−${formatCurrencyValue(expenseDetail.amount, expenseDetail.currency)}` },
+                  { label: isRtl ? 'التصنيف' : 'Category', value: (() => { const cat = expenseCategoryOf(expenseDetail); return cat ? expenseCategoryLabel(cat, isRtl) : (isRtl ? 'مصروف' : 'Expense'); })() },
+                  { label: isRtl ? 'التاريخ' : 'Date', value: new Date(expenseDetail.timestamp).toLocaleString(isRtl ? 'ar-JO' : 'en-US') },
+                  { label: isRtl ? 'العملة' : 'Currency', value: expenseDetail.currency || '—' },
+                  { label: isRtl ? 'رصيد الخزنة بعد العملية' : 'Vault balance after', value: formatCurrencyValue(expenseDetail.balanceAfter || 0, expenseDetail.currency) },
+                  ...(expenseDetail.refId ? [{ label: isRtl ? 'مرجع مرتبط' : 'Linked reference', value: expenseDetail.refId }] : []),
+                ].map((row) => (
+                  <div key={row.label} className="flex justify-between gap-4 border-b border-slate-50 dark:border-white/5 pb-2">
+                    <span className="text-xs font-bold text-slate-400 shrink-0">{row.label}</span>
+                    <span className="font-bold text-slate-800 dark:text-slate-100 text-end break-all" dir="auto">{row.value}</span>
+                  </div>
+                ))}
+              </div>
+              <div className="p-4 bg-slate-50 dark:bg-slate-800/40 flex justify-end border-t border-slate-100 dark:border-slate-700">
+                <button type="button" onClick={() => setExpenseDetail(null)} className="px-5 py-2 text-xs font-bold rounded-xl bg-slate-200 dark:bg-slate-700 text-slate-800 dark:text-slate-200 cursor-pointer">
+                  {isRtl ? 'إغلاق' : 'Close'}
+                </button>
+              </div>
             </motion.div>
           </div>
         )}

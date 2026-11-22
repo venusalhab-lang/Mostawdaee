@@ -31,6 +31,8 @@ import {
   type ProfitRange,
   type ProfitReportProduct,
 } from '../lib/profitReport';
+import { profitMarginHeat, signedPercentHeat } from '../lib/homeDesk';
+
 import { printHtmlDocument } from '../lib/printHtml';
 import { localIsoDate } from '../lib/localDate';
 import { roundQty } from '../lib/stock';
@@ -136,6 +138,15 @@ export default function ProfitsDashboard({ language = 'en', currency = 'JOD', on
     });
   }, [rows, start, now, step, selectedCurrency, exchangeRates, locale]);
   const stepLabel = step === 'hour' ? L('حسب الساعة', 'Hourly') : step === 'day' ? L('يومياً', 'Daily') : L('شهرياً', 'Monthly');
+  const hasSalesActivity = totals.sales > 0 || periodInvoices.some((inv) => inv.type === 'sale' || inv.type === 'return');
+  const profitHeat = profitMarginHeat(totals.margin, hasSalesActivity);
+  // Sales card: sky when there is real sales activity, muted when idle (not a profit signal).
+  const salesHeat = signedPercentHeat(null, hasSalesActivity ? 'new' : 'idle');
+  const profitFillId = 'profitFillHeat';
+  const peakProductProfit = Math.max(
+    1,
+    ...productProfitability.list.map((item) => Math.abs(Number(item.profit) || 0)),
+  );
 
   const formatDate = (time: number) =>
     new Date(time).toLocaleString(locale, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
@@ -312,13 +323,21 @@ export default function ProfitsDashboard({ language = 'en', currency = 'JOD', on
               )}
 
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                <div className="rounded-xl border border-slate-200 dark:border-gray-700 p-5 flex items-start justify-between gap-3">
+                <div
+                  className="rounded-xl border p-5 flex items-start justify-between gap-3"
+                  style={{
+                    borderColor: `color-mix(in srgb, ${salesHeat.hex} 35%, #e2e8f0)`,
+                    background: `color-mix(in srgb, ${salesHeat.hex} ${Math.round(salesHeat.washOpacity * 100)}%, transparent)`,
+                  }}
+                >
                   <div className="space-y-1.5 min-w-0">
                     <span className="text-xs font-semibold text-slate-500 dark:text-gray-400 block">{L('صافي المبيعات', 'Net sales')}</span>
-                    <p className="text-2xl font-black text-slate-900 dark:text-white">{showMoney(totals.sales, selectedCurrency)}</p>
+                    <p className="text-2xl font-black" style={{ color: salesHeat.hex }}>{showMoney(totals.sales, selectedCurrency)}</p>
                     <p className="text-xs text-slate-400">{L('بعد الخصم وبدون ضريبة القيمة المضافة', 'After discount, excluding VAT')}</p>
                   </div>
-                  <div className="p-3 bg-blue-50 dark:bg-blue-900/30 text-blue-600 rounded-lg shrink-0"><DollarSign className="w-5 h-5" /></div>
+                  <div className="p-3 rounded-lg shrink-0" style={{ background: `color-mix(in srgb, ${salesHeat.hex} 18%, transparent)`, color: salesHeat.hex }}>
+                    <DollarSign className="w-5 h-5" />
+                  </div>
                 </div>
 
                 <div className="rounded-xl border border-slate-200 dark:border-gray-700 p-5 flex items-start justify-between gap-3">
@@ -330,16 +349,31 @@ export default function ProfitsDashboard({ language = 'en', currency = 'JOD', on
                   <div className="p-3 bg-rose-50 dark:bg-rose-900/30 text-rose-600 rounded-lg shrink-0"><Layers className="w-5 h-5" /></div>
                 </div>
 
-                <div className="rounded-xl border border-slate-200 dark:border-gray-700 p-5 flex items-start justify-between gap-3">
-                  <div className="space-y-1.5 min-w-0">
+                <div
+                  className="rounded-xl border p-5 flex items-start justify-between gap-3"
+                  style={{
+                    borderColor: `color-mix(in srgb, ${profitHeat.hex} 40%, #e2e8f0)`,
+                    background: `color-mix(in srgb, ${profitHeat.hex} ${Math.round(profitHeat.washOpacity * 100)}%, transparent)`,
+                  }}
+                >
+                  <div className="space-y-1.5 min-w-0 w-full">
                     <span className="text-xs font-semibold text-slate-500 dark:text-gray-400 block">{L('مجمل الربح', 'Gross profit')}</span>
-                    <p className={`text-2xl font-black ${totals.net < 0 ? 'text-rose-600' : 'text-emerald-600'}`}>{showMoney(totals.net, selectedCurrency)}</p>
+                    <p className="text-2xl font-black" style={{ color: profitHeat.hex }}>{showMoney(totals.net, selectedCurrency)}</p>
                     <p className="text-xs text-slate-400">
-                      <span className={`font-bold ${totals.net < 0 ? 'text-rose-700' : 'text-emerald-700'}`}>{L('الهامش', 'Margin')} {totals.margin.toFixed(1)}%</span>
+                      <span className="font-bold" style={{ color: profitHeat.hex }}>{L('الهامش', 'Margin')} {totals.margin.toFixed(1)}%</span>
                       {' · '}{L('قبل المصاريف والرواتب', 'before expenses and payroll')}
                     </p>
+                    <div className="mt-2 h-1.5 rounded-full bg-slate-100 dark:bg-white/10 overflow-hidden">
+                      <div
+                        className="h-full rounded-full transition-[width] duration-500"
+                        style={{ width: `${Math.round(profitHeat.intensity * 100)}%`, backgroundColor: profitHeat.hex }}
+                        title={L('حدة الهامش', 'Margin intensity')}
+                      />
+                    </div>
                   </div>
-                  <div className="p-3 bg-emerald-50 dark:bg-emerald-900/30 text-emerald-600 rounded-lg shrink-0"><Activity className="w-5 h-5" /></div>
+                  <div className="p-3 rounded-lg shrink-0" style={{ background: `color-mix(in srgb, ${profitHeat.hex} 18%, transparent)`, color: profitHeat.hex }}>
+                    <Activity className="w-5 h-5" />
+                  </div>
                 </div>
               </div>
 
@@ -365,10 +399,15 @@ export default function ProfitsDashboard({ language = 'en', currency = 'JOD', on
                             <td className="py-2.5 px-5 font-bold">{c.currency}</td>
                             <td className="py-2.5 px-5 whitespace-nowrap">{showMoney(c.revenue, c.currency)}</td>
                             <td className="py-2.5 px-5 whitespace-nowrap">{showMoney(c.cost, c.currency)}</td>
-                            <td className={`py-2.5 px-5 whitespace-nowrap font-bold ${c.profit < 0 ? 'text-rose-600' : 'text-emerald-600'}`}>
+                            <td
+                              className="py-2.5 px-5 whitespace-nowrap font-bold"
+                              style={{ color: profitMarginHeat(c.margin, c.revenue > 0).hex }}
+                            >
                               {showMoney(c.profit, c.currency)}{c.unknownCostLines > 0 ? ' *' : ''}
                             </td>
-                            <td className="py-2.5 px-5">{c.margin.toFixed(1)}%</td>
+                            <td className="py-2.5 px-5 font-bold" style={{ color: profitMarginHeat(c.margin, c.revenue > 0).hex }}>
+                              {c.margin.toFixed(1)}%
+                            </td>
                           </tr>
                         ))}
                       </tbody>
@@ -378,13 +417,22 @@ export default function ProfitsDashboard({ language = 'en', currency = 'JOD', on
               )}
 
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                <div className="lg:col-span-2 rounded-xl border border-slate-200 dark:border-gray-700 p-5">
+                <div
+                  className="lg:col-span-2 rounded-xl border p-5"
+                  style={{ borderColor: `color-mix(in srgb, ${profitHeat.hex} 28%, #e2e8f0)` }}
+                >
                   <div className="flex items-center justify-between gap-3 pb-4 border-b border-slate-100 dark:border-gray-700 mb-5">
                     <div className="flex items-center gap-2">
-                      <TrendingUp className="w-5 h-5 text-blue-600" />
+                      <TrendingUp className="w-5 h-5" style={{ color: profitHeat.hex }} />
                       <h3 className="text-sm font-bold">{L('مجمل الربح عبر الفترة', 'Gross profit over the period')}</h3>
                     </div>
-                    <span className="text-xs font-semibold text-blue-600 bg-blue-50 dark:bg-blue-900/30 px-2.5 py-1 rounded-full whitespace-nowrap">
+                    <span
+                      className="text-xs font-semibold px-2.5 py-1 rounded-full whitespace-nowrap"
+                      style={{
+                        color: profitHeat.hex,
+                        background: `color-mix(in srgb, ${profitHeat.hex} 14%, transparent)`,
+                      }}
+                    >
                       {stepLabel} · {selectedCurrency}
                     </span>
                   </div>
@@ -393,9 +441,9 @@ export default function ProfitsDashboard({ language = 'en', currency = 'JOD', on
                       <ResponsiveContainer width="100%" height="100%">
                         <AreaChart data={chartData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
                           <defs>
-                            <linearGradient id="profitFill" x1="0" y1="0" x2="0" y2="1">
-                              <stop offset="5%" stopColor="#2563eb" stopOpacity={0.2} />
-                              <stop offset="95%" stopColor="#06b6d4" stopOpacity={0} />
+                            <linearGradient id={profitFillId} x1="0" y1="0" x2="0" y2="1">
+                              <stop offset="5%" stopColor={profitHeat.hex} stopOpacity={0.15 + profitHeat.intensity * 0.25} />
+                              <stop offset="95%" stopColor={profitHeat.hex} stopOpacity={0} />
                             </linearGradient>
                           </defs>
                           <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
@@ -405,7 +453,13 @@ export default function ProfitsDashboard({ language = 'en', currency = 'JOD', on
                             formatter={(value: number) => [showMoney(Number(value), selectedCurrency), L('مجمل الربح', 'Gross profit')]}
                             contentStyle={{ borderRadius: 8, border: '1px solid #e2e8f0', fontSize: 11 }}
                           />
-                          <Area type="monotone" dataKey="profit" stroke="#2563eb" strokeWidth={2} fill="url(#profitFill)" />
+                          <Area
+                            type="monotone"
+                            dataKey="profit"
+                            stroke={profitHeat.hex}
+                            strokeWidth={2 + profitHeat.intensity}
+                            fill={`url(#${profitFillId})`}
+                          />
                         </AreaChart>
                       </ResponsiveContainer>
                     ) : (
@@ -422,36 +476,59 @@ export default function ProfitsDashboard({ language = 'en', currency = 'JOD', on
                     <h3 className="text-sm font-bold">{L('ربحية الأصناف', 'Product profitability')}</h3>
                   </div>
 
-                  <div className="bg-emerald-50/60 dark:bg-emerald-900/20 border border-emerald-100 dark:border-emerald-900/40 rounded-xl p-4 space-y-1">
-                    <span className="text-xs font-bold text-emerald-800 dark:text-emerald-300">{L('الأعلى ربحاً', 'Most profitable')}</span>
-                    {productProfitability.best ? (
-                      <div className="flex items-center justify-between gap-3">
-                        <span className="font-semibold text-sm truncate">{productProfitability.best.name}</span>
-                        <span className="text-sm font-black text-emerald-700 dark:text-emerald-300 whitespace-nowrap">
-                          {showMoney(productProfitability.best.profit, selectedCurrency)}
-                        </span>
+                  {(() => {
+                    const bestHeat = signedPercentHeat(productProfitability.best ? 40 : null, productProfitability.best ? 'new' : 'idle');
+                    return (
+                      <div
+                        className="rounded-xl p-4 space-y-1 border"
+                        style={{
+                          borderColor: `color-mix(in srgb, ${bestHeat.hex} 35%, #e2e8f0)`,
+                          background: `color-mix(in srgb, ${bestHeat.hex} ${Math.round(bestHeat.washOpacity * 100)}%, transparent)`,
+                        }}
+                      >
+                        <span className="text-xs font-bold" style={{ color: bestHeat.hex }}>{L('الأعلى ربحاً', 'Most profitable')}</span>
+                        {productProfitability.best ? (
+                          <div className="flex items-center justify-between gap-3">
+                            <span className="font-semibold text-sm truncate">{productProfitability.best.name}</span>
+                            <span className="text-sm font-black whitespace-nowrap" style={{ color: bestHeat.hex }}>
+                              {showMoney(productProfitability.best.profit, selectedCurrency)}
+                            </span>
+                          </div>
+                        ) : (
+                          <p className="text-xs text-slate-400">{L('لا صنف حقق ربحاً في هذه الفترة.', 'No product made a profit in this period.')}</p>
+                        )}
                       </div>
-                    ) : (
-                      <p className="text-xs text-slate-400">{L('لا صنف حقق ربحاً في هذه الفترة.', 'No product made a profit in this period.')}</p>
-                    )}
-                  </div>
+                    );
+                  })()}
 
-                  <div className="bg-orange-50/60 dark:bg-orange-900/20 border border-orange-100 dark:border-orange-900/40 rounded-xl p-4 space-y-1">
-                    <span className="text-xs font-bold text-orange-800 dark:text-orange-300 flex items-center gap-1.5">
-                      <AlertTriangle className="w-3.5 h-3.5" />
-                      {L('الأقل ربحاً', 'Least profitable')}
-                    </span>
-                    {productProfitability.weakest ? (
-                      <div className="flex items-center justify-between gap-3">
-                        <span className="font-semibold text-sm truncate">{productProfitability.weakest.name}</span>
-                        <span className={`text-sm font-black whitespace-nowrap ${productProfitability.weakest.profit < 0 ? 'text-rose-600' : 'text-orange-700 dark:text-orange-300'}`}>
-                          {showMoney(productProfitability.weakest.profit, selectedCurrency)}
+                  {(() => {
+                    const weak = productProfitability.weakest;
+                    const weakHeat = signedPercentHeat(weak ? (weak.profit < 0 ? -40 : -12) : null, weak ? 'flat' : 'idle');
+                    return (
+                      <div
+                        className="rounded-xl p-4 space-y-1 border"
+                        style={{
+                          borderColor: `color-mix(in srgb, ${weakHeat.hex} 35%, #e2e8f0)`,
+                          background: `color-mix(in srgb, ${weakHeat.hex} ${Math.round(weakHeat.washOpacity * 100)}%, transparent)`,
+                        }}
+                      >
+                        <span className="text-xs font-bold flex items-center gap-1.5" style={{ color: weakHeat.hex }}>
+                          <AlertTriangle className="w-3.5 h-3.5" />
+                          {L('الأقل ربحاً', 'Least profitable')}
                         </span>
+                        {weak ? (
+                          <div className="flex items-center justify-between gap-3">
+                            <span className="font-semibold text-sm truncate">{weak.name}</span>
+                            <span className="text-sm font-black whitespace-nowrap" style={{ color: weakHeat.hex }}>
+                              {showMoney(weak.profit, selectedCurrency)}
+                            </span>
+                          </div>
+                        ) : (
+                          <p className="text-xs text-slate-400">{L('يظهر عند بيع صنفين أو أكثر.', 'Shown once two or more products are sold.')}</p>
+                        )}
                       </div>
-                    ) : (
-                      <p className="text-xs text-slate-400">{L('يظهر عند بيع صنفين أو أكثر.', 'Shown once two or more products are sold.')}</p>
-                    )}
-                  </div>
+                    );
+                  })()}
 
                   {productProfitability.list.length > 0 && (
                     <div>
@@ -459,17 +536,23 @@ export default function ProfitsDashboard({ language = 'en', currency = 'JOD', on
                         {L('ترتيب الأصناف حسب مجمل الربح', 'Products by gross profit')}
                       </span>
                       <ol className="space-y-1 max-h-48 overflow-y-auto">
-                        {productProfitability.list.map((item, idx) => (
-                          <li key={`${item.name}-${idx}`} className="flex items-center justify-between gap-3 text-xs py-1 px-1.5 rounded hover:bg-slate-50 dark:hover:bg-gray-700/50">
-                            <span className="truncate">{idx + 1}. {item.name}</span>
-                            <span
-                              className={`font-bold whitespace-nowrap ${item.unknownCost ? 'text-amber-600' : item.profit < 0 ? 'text-rose-600' : ''}`}
-                              title={item.unknownCost ? L('بعض المبيعات بلا سعر تكلفة، فالربح أعلى من الحقيقي', 'Some sales have no cost recorded; profit is overstated') : undefined}
-                            >
-                              {showMoney(item.profit, selectedCurrency)}{item.unknownCost ? ' *' : ''}
-                            </span>
-                          </li>
-                        ))}
+                        {productProfitability.list.map((item, idx) => {
+                          const heat = item.unknownCost
+                            ? signedPercentHeat(-8)
+                            : signedPercentHeat(((Number(item.profit) || 0) / peakProductProfit) * 40);
+                          return (
+                            <li key={`${item.name}-${idx}`} className="flex items-center justify-between gap-3 text-xs py-1 px-1.5 rounded hover:bg-slate-50 dark:hover:bg-gray-700/50">
+                              <span className="truncate">{idx + 1}. {item.name}</span>
+                              <span
+                                className="font-bold whitespace-nowrap"
+                                style={{ color: heat.hex }}
+                                title={item.unknownCost ? L('بعض المبيعات بلا سعر تكلفة، فالربح أعلى من الحقيقي', 'Some sales have no cost recorded; profit is overstated') : undefined}
+                              >
+                                {showMoney(item.profit, selectedCurrency)}{item.unknownCost ? ' *' : ''}
+                              </span>
+                            </li>
+                          );
+                        })}
                       </ol>
                     </div>
                   )}

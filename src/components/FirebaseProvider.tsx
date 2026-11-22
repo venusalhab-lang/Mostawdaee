@@ -49,6 +49,7 @@ import { setPasswordRecovery } from '../lib/passwordRecovery';
 import { INSUFFICIENT_VAULT_FUNDS, applyVaultDelta, buildVaultDoc, planInvoiceVaultEntry, readVaultBalances, roundForCurrency } from '../lib/vaultMath';
 import { salePayment } from '../lib/salesPayment';
 import { checkManualArIncrease, formatManualArNote } from '../lib/customerLedger';
+import { canDeleteWarehouse, deleteBlockers } from '../lib/warehouses';
 
 // Recursively strips any properties with 'undefined' values, since Firestore errors if passed 'undefined'.
 export const PRODUCT_NOT_FOUND = 'Product not found';
@@ -3192,10 +3193,20 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   const deleteWarehouse = async (id: string) => {
     if (!user) throw guestWriteBlocked();
+    const ar = settings?.defaultLanguage !== 'en';
+    const blockers = deleteBlockers(id, warehouses, products);
+    if (!canDeleteWarehouse(blockers)) {
+      throw Object.assign(
+        new Error(ar
+          ? 'لا يمكن حذف المستودع وفيه فروع أو أصناف مسجّلة. انقل البضاعة أو أزل الربط أولاً.'
+          : 'Cannot delete a warehouse that still has branches or assigned items. Move stock or clear assignments first.'),
+        { code: 'warehouse-not-empty', notified: false },
+      );
+    }
     const wh = warehouses.find(w => w.id === id);
     const whName = wh ? wh.name : id;
-    const finalLabel = settings?.defaultLanguage === 'ar' ? 'حذف مستودع' : 'Delete Warehouse';
-    const finalDetails = settings?.defaultLanguage === 'ar'
+    const finalLabel = ar ? 'حذف مستودع' : 'Delete Warehouse';
+    const finalDetails = ar
       ? `تم حذف المستودع: ${whName}`
       : `Warehouse deleted: ${whName}`;
 

@@ -101,6 +101,7 @@ export default function VaultManagement({ language, settings }: Props) {
   const [filterKind, setFilterKind] = useState<'all' | VaultKind>('all');
   const [onlyActiveCurrency, setOnlyActiveCurrency] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [txDetail, setTxDetail] = useState<VaultTransaction | null>(null);
   
   // Dynamic display currency toggle
   const [activeCurrency, setActiveCurrency] = useState<Currency>(VAULT_CURRENCIES.includes(settings.currency as Currency) ? (settings.currency as Currency) : 'JOD');
@@ -695,7 +696,11 @@ export default function VaultManagement({ language, settings }: Props) {
                       key={tx.id}
                       initial={{ opacity: 0 }}
                       animate={{ opacity: 1 }}
-                      className="hover:bg-slate-50/70 dark:hover:bg-white/[0.03] transition-colors"
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => setTxDetail(tx)}
+                      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setTxDetail(tx); } }}
+                      className="hover:bg-slate-50/70 dark:hover:bg-white/[0.03] transition-colors cursor-pointer"
                     >
                       {/* Date */}
                       <td className="px-6 py-4 whitespace-nowrap text-slate-500 dark:text-slate-400 text-xs font-mono">
@@ -932,6 +937,53 @@ export default function VaultManagement({ language, settings }: Props) {
                   {modalType === 'recalibrate' && (isRtl ? 'حفظ تسوية الرصيد' : 'Save balance adjustment')}
                 </button>
               </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {txDetail && (
+          <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-slate-950/45 backdrop-blur-sm" onClick={() => setTxDetail(null)}>
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 12 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 12 }}
+              onClick={(e) => e.stopPropagation()}
+              className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-[2rem] w-full max-w-md shadow-2xl overflow-hidden"
+            >
+              <div className="p-5 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between gap-3">
+                <div>
+                  <h3 className="font-black text-lg text-slate-900 dark:text-white">{isRtl ? 'تفاصيل حركة الخزنة' : 'Vault movement details'}</h3>
+                  <p className="text-[11px] font-mono text-cyan-600 dark:text-cyan-400 mt-0.5" dir="ltr">#TX-{txDetail.id.substring(0, 8).toUpperCase()}</p>
+                </div>
+                <button type="button" onClick={() => setTxDetail(null)} className="p-2 rounded-xl hover:bg-slate-100 dark:hover:bg-white/5 text-slate-400" aria-label={isRtl ? 'إغلاق' : 'Close'}>
+                  <X size={18} />
+                </button>
+              </div>
+              <div className="p-5 space-y-3 text-sm">
+                {[
+                  { label: isRtl ? 'النوع' : 'Type', value: txLabel(txDetail) },
+                  { label: isRtl ? 'الاتجاه' : 'Direction', value: txDetail.type === 'income' ? (isRtl ? 'دخول' : 'In') : (isRtl ? 'خروج' : 'Out') },
+                  { label: isRtl ? 'المبلغ' : 'Amount', value: `${txDetail.type === 'income' ? '+' : '-'}${formatCurrency(txDetail.amount, txDetail.currency)}` },
+                  { label: isRtl ? 'العملة' : 'Currency', value: txDetail.currency || '—' },
+                  { label: isRtl ? 'البيان' : 'Memo', value: txDetail.description || '—' },
+                  { label: isRtl ? 'التاريخ' : 'Date', value: new Date(txDetail.timestamp).toLocaleString(isRtl ? 'ar-EG' : 'en-US') },
+                  { label: isRtl ? 'الرصيد بعد الحركة' : 'Balance after', value: formatCurrency(txDetail.balanceAfter || 0, txDetail.currency) },
+                  ...(txDetail.refId ? [{ label: isRtl ? 'مرجع مرتبط' : 'Linked reference', value: txDetail.refId }] : []),
+                  ...(txDetail.source ? [{ label: isRtl ? 'المصدر' : 'Source', value: String(txDetail.source) }] : []),
+                ].map((row) => (
+                  <div key={row.label} className="flex justify-between gap-4 border-b border-slate-50 dark:border-white/5 pb-2">
+                    <span className="text-xs font-bold text-slate-400 shrink-0">{row.label}</span>
+                    <span className="font-bold text-slate-800 dark:text-slate-100 text-end break-all" dir="auto">{row.value}</span>
+                  </div>
+                ))}
+              </div>
+              <div className="p-4 bg-slate-50 dark:bg-slate-800/40 flex justify-end border-t border-slate-100 dark:border-slate-700">
+                <button type="button" onClick={() => setTxDetail(null)} className="px-5 py-2 text-xs font-bold rounded-xl bg-slate-200 dark:bg-slate-700 text-slate-800 dark:text-slate-200 cursor-pointer">
+                  {isRtl ? 'إغلاق' : 'Close'}
+                </button>
+              </div>
             </motion.div>
           </div>
         )}

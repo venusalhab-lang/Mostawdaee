@@ -20,6 +20,7 @@ import { readVaultBalances } from '../lib/vaultMath';
 import { loadCheques } from '../lib/chequesStore';
 import { OFFLINE_QUEUE_EVENT, belongsToStore, readQueue, type QueuedInvoice } from '../lib/offlineQueue';
 import { requestInventoryIntent } from '../lib/inventoryIntent';
+import { requestScreenSearch } from '../lib/screenSearch';
 import type { Workspace } from '../lib/workspace';
 import type { SellerContext } from '../lib/salesLog';
 import SalesLogCard from './SalesLogCard';
@@ -29,18 +30,22 @@ import {
   asideMoney,
   compareAmounts,
   creditRows,
+  movementHeat,
   outstandingDebts,
   periodWindow,
   recentActivity,
   salesChartSeries,
   salesCount,
   salesPulse,
+  salesPulseGauge,
+  salesPulseHeat,
   salesRows,
   startOfLocalDay,
   stockSnapshot,
   systemMoneyRow,
   vaultIncomeRows,
   type DeskActivity,
+  type HeatStyle,
   type HomeRange,
   type MoneyRow,
   type SalesChartPoint,
@@ -91,16 +96,6 @@ function Delta({ current, previous, isRtl }: { current: number; previous: number
   return <span className={`text-xs font-bold ${tone}`}>{label}</span>;
 }
 
-const PULSE_STYLE: Record<SalesPulseTone, { bar: string; text: string }> = {
-  'strong-up': { bar: 'bg-emerald-500', text: 'text-emerald-700 dark:text-emerald-300' },
-  up: { bar: 'bg-emerald-400', text: 'text-emerald-700 dark:text-emerald-300' },
-  flat: { bar: 'bg-slate-300 dark:bg-slate-600', text: 'text-slate-600 dark:text-slate-300' },
-  down: { bar: 'bg-amber-500', text: 'text-amber-700 dark:text-amber-300' },
-  'strong-down': { bar: 'bg-rose-500', text: 'text-rose-700 dark:text-rose-300' },
-  idle: { bar: 'bg-slate-200 dark:bg-slate-700', text: 'text-slate-500 dark:text-slate-400' },
-  new: { bar: 'bg-sky-500', text: 'text-sky-700 dark:text-sky-300' },
-};
-
 function pulseWord(tone: SalesPulseTone, isRtl: boolean): string {
   const ar: Record<SalesPulseTone, string> = {
     'strong-up': 'ارتفاع واضح',
@@ -123,11 +118,100 @@ function pulseWord(tone: SalesPulseTone, isRtl: boolean): string {
   return (isRtl ? ar : en)[tone];
 }
 
-function PulseDelta({ tone, percent, isRtl }: { tone: SalesPulseTone; percent: number | null; isRtl: boolean }) {
+function PulseDelta({ tone, percent, heat, isRtl }: { tone: SalesPulseTone; percent: number | null; heat: HeatStyle; isRtl: boolean }) {
   const label = percent === null
     ? pulseWord(tone, isRtl)
     : `${percent > 0 ? '+' : ''}${percent}% · ${pulseWord(tone, isRtl)}`;
-  return <span className={`text-xs font-bold ${PULSE_STYLE[tone].text}`}>{label}</span>;
+  return <span className="text-xs font-bold" style={{ color: heat.hex }}>{label}</span>;
+}
+
+/** Real sales pulse dial: needle from live % change, arc heat from sales/movement intensity. */
+function SalesPulseMeter({
+  tone,
+  percent,
+  heat,
+  moveHeat,
+  saleCount,
+  previousSaleCount,
+  isRtl,
+}: {
+  tone: SalesPulseTone;
+  percent: number | null;
+  heat: HeatStyle;
+  moveHeat: HeatStyle;
+  saleCount: number;
+  previousSaleCount: number;
+  isRtl: boolean;
+}) {
+  const gauge = salesPulseGauge(percent);
+  const cx = 60;
+  const cy = 58;
+  const r = 42;
+  const needleLen = 34;
+  const rad = gauge.placed && gauge.angleDeg != null ? (gauge.angleDeg * Math.PI) / 180 : null;
+  const nx = rad != null ? cx + needleLen * Math.cos(rad) : cx;
+  const ny = rad != null ? cy + needleLen * Math.sin(rad) : cy - needleLen;
+  const fillPct = Math.round(heat.intensity * 100);
+  const movePct = Math.round(moveHeat.intensity * 100);
+  const moveLabel = previousSaleCount === 0 && saleCount === 0
+    ? (isRtl ? 'لا حركة' : 'No traffic')
+    : previousSaleCount === 0
+      ? (isRtl ? `${saleCount} عملية جديدة` : `${saleCount} new sales`)
+      : (isRtl
+        ? `الحركة ${saleCount} مقابل ${previousSaleCount}`
+        : `Traffic ${saleCount} vs ${previousSaleCount}`);
+
+  return (
+    <div
+      className="mt-4 rounded-2xl border border-slate-100 dark:border-white/10 p-3 space-y-3"
+      style={{ background: `color-mix(in srgb, ${heat.hex} ${Math.round(heat.washOpacity * 100)}%, transparent)` }}
+    >
+      <div className="flex items-center gap-3">
+        <svg width="120" height="72" viewBox="0 0 120 72" aria-hidden="true" className="shrink-0">
+          <path d="M18 58 A42 42 0 1 1 102 58" fill="none" stroke="#e2e8f0" strokeWidth="8" strokeLinecap="round" />
+          <path
+            d="M18 58 A42 42 0 1 1 102 58"
+            fill="none"
+            stroke={heat.hex}
+            strokeWidth="8"
+            strokeLinecap="round"
+            strokeOpacity={0.25 + heat.intensity * 0.55}
+            pathLength={100}
+            strokeDasharray={`${Math.max(8, fillPct)} ${100 - Math.max(8, fillPct)}`}
+            strokeDashoffset={50}
+          />
+          {gauge.placed && (
+            <line x1={cx} y1={cy} x2={nx} y2={ny} stroke={heat.hex} strokeWidth="2.5" strokeLinecap="round" />
+          )}
+          <circle cx={cx} cy={cy} r="4" fill={heat.hex} />
+        </svg>
+        <div className="min-w-0 flex-1 space-y-1.5">
+          <div className="text-[11px] font-black uppercase tracking-wider text-slate-400">
+            {isRtl ? 'مؤشر المبيعات' : 'Sales pulse'}
+          </div>
+          <PulseDelta tone={tone} percent={percent} heat={heat} isRtl={isRtl} />
+          <div className="h-1.5 rounded-full bg-slate-100 dark:bg-white/10 overflow-hidden">
+            <div
+              className="h-full rounded-full transition-[width] duration-500"
+              style={{ width: `${fillPct}%`, backgroundColor: heat.hex }}
+            />
+          </div>
+        </div>
+      </div>
+      <div className="space-y-1">
+        <div className="flex items-center justify-between gap-2 text-[11px] font-bold">
+          <span className="text-slate-400">{isRtl ? 'حدة الحركة' : 'Traffic heat'}</span>
+          <span style={{ color: moveHeat.hex }}>{moveLabel}</span>
+        </div>
+        <div className="h-1 rounded-full bg-slate-100 dark:bg-white/10 overflow-hidden">
+          <div
+            className="h-full rounded-full transition-[width] duration-500"
+            style={{ width: `${movePct}%`, backgroundColor: moveHeat.hex }}
+          />
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function QuickActions({
@@ -164,16 +248,29 @@ function QuickActions({
   );
 }
 
-function MoneyLines({ rows, isRtl, pulse }: { rows: MoneyRow[]; isRtl: boolean; pulse?: { tone: SalesPulseTone; percent: number | null } }) {
+function MoneyLines({
+  rows,
+  isRtl,
+  pulse,
+  heat,
+}: {
+  rows: MoneyRow[];
+  isRtl: boolean;
+  pulse?: { tone: SalesPulseTone; percent: number | null };
+  heat?: HeatStyle;
+}) {
   return (
     <div className="space-y-2">
       {rows.map((row, index) => (
         <div key={row.currency} className="flex items-baseline gap-3">
-          <div className={index === 0 ? 'text-2xl font-black font-mono tracking-tight' : 'text-sm font-bold font-mono'}>
+          <div
+            className={index === 0 ? 'text-2xl font-black font-mono tracking-tight' : 'text-sm font-bold font-mono'}
+            style={index === 0 && heat ? { color: heat.hex } : undefined}
+          >
             {money(row.current, row.currency, isRtl)}
           </div>
-          {pulse
-            ? <PulseDelta tone={pulse.tone} percent={pulse.percent} isRtl={isRtl} />
+          {pulse && heat
+            ? <PulseDelta tone={pulse.tone} percent={pulse.percent} heat={heat} isRtl={isRtl} />
             : <Delta current={row.current} previous={row.previous} isRtl={isRtl} />}
         </div>
       ))}
@@ -189,6 +286,7 @@ function SalesChart({
   isRtl,
   currentLabel,
   previousLabel,
+  heat,
 }: {
   points: SalesChartPoint[];
   currency: string;
@@ -197,6 +295,7 @@ function SalesChart({
   isRtl: boolean;
   currentLabel: string;
   previousLabel: string;
+  heat: HeatStyle;
 }) {
   const todayStart = startOfLocalDay(today);
   const byWeekday = points.length <= 8;
@@ -211,6 +310,8 @@ function SalesChart({
   const periodTotal = roundMoney(points.reduce((sum, point) => sum + point.amount, 0), currency);
   const hasSales = points.some((point) => point.amount > 0);
   const hasPrevious = points.some((point) => point.previous > 0);
+  const stroke = heat.hex;
+  const fillId = 'homeSalesFillHeat';
 
   return (
     <div className="space-y-3" dir="ltr">
@@ -218,9 +319,9 @@ function SalesChart({
         <ResponsiveContainer width="100%" height="100%">
           <ComposedChart data={data} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
             <defs>
-              <linearGradient id="homeSalesFill" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor="#4f46e5" stopOpacity={0.28} />
-                <stop offset="100%" stopColor="#4f46e5" stopOpacity={0} />
+              <linearGradient id={fillId} x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor={stroke} stopOpacity={0.18 + heat.intensity * 0.22} />
+                <stop offset="100%" stopColor={stroke} stopOpacity={0} />
               </linearGradient>
             </defs>
             <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
@@ -239,7 +340,7 @@ function SalesChart({
               tickFormatter={(value: number) => (value === 0 ? '0' : String(value))}
             />
             <Tooltip
-              cursor={{ stroke: '#818cf8', strokeWidth: 1, strokeDasharray: '4 4' }}
+              cursor={{ stroke, strokeWidth: 1, strokeDasharray: '4 4' }}
               content={({ active, payload }) => {
                 if (!active || !payload?.length) return null;
                 const row = payload[0]?.payload as typeof data[number] | undefined;
@@ -249,7 +350,7 @@ function SalesChart({
                     <div className="font-bold text-slate-700 dark:text-slate-200">
                       {row.full}{row.isToday ? (isRtl ? ' · اليوم' : ' · Today') : ''}
                     </div>
-                    <div className="flex items-center justify-between gap-6 font-mono font-bold text-indigo-700 dark:text-indigo-300">
+                    <div className="flex items-center justify-between gap-6 font-mono font-bold" style={{ color: stroke }}>
                       <span className="font-sans font-semibold text-slate-500">{currentLabel}</span>
                       <span dir="auto">{row.amount > 0 ? money(row.amount, currency, isRtl) : (isRtl ? 'لا مبيعات' : 'No sales')}</span>
                     </div>
@@ -280,10 +381,10 @@ function SalesChart({
               type="monotone"
               dataKey="amount"
               name={currentLabel}
-              stroke="#4f46e5"
-              strokeWidth={2.25}
-              fill="url(#homeSalesFill)"
-              activeDot={{ r: 5, fill: '#4f46e5', stroke: '#fff', strokeWidth: 2 }}
+              stroke={stroke}
+              strokeWidth={2 + heat.intensity}
+              fill={`url(#${fillId})`}
+              activeDot={{ r: 5, fill: stroke, stroke: '#fff', strokeWidth: 2 }}
               isAnimationActive={false}
             />
           </ComposedChart>
@@ -292,7 +393,7 @@ function SalesChart({
       <div className="flex flex-wrap items-center justify-between gap-2 text-xs" dir={isRtl ? 'rtl' : 'ltr'}>
         <div className="flex flex-wrap items-center gap-3 text-slate-500">
           <span className="inline-flex items-center gap-1.5">
-            <span className="h-2 w-2 rounded-full bg-indigo-600" />
+            <span className="h-2 w-2 rounded-full" style={{ backgroundColor: stroke }} />
             {currentLabel}
           </span>
           {hasPrevious && (
@@ -515,8 +616,10 @@ export default function HomeDesk({ language, settings }: Props) {
     const income = vaultIncomeRows(vaultTransactions, storeCurrency);
     const saleRow = systemMoneyRow(sales, storeCurrency, window.start, window.end, window.previousStart, window.previousEnd);
     const pulse = salesPulse(saleRow.current, saleRow.previous);
+    const pulseHeat = salesPulseHeat(pulse.tone, pulse.percent);
     const saleCount = salesCount(sales, storeCurrency, window.start, window.end);
     const previousSaleCount = salesCount(sales, storeCurrency, window.previousStart, window.previousEnd);
+    const trafficHeat = movementHeat(saleCount, previousSaleCount);
     const incomeRow = systemMoneyRow(income, storeCurrency, window.start, window.end, window.previousStart, window.previousEnd);
     const creditInSystem = amountInCurrency(credit, storeCurrency, window.start, window.end);
     const saleAside = asideMoney(sales, storeCurrency, window.start, window.end, storeCurrency);
@@ -528,6 +631,8 @@ export default function HomeDesk({ language, settings }: Props) {
     return {
       saleRow,
       pulse,
+      pulseHeat,
+      trafficHeat,
       saleCount,
       previousSaleCount,
       incomeRow,
@@ -703,9 +808,24 @@ export default function HomeDesk({ language, settings }: Props) {
       {(tasks.length > 0 || !isNewStore) && <TodayTasks tasks={tasks} isRtl={isRtl} />}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <section className="rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-white/10 p-5">
+        <section
+          className="rounded-3xl bg-white dark:bg-slate-900 border p-5"
+          style={{
+            borderColor: `color-mix(in srgb, ${desk.pulseHeat.hex} ${35 + Math.round(desk.pulseHeat.intensity * 40)}%, ${isRtl ? '#e2e8f0' : '#e2e8f0'})`,
+            boxShadow: `inset 0 0 0 1px color-mix(in srgb, ${desk.pulseHeat.hex} ${Math.round(desk.pulseHeat.washOpacity * 100)}%, transparent)`,
+          }}
+        >
           <div className="text-xs font-bold text-slate-400 mb-3">{copy.sales}</div>
-          <MoneyLines rows={[desk.saleRow]} isRtl={isRtl} pulse={desk.pulse} />
+          <MoneyLines rows={[desk.saleRow]} isRtl={isRtl} pulse={desk.pulse} heat={desk.pulseHeat} />
+          <SalesPulseMeter
+            tone={desk.pulse.tone}
+            percent={desk.pulse.percent}
+            heat={desk.pulseHeat}
+            moveHeat={desk.trafficHeat}
+            saleCount={desk.saleCount}
+            previousSaleCount={desk.previousSaleCount}
+            isRtl={isRtl}
+          />
           <p className="text-xs text-slate-400 mt-3">{copy.compare}</p>
           {(desk.saleCount > 0 || desk.previousSaleCount > 0) && (
             <p className="text-xs text-slate-400 mt-1">
@@ -805,7 +925,12 @@ export default function HomeDesk({ language, settings }: Props) {
       </div>
 
       {!isNewStore && (
-        <section className="rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-white/10 p-5">
+        <section
+          className="rounded-3xl bg-white dark:bg-slate-900 border p-5"
+          style={{
+            borderColor: `color-mix(in srgb, ${desk.pulseHeat.hex} 30%, #e2e8f0)`,
+          }}
+        >
           <div className="text-xs font-bold text-slate-400 mb-3">{copy.chart}</div>
           <SalesChart
             points={desk.points}
@@ -815,6 +940,7 @@ export default function HomeDesk({ language, settings }: Props) {
             isRtl={isRtl}
             currentLabel={copy.chartCurrent}
             previousLabel={copy.chartPrevious}
+            heat={desk.pulseHeat}
           />
         </section>
       )}
@@ -840,7 +966,16 @@ export default function HomeDesk({ language, settings }: Props) {
               <button
                 key={item.id}
                 type="button"
-                onClick={() => openScreen(item.screen)}
+                onClick={() => {
+                  if (item.screen === 'invoices' && item.recordId) {
+                    requestScreenSearch({
+                      screen: 'invoices',
+                      query: item.recordQuery || item.detail || item.recordId,
+                      recordId: item.recordId,
+                    });
+                  }
+                  openScreen(item.screen);
+                }}
                 className="w-full py-2.5 flex items-center justify-between gap-3 text-start"
               >
                 <div className="min-w-0">

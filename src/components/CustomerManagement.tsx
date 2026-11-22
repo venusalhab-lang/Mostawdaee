@@ -842,14 +842,19 @@ export default function CustomerManagement({ language, settings }: Props) {
 
                   {/* Header: ID & Actions Panel */}
                   <div className="flex justify-between items-start mb-4">
-                    <div className="space-y-0.5">
+                    <button
+                      type="button"
+                      onClick={() => openStatement(customer)}
+                      className="space-y-0.5 text-start min-w-0 flex-1 cursor-pointer rounded-xl -ms-1 ps-1 hover:bg-slate-50/80 dark:hover:bg-white/[0.03] transition-colors"
+                      title={isRtl ? 'فتح كشف الحساب' : 'Open statement'}
+                    >
                       <span className="text-[9px] font-mono tracking-widest text-[#00D2FF] font-black uppercase">
                         #{customer.customerId}
                       </span>
                       <h3 className="text-lg font-black text-gray-900 dark:text-white group-hover:text-indigo-600 transition-colors">
                         {customer.name}
                       </h3>
-                    </div>
+                    </button>
 
                     {/* Edit & Purge handles */}
                     <div className="flex gap-1 transition-all [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100 [@media(hover:hover)]:group-focus-within:opacity-100">
@@ -872,8 +877,14 @@ export default function CustomerManagement({ language, settings }: Props) {
                     </div>
                   </div>
 
-                  {/* Body Info */}
-                  <div className="space-y-4 py-2 border-t border-b border-gray-50 dark:border-gray-700/50 my-2">
+                  {/* Body Info — tap opens statement */}
+                  <div
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => openStatement(customer)}
+                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openStatement(customer); } }}
+                    className="space-y-4 py-2 border-t border-b border-gray-50 dark:border-gray-700/50 my-2 text-start w-full cursor-pointer hover:bg-slate-50/50 dark:hover:bg-white/[0.02] rounded-xl transition-colors"
+                  >
                     
                     {/* Phone Number / WhatsApp key */}
                     <div className="flex items-center justify-between">
@@ -885,7 +896,8 @@ export default function CustomerManagement({ language, settings }: Props) {
                         
                         {/* WhatsApp Instant Trigger Button */}
                         <button 
-                          onClick={() => handleOpenMessenger(customer)}
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); handleOpenMessenger(customer); }}
                           className="p-1.5 bg-emerald-50 dark:bg-emerald-950/30 text-emerald-600 dark:text-emerald-400 rounded-md hover:scale-105 active:scale-95 transition-all text-[11px] cursor-pointer"
                           title={t.sendMessage} aria-label={t.sendMessage}
                         >

@@ -72,6 +72,9 @@ export interface DeskActivity {
   currency: string;
   timestamp: number;
   screen: 'invoices' | 'inventory-audit' | 'vault';
+  /** When set, HomeDesk opens this record (e.g. invoice id) instead of only the list screen. */
+  recordId?: string;
+  recordQuery?: string;
 }
 
 export function startOfLocalDay(ts: number): number {
@@ -194,6 +197,89 @@ export function salesPulse(current: number, previous: number): SalesPulse {
   if (percent > 0) return { tone: 'up', percent };
   if (percent <= -SALES_PULSE_MATERIAL_PERCENT) return { tone: 'strong-down', percent };
   return { tone: 'down', percent };
+}
+
+/** |percent| of this size reaches full color intensity on the sales/profit heat scale. */
+export const HEAT_FULL_PERCENT = 40;
+
+export interface HeatStyle {
+  /** Solid stroke / text color. */
+  hex: string;
+  /** 0–1 how hard the move is (drives opacity and bar fill). */
+  intensity: number;
+  /** Soft card tint opacity (0.04–0.28). */
+  washOpacity: number;
+}
+
+function clamp01(n: number): number {
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(1, n));
+}
+
+function hsl(h: number, s: number, l: number): string {
+  return `hsl(${Math.round(h)} ${Math.round(s)}% ${Math.round(l)}%)`;
+}
+
+/**
+ * Continuous heat from a signed percent: emerald when up, amber then rose when down.
+ * Intensity scales with |percent| up to HEAT_FULL_PERCENT.
+ */
+export function signedPercentHeat(percent: number | null, fallback: 'idle' | 'new' | 'flat' = 'flat'): HeatStyle {
+  if (percent === null || !Number.isFinite(percent)) {
+    if (fallback === 'new') {
+      return { hex: hsl(199, 84, 42), intensity: 0.55, washOpacity: 0.12 };
+    }
+    if (fallback === 'idle') {
+      return { hex: hsl(215, 16, 55), intensity: 0.15, washOpacity: 0.05 };
+    }
+    return { hex: hsl(215, 14, 52), intensity: 0.2, washOpacity: 0.06 };
+  }
+  if (percent === 0) {
+    return { hex: hsl(215, 14, 52), intensity: 0.2, washOpacity: 0.06 };
+  }
+  const intensity = clamp01(Math.abs(percent) / HEAT_FULL_PERCENT);
+  const washOpacity = 0.06 + intensity * 0.22;
+  if (percent > 0) {
+    // Soft mint → deep emerald as the rise strengthens.
+    const lightness = 46 - intensity * 12;
+    return { hex: hsl(152, 70 + intensity * 10, lightness), intensity, washOpacity };
+  }
+  // Limited drop = amber; clear drop shifts toward rose.
+  if (percent > -SALES_PULSE_MATERIAL_PERCENT) {
+    const lightness = 48 - intensity * 8;
+    return { hex: hsl(38, 88, lightness), intensity, washOpacity };
+  }
+  const lightness = 48 - intensity * 10;
+  return { hex: hsl(350, 78, lightness), intensity, washOpacity };
+}
+
+/** Sales pulse heat — uses the real pulse percent when present, otherwise tone fallbacks. */
+export function salesPulseHeat(tone: SalesPulseTone, percent: number | null): HeatStyle {
+  if (tone === 'idle') return signedPercentHeat(null, 'idle');
+  if (tone === 'new') return signedPercentHeat(null, 'new');
+  if (tone === 'flat') return signedPercentHeat(0);
+  return signedPercentHeat(percent);
+}
+
+/**
+ * Gross-profit margin heat for the profits screen.
+ * Positive margin → emerald intensity; negative → rose. Idle when there is no sales activity.
+ */
+export function profitMarginHeat(marginPercent: number, hasSales: boolean): HeatStyle {
+  if (!hasSales) return signedPercentHeat(null, 'idle');
+  const m = Number.isFinite(marginPercent) ? marginPercent : 0;
+  // Map typical retail margins (±40%) onto the same intensity scale as sales %.
+  return signedPercentHeat(m);
+}
+
+/** Movement heat from sale-count change (traffic), independent of revenue amount. */
+export function movementHeat(currentCount: number, previousCount: number): HeatStyle {
+  const c = Math.max(0, Math.floor(Number(currentCount) || 0));
+  const p = Math.max(0, Math.floor(Number(previousCount) || 0));
+  if (c === 0 && p === 0) return signedPercentHeat(null, 'idle');
+  if (p === 0) return signedPercentHeat(null, 'new');
+  const percent = Math.round(((c - p) / p) * 100);
+  return signedPercentHeat(percent);
 }
 
 /** Non-zero sale rows already denominated in one currency. */
@@ -441,6 +527,8 @@ export function recentActivity(
     currency: invoice.currency || fallbackCurrency,
     timestamp: Number(invoice.date) || 0,
     screen: 'invoices',
+    recordId: invoice.id,
+    recordQuery: invoice.invoiceNumber || invoice.id,
   }));
 
   const fromVault: DeskActivity[] = vault

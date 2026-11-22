@@ -38,6 +38,7 @@ import {
   type TransferError,
   type WarehouseInputError,
 } from '../lib/warehouses';
+import { requestScreenSearch } from '../lib/screenSearch';
 
 interface Props {
   language: Language;
@@ -81,6 +82,7 @@ export default function WarehouseManagement({ language, settings }: Props) {
   const [deleting, setDeleting] = useState<Warehouse | null>(null);
   const [detailId, setDetailId] = useState<string | null>(null);
   const [detailSearch, setDetailSearch] = useState('');
+  const [productDetailId, setProductDetailId] = useState<string | null>(null);
   const [transfer, setTransfer] = useState<TransferState | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -560,10 +562,14 @@ export default function WarehouseManagement({ language, settings }: Props) {
                     const cost = Number(p.unitCost ?? p.costPrice) || 0;
                     return (
                       <li key={p.id} className="flex items-center justify-between gap-3 px-3 py-2.5">
-                        <div className="min-w-0">
+                        <button
+                          type="button"
+                          onClick={() => setProductDetailId(p.id)}
+                          className="min-w-0 flex-1 text-start rounded-lg hover:bg-slate-50 dark:hover:bg-white/[0.03] -ms-1 ps-1 py-0.5 transition-colors cursor-pointer"
+                        >
                           <div className="font-bold truncate">{p.name}</div>
                           <div className="text-[11px] font-mono text-slate-400 truncate" dir="ltr">{p.sku || '—'}</div>
-                        </div>
+                        </button>
                         <div className="text-end shrink-0">
                           <div className={`font-black tabular-nums ${qty > 0 ? 'text-slate-900 dark:text-white' : 'text-slate-300 dark:text-slate-600'}`}>{qtyText(qty)}</div>
                           <div className="text-[11px] text-slate-400 tabular-nums">
@@ -813,6 +819,61 @@ export default function WarehouseManagement({ language, settings }: Props) {
           </div>
         </form>
       ), isRtl ? 'نقل مخزون' : 'Transfer stock')}
+
+      {productDetailId && (() => {
+        const p = products.find((x) => x.id === productDetailId);
+        if (!p) return null;
+        const qty = Number(p.quantity) || 0;
+        const cost = Number(p.unitCost ?? p.costPrice) || 0;
+        const sell = Number(p.sellingPrice) || 0;
+        const whName = nameOf(locationOf(p));
+        const rows = [
+          { label: isRtl ? 'الباركود / SKU' : 'Barcode / SKU', value: p.sku || '—' },
+          { label: isRtl ? 'التصنيف' : 'Category', value: p.category || (isRtl ? 'عام' : 'General') },
+          { label: isRtl ? 'المستودع' : 'Warehouse', value: whName },
+          { label: isRtl ? 'الكمية' : 'Quantity', value: qtyText(qty) },
+          { label: isRtl ? 'تكلفة الوحدة' : 'Unit cost', value: cost > 0 ? formatMoney(cost, p.currency || defaultCurrency) : (isRtl ? 'بلا تكلفة' : 'No cost') },
+          { label: isRtl ? 'سعر البيع' : 'Selling price', value: sell > 0 ? formatMoney(sell, p.currency || defaultCurrency) : '—' },
+          { label: isRtl ? 'قيمة الرصيد بالتكلفة' : 'Stock value at cost', value: qty > 0 && cost > 0 ? formatMoney(roundQty(qty) * cost, p.currency || defaultCurrency) : '—' },
+        ];
+        return modal(() => setProductDetailId(null), (
+          <>
+            {modalHeader(p.name, () => setProductDetailId(null))}
+            <div className="space-y-2.5">
+              {rows.map((row) => (
+                <div key={row.label} className="flex justify-between gap-3 border-b border-slate-50 dark:border-white/5 pb-2">
+                  <span className="text-xs font-bold text-slate-400 shrink-0">{row.label}</span>
+                  <span className="text-sm font-bold text-slate-800 dark:text-slate-100 text-end break-all" dir="auto">{row.value}</span>
+                </div>
+              ))}
+            </div>
+            <div className="flex flex-wrap gap-2 justify-end pt-2">
+              {qty > 0 && detailId !== null && (
+                <button
+                  type="button"
+                  onClick={() => { setProductDetailId(null); openTransfer(detailId, p.id); }}
+                  className="rounded-xl border border-slate-200 dark:border-white/10 px-3 py-2 text-xs font-bold inline-flex items-center gap-1.5"
+                >
+                  <ArrowRightLeft size={13} />
+                  {isRtl ? 'نقل هذا الصنف' : 'Transfer this item'}
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => {
+                  setProductDetailId(null);
+                  setDetailId(null);
+                  requestScreenSearch({ screen: 'inventory', query: p.sku || p.name, recordId: p.id });
+                  window.dispatchEvent(new CustomEvent('change-screen', { detail: 'inventory' }));
+                }}
+                className="rounded-xl bg-indigo-600 text-white px-3 py-2 text-xs font-bold"
+              >
+                {isRtl ? 'فتح في المخزون' : 'Open in Inventory'}
+              </button>
+            </div>
+          </>
+        ), isRtl ? 'تفاصيل الصنف' : 'Item details');
+      })()}
     </div>
   );
 }

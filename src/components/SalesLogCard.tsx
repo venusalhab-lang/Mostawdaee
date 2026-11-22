@@ -250,14 +250,27 @@ export default function SalesLogCard({ invoices, range, now, isRtl, storeCurrenc
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-white/5">
                 {lineRows.slice(0, shown).map((line, index) => (
-                  <tr key={`${line.invoiceId}-${index}`}>
+                  <tr
+                    key={`${line.invoiceId}-${index}`}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => openInvoice({ id: line.invoiceId, invoiceNumber: line.invoiceNumber } as Invoice)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        openInvoice({ id: line.invoiceId, invoiceNumber: line.invoiceNumber } as Invoice);
+                      }
+                    }}
+                    className="cursor-pointer hover:bg-slate-50 dark:hover:bg-white/5"
+                    title={isRtl ? 'فتح الفاتورة' : 'Open invoice'}
+                  >
                     <td className="py-2 font-mono text-xs whitespace-nowrap">{whenExact(line.date)}</td>
                     <td className="py-2 font-bold text-xs" dir="auto">{sellerName(line.seller, isRtl)}</td>
                     <td className="py-2 font-bold" dir="auto">{line.description}</td>
                     <td className="py-2 font-mono">{lineQuantityText(line.item, isRtl)}</td>
                     <td className="py-2 font-mono">{money(line.unitPrice, line.currency)}</td>
                     <td className="py-2 font-mono text-end font-bold">{money(line.lineTotal, line.currency)}</td>
-                    <td className="py-2 font-mono text-xs" dir="ltr">#{line.invoiceNumber}</td>
+                    <td className="py-2 font-mono text-xs text-indigo-600 dark:text-indigo-400" dir="ltr">#{line.invoiceNumber}</td>
                   </tr>
                 ))}
               </tbody>

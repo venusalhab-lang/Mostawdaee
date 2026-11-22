@@ -64,7 +64,10 @@ const FIELD_LABEL = 'block text-sm font-bold text-gray-700 dark:text-gray-300';
 const FIELD_INPUT = 'w-full px-4 py-3 bg-gray-50 dark:bg-gray-900 border border-gray-100 dark:border-gray-700 rounded-2xl focus:ring-2 focus:ring-indigo-500 outline-none dark:text-white';
 
 function EmployeeCard({ emp, index, t, isRtl, settings, onEdit, onDelete, onPaySalary, onLongPress }: EmployeeCardProps) {
-  const longPressProps = useLongPress(() => onLongPress(emp));
+  const longPressProps = useLongPress(
+    () => onLongPress(emp),
+    () => onLongPress(emp),
+  );
 
   return (
     <motion.div
