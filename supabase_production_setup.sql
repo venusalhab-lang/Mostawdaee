@@ -1715,6 +1715,45 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION public.support_user_label(p_user UUID)
+RETURNS TEXT
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+    SELECT COALESCE(
+        (
+            SELECT NULLIF(btrim(d.data->>'userName'), '')
+              FROM public.merchant_documents d
+             WHERE d.user_id = p_user
+               AND d.collection = 'settings'
+               AND d.doc_id = 'profile'
+             LIMIT 1
+        ),
+        (
+            SELECT NULLIF(btrim(d.data->>'businessName'), '')
+              FROM public.merchant_documents d
+             WHERE d.user_id = p_user
+               AND d.collection = 'settings'
+               AND d.doc_id = 'profile'
+             LIMIT 1
+        ),
+        (
+            SELECT COALESCE(
+                NULLIF(btrim(u.raw_user_meta_data->>'full_name'), ''),
+                NULLIF(btrim(u.raw_user_meta_data->>'name'), ''),
+                NULLIF(split_part(COALESCE(u.email, ''), '@', 1), '')
+            )
+              FROM auth.users u
+             WHERE u.id = p_user
+             LIMIT 1
+        )
+    );
+$$;
+REVOKE ALL ON FUNCTION public.support_user_label(UUID) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.support_user_label(UUID) TO service_role;
+
 CREATE OR REPLACE FUNCTION public.support_staff_list(p_actor UUID, p_status TEXT)
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -1732,8 +1771,10 @@ BEGIN
             'id', t.id, 'category', t.category, 'subject', t.subject, 'status', t.status,
             'assigned_email', t.assigned_email, 'created_at', t.created_at, 'updated_at', t.updated_at,
             'author_email', (SELECT lower(u.email) FROM auth.users u WHERE u.id = t.author_id),
+            'author_name', public.support_user_label(t.author_id),
             'store_name', public.team_store_name(t.store_owner_id),
             'store_owner_email', (SELECT lower(u.email) FROM auth.users u WHERE u.id = t.store_owner_id),
+            'store_owner_name', public.support_user_label(t.store_owner_id),
             'store_subscription', (SELECT s.subscription_status FROM public.user_subscriptions s WHERE s.user_id = t.store_owner_id),
             'messages', (SELECT count(*) FROM public.support_messages m WHERE m.ticket_id = t.id)
         ) ORDER BY t.ord, t.wait, t.updated_at DESC)
@@ -1769,9 +1810,11 @@ BEGIN
             'assigned_email', t.assigned_email, 'created_at', t.created_at, 'updated_at', t.updated_at,
             'author_id', t.author_id,
             'author_email', (SELECT lower(u.email) FROM auth.users u WHERE u.id = t.author_id),
+            'author_name', public.support_user_label(t.author_id),
             'store_owner_id', t.store_owner_id,
             'store_name', public.team_store_name(t.store_owner_id),
             'store_owner_email', (SELECT lower(u.email) FROM auth.users u WHERE u.id = t.store_owner_id),
+            'store_owner_name', public.support_user_label(t.store_owner_id),
             'store_subscription', (SELECT s.subscription_status FROM public.user_subscriptions s WHERE s.user_id = t.store_owner_id)),
         'messages', COALESCE((
             SELECT jsonb_agg(jsonb_build_object('id', m.id, 'from_staff', m.from_staff, 'staff_email', m.staff_email,

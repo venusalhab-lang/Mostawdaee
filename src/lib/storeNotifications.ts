@@ -16,7 +16,8 @@ export type StoreNoticeKind =
   | 'cheque_soon'
   | 'offline_sales'
   | 'held_bills'
-  | 'subscription_soon';
+  | 'subscription_soon'
+  | 'support_ticket';
 
 export type StoreNoticeSeverity = 'critical' | 'attention' | 'info';
 
@@ -31,7 +32,20 @@ export interface StoreNotice {
   /** Screen id for change-screen navigation when the merchant opens the item. */
   screen?: string;
   count: number;
+  /** Optional deep-link hint (e.g. open admin tickets tab). */
+  intent?: string;
 }
+
+/** Max individual open-ticket rows in the bell (avoids flooding). */
+export const SUPPORT_NOTICE_TICKET_CAP = 5;
+
+export type SupportNoticeTicket = {
+  id: string;
+  subject: string;
+  requesterLabel: string;
+  storeName?: string | null;
+  updatedAt?: string;
+};
 
 export interface StoreNoticesInput {
   products: Array<Pick<Product, 'id' | 'name' | 'quantity' | 'lowStockThreshold' | 'expiryDate' | 'type'>>;
@@ -208,6 +222,46 @@ export function buildStoreNotices(input: StoreNoticesInput): StoreNotice[] {
   }
 
   return out.sort((a, b) => severityRank[a.severity] - severityRank[b.severity] || b.count - a.count);
+}
+
+/**
+ * Platform staff notices for open support tickets — requester name/email in the detail line.
+ * Prepend to merchant desk notices so support work is visible in the same header bell.
+ */
+export function buildSupportTicketNotices(tickets: SupportNoticeTicket[]): StoreNotice[] {
+  const open = (tickets || []).filter((t) => t.id && (t.subject || t.requesterLabel));
+  if (!open.length) return [];
+  const out: StoreNotice[] = [];
+  out.push(notice({
+    id: 'support_open_summary',
+    kind: 'support_ticket',
+    severity: 'critical',
+    titleAr: 'طلبات دعم فني بانتظار الرد',
+    titleEn: 'Support tickets need a reply',
+    detailAr: `${open.length} طلب مفتوح.`,
+    detailEn: `${open.length} open ticket(s).`,
+    screen: 'admin-dashboard',
+    intent: 'tickets',
+    count: open.length,
+  }));
+  for (const ticket of open.slice(0, SUPPORT_NOTICE_TICKET_CAP)) {
+    const who = (ticket.requesterLabel || '').trim() || '—';
+    const store = (ticket.storeName || '').trim();
+    const subject = (ticket.subject || '').trim() || '—';
+    out.push(notice({
+      id: `support_ticket:${ticket.id}`,
+      kind: 'support_ticket',
+      severity: 'attention',
+      titleAr: subject,
+      titleEn: subject,
+      detailAr: store ? `من: ${who} · المتجر: ${store}` : `من: ${who}`,
+      detailEn: store ? `From: ${who} · Store: ${store}` : `From: ${who}`,
+      screen: 'admin-dashboard',
+      intent: 'tickets',
+      count: 1,
+    }));
+  }
+  return out;
 }
 
 export function noticeTitle(notice: StoreNotice, isRtl: boolean): string {

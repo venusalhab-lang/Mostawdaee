@@ -62,6 +62,16 @@ export default function AdminDashboard({ language }: Props) {
     return () => window.clearInterval(id);
   }, []);
 
+  // Header bell → open Support tab when a support notice is tapped.
+  useEffect(() => {
+    const onOpen = (event: Event) => {
+      const detail = (event as CustomEvent<string>).detail;
+      if (detail === 'tickets') setTab('tickets');
+    };
+    window.addEventListener('admin-open-tab', onOpen);
+    return () => window.removeEventListener('admin-open-tab', onOpen);
+  }, []);
+
   if (!platformRoleReady) {
     return (
       <div className={`${opsShell} flex items-center justify-center p-10`} dir={isRtl ? 'rtl' : 'ltr'}>

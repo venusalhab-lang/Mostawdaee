@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Bell, Package, Landmark, CloudOff, PauseCircle, Crown, CalendarClock } from 'lucide-react';
+import { Bell, Package, Landmark, CloudOff, PauseCircle, Crown, CalendarClock, Headset } from 'lucide-react';
 import { useFirebase } from './FirebaseProvider';
 import { belongsToStore, OFFLINE_QUEUE_EVENT, readQueue } from '../lib/offlineQueue';
 import { parkedHeldBills, readHeldBills } from '../lib/heldBills';
@@ -7,12 +7,15 @@ import { loadCheques } from '../lib/chequesStore';
 import { localToday } from '../lib/cheques';
 import {
   buildStoreNotices,
+  buildSupportTicketNotices,
   noticeDetail,
   noticeTitle,
   noticesBadgeCount,
   type StoreNotice,
   type StoreNoticeKind,
 } from '../lib/storeNotifications';
+import { fetchStaffTickets, staffRequesterLabel } from '../lib/adminSubscriptionApi';
+import { staffCan } from '../lib/platformStaff';
 import { sounds } from '../lib/sounds';
 import type { Cheque } from '../types';
 
@@ -38,6 +41,8 @@ function kindIcon(kind: StoreNoticeKind) {
       return PauseCircle;
     case 'subscription_soon':
       return Crown;
+    case 'support_ticket':
+      return Headset;
     default:
       return CalendarClock;
   }
@@ -54,12 +59,14 @@ function severityTone(severity: StoreNotice['severity']): { dot: string; icon: s
 }
 
 export default function NotificationCenter({ isRtl, subscriptionDaysRemaining = null, onNavigate }: Props) {
-  const { products, settings, user, workspace, canOpenScreen } = useFirebase();
+  const { products, settings, user, workspace, canOpenScreen, platformRole } = useFirebase();
   const [open, setOpen] = useState(false);
   const [cheques, setCheques] = useState<Cheque[]>([]);
   const [offlinePending, setOfflinePending] = useState(0);
   const [heldParked, setHeldParked] = useState(0);
+  const [supportNotices, setSupportNotices] = useState<StoreNotice[]>([]);
   const panelRef = useRef<HTMLDivElement>(null);
+  const canAnswerTickets = staffCan(platformRole, 'answer_tickets');
 
   const refreshDevice = () => {
     const uid = user?.uid;
@@ -107,6 +114,39 @@ export default function NotificationCenter({ isRtl, subscriptionDaysRemaining = 
     };
   }, [user?.uid, user?.isAnonymous, open]);
 
+  // Platform staff: poll open support tickets into the same header bell (with requester identity).
+  useEffect(() => {
+    let cancelled = false;
+    if (!canAnswerTickets || !user?.uid || user?.isAnonymous) {
+      setSupportNotices([]);
+      return;
+    }
+    const loadSupport = () => {
+      fetchStaffTickets('open')
+        .then(({ tickets }) => {
+          if (cancelled) return;
+          setSupportNotices(buildSupportTicketNotices(
+            (tickets || []).map((t) => ({
+              id: t.id,
+              subject: t.subject,
+              requesterLabel: staffRequesterLabel(t),
+              storeName: t.store_name,
+              updatedAt: t.updated_at,
+            })),
+          ));
+        })
+        .catch(() => {
+          if (!cancelled) setSupportNotices([]);
+        });
+    };
+    loadSupport();
+    const id = window.setInterval(loadSupport, open ? 20_000 : 60_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [canAnswerTickets, user?.uid, user?.isAnonymous, open]);
+
   useEffect(() => {
     if (!open) return;
     const onDoc = (event: MouseEvent) => {
@@ -124,18 +164,32 @@ export default function NotificationCenter({ isRtl, subscriptionDaysRemaining = 
   }, [open]);
 
   const notices = useMemo(() => {
-    const all = buildStoreNotices({
+    const desk = buildStoreNotices({
       products: products || [],
       lowStockDefault: settings?.lowStockThreshold,
       cheques,
       today: localToday(),
       offlinePending,
       heldParked,
-      subscriptionDaysRemaining,
+      // Platform console accounts should not get merchant subscription noise in the same bell.
+      subscriptionDaysRemaining: canAnswerTickets ? null : subscriptionDaysRemaining,
     });
     // Cashier (and other roles) must only see notices they can open — otherwise the tap looks broken.
-    return all.filter((item) => !item.screen || canOpenScreen(item.screen));
-  }, [products, settings?.lowStockThreshold, cheques, offlinePending, heldParked, subscriptionDaysRemaining, canOpenScreen]);
+    const filteredDesk = desk.filter((item) => !item.screen || canOpenScreen(item.screen));
+    // Staff may open admin-dashboard even when workspace role would hide it.
+    const support = canAnswerTickets ? supportNotices : [];
+    return [...support, ...filteredDesk];
+  }, [
+    products,
+    settings?.lowStockThreshold,
+    cheques,
+    offlinePending,
+    heldParked,
+    subscriptionDaysRemaining,
+    canOpenScreen,
+    canAnswerTickets,
+    supportNotices,
+  ]);
 
   const badge = noticesBadgeCount(notices);
 
@@ -143,6 +197,14 @@ export default function NotificationCenter({ isRtl, subscriptionDaysRemaining = 
     sounds.playClick();
     setOpen(false);
     if (!item.screen) return;
+    if (item.screen === 'admin-dashboard' && canAnswerTickets) {
+      if (item.intent === 'tickets') {
+        window.dispatchEvent(new CustomEvent('admin-open-tab', { detail: 'tickets' }));
+      }
+      if (onNavigate) onNavigate('admin-dashboard');
+      else window.dispatchEvent(new CustomEvent('change-screen', { detail: 'admin-dashboard' }));
+      return;
+    }
     if (!canOpenScreen(item.screen)) return;
     if (onNavigate) onNavigate(item.screen);
     else window.dispatchEvent(new CustomEvent('change-screen', { detail: item.screen }));
@@ -194,9 +256,13 @@ export default function NotificationCenter({ isRtl, subscriptionDaysRemaining = 
                     {isRtl ? 'التنبيهات' : 'Notices'}
                   </h2>
                   <p className="text-[11px] text-slate-500 dark:text-slate-400 font-medium mt-0.5 leading-snug break-words">
-                    {isRtl
-                      ? 'ملخص قابل للتحقق من دفاتر المتجر على هذا الجهاز'
-                      : 'Verifiable summary from this store’s books on this device'}
+                    {canAnswerTickets
+                      ? (isRtl
+                        ? 'ملخص المتجر + طلبات الدعم الفني المفتوحة'
+                        : 'Store summary + open support tickets')
+                      : (isRtl
+                        ? 'ملخص قابل للتحقق من دفاتر المتجر على هذا الجهاز'
+                        : 'Verifiable summary from this store’s books on this device')}
                   </p>
                 </div>
                 <span className="shrink-0 text-[10px] font-bold text-slate-500 dark:text-slate-400 tabular-nums border border-slate-200 dark:border-slate-700 rounded-md px-1.5 py-0.5 bg-white dark:bg-slate-900">

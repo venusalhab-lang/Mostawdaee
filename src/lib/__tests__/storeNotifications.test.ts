@@ -2,10 +2,12 @@ import { describe, expect, it } from 'vitest';
 import type { Cheque, Product } from '../../types';
 import {
   buildStoreNotices,
+  buildSupportTicketNotices,
   EXPIRY_NOTICE_DAYS,
   noticesBadgeCount,
   SUBSCRIPTION_NOTICE_DAYS,
 } from '../storeNotifications';
+import { staffRequesterLabel } from '../adminSubscriptionApi';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const now = Date.UTC(2026, 10, 2, 12, 0, 0); // 2026-11-02
@@ -167,3 +169,39 @@ describe('buildStoreNotices', () => {
     expect(noticesBadgeCount(notices)).toBe(2);
   });
 });
+
+describe('buildSupportTicketNotices', () => {
+  it('includes requester identity and opens the admin tickets tab', () => {
+    const notices = buildSupportTicketNotices([
+      { id: 't1', subject: 'مشكلة مزامنة', requesterLabel: 'أحمد · ahmad@shop.com', storeName: 'متجر النور' },
+    ]);
+    expect(notices[0]).toMatchObject({
+      kind: 'support_ticket',
+      screen: 'admin-dashboard',
+      intent: 'tickets',
+      count: 1,
+    });
+    expect(notices[1].detailAr).toContain('أحمد · ahmad@shop.com');
+    expect(notices[1].detailAr).toContain('متجر النور');
+  });
+
+  it('returns nothing when there are no open tickets', () => {
+    expect(buildSupportTicketNotices([])).toEqual([]);
+  });
+});
+
+describe('staffRequesterLabel', () => {
+  it('prefers name with email when both differ', () => {
+    expect(staffRequesterLabel({
+      author_name: 'سارة',
+      author_email: 'sara@shop.com',
+      store_name: 'متجر',
+    })).toBe('سارة · sara@shop.com');
+  });
+
+  it('falls back to email then store name', () => {
+    expect(staffRequesterLabel({ author_name: null, author_email: 'x@y.com', store_name: 'S' })).toBe('x@y.com');
+    expect(staffRequesterLabel({ author_name: null, author_email: null, store_name: 'S' })).toBe('S');
+  });
+});
+

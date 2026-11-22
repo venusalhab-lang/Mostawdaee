@@ -8,6 +8,7 @@ import {
   fetchStaffTickets,
   replyAsStaff,
   setTicketStatus,
+  staffRequesterLabel,
 } from '../lib/adminSubscriptionApi';
 import { TICKET_BODY_MAX, type TicketStatus, categoryLabel, ticketStatusLabel } from '../lib/supportTickets';
 import {
@@ -123,12 +124,20 @@ export default function AdminSupportInbox({ isRtl }: { isRtl: boolean }) {
             >
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-black text-white truncate">{t.subject}</p>
+                <p className="text-[11px] text-cyan-200/90 mt-0.5 font-bold truncate" title={staffRequesterLabel(t)}>
+                  {isRtl ? 'الطالب: ' : 'From: '}
+                  <span dir="auto">{staffRequesterLabel(t)}</span>
+                </p>
                 <p className="text-[11px] text-slate-500 mt-0.5">
                   <span>{categoryLabel(t.category, isRtl)}</span>
                   <span className="mx-1.5">•</span>
                   <span>{t.store_name || (isRtl ? 'متجر بلا اسم' : 'Unnamed store')}</span>
-                  <span className="mx-1.5">•</span>
-                  <span dir="ltr">{t.author_email}</span>
+                  {t.author_email && t.author_name ? (
+                    <>
+                      <span className="mx-1.5">•</span>
+                      <span dir="ltr">{t.author_email}</span>
+                    </>
+                  ) : null}
                 </p>
               </div>
               <div className="flex items-center gap-2 text-[10px] font-bold">
@@ -230,12 +239,15 @@ function TicketThread({ id, isRtl, onBack }: { id: string; isRtl: boolean; onBac
               {staffStatusLabel(ticket.status, isRtl)}
             </span>
           </div>
-          <dl className="grid grid-cols-1 sm:grid-cols-4 gap-3 text-xs rounded-xl border border-white/[0.06] bg-black/20 p-3">
+          <dl className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs rounded-xl border border-white/[0.06] bg-black/20 p-3">
             <div>
-              <dt className="text-slate-500 font-bold">{isRtl ? 'المرسل' : 'From'}</dt>
-              <dd className="font-black text-slate-200" dir="ltr">
-                {ticket.author_email || '—'}
+              <dt className="text-slate-500 font-bold">{isRtl ? 'طالب الدعم' : 'Requester'}</dt>
+              <dd className="font-black text-cyan-100" dir="auto">
+                {ticket.author_name || staffRequesterLabel(ticket)}
               </dd>
+              {ticket.author_email ? (
+                <dd className="text-[11px] text-slate-400 mt-0.5" dir="ltr">{ticket.author_email}</dd>
+              ) : null}
             </div>
             <div>
               <dt className="text-slate-500 font-bold">{isRtl ? 'المتجر' : 'Store'}</dt>
@@ -243,9 +255,12 @@ function TicketThread({ id, isRtl, onBack }: { id: string; isRtl: boolean; onBac
             </div>
             <div>
               <dt className="text-slate-500 font-bold">{isRtl ? 'مالك المتجر' : 'Store owner'}</dt>
-              <dd className="font-black text-slate-200" dir="ltr">
-                {ticket.store_owner_email || '—'}
+              <dd className="font-black text-slate-200" dir="auto">
+                {ticket.store_owner_name || ticket.store_owner_email || '—'}
               </dd>
+              {ticket.store_owner_email && ticket.store_owner_name ? (
+                <dd className="text-[11px] text-slate-400 mt-0.5" dir="ltr">{ticket.store_owner_email}</dd>
+              ) : null}
             </div>
             <div>
               <dt className="text-slate-500 font-bold">{isRtl ? 'الاشتراك' : 'Subscription'}</dt>

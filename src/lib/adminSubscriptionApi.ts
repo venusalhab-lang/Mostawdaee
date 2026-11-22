@@ -31,10 +31,23 @@ export interface StaffTicket {
   created_at: string;
   updated_at: string;
   author_email: string | null;
+  /** Display name derived server-side (profile / meta / email local-part). */
+  author_name?: string | null;
   store_name: string | null;
   store_owner_email: string | null;
+  store_owner_name?: string | null;
   store_subscription: 'trial' | 'active' | 'expired' | null;
   messages?: number;
+}
+
+/** Prefer name, then email — for staff inbox and notification bell. */
+export function staffRequesterLabel(ticket: Pick<StaffTicket, 'author_name' | 'author_email' | 'store_name'>): string {
+  const name = (ticket.author_name || '').trim();
+  const email = (ticket.author_email || '').trim();
+  if (name && email && name.toLowerCase() !== email.toLowerCase()) return `${name} · ${email}`;
+  if (name) return name;
+  if (email) return email;
+  return (ticket.store_name || '').trim() || '—';
 }
 
 export interface StaffMessage {
