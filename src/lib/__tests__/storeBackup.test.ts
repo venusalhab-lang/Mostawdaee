@@ -1,4 +1,9 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+vi.mock('../../services/supabase', () => ({
+  getSupabaseClient: () => null,
+}));
+
 import {
   BACKUP_APP, BACKUP_SCHEMA_VERSION, assertBackupIntegrity, assertReplaceAllowed, assertVaultRestoreAllowed, backupChecksum, backupCounts, buildStoreBackup, isLegacyTableBackup, isStoreBackup, newerLiveActivity, orphanIds, restoreStoreBackup, stockCsv,
   type RestoreActions,
@@ -117,7 +122,7 @@ describe('store backup', () => {
     expect(notes).toEqual(['note-1']);
     expect(readIncompleteRestore('owner-notes')).toBeNull();
 
-    markRestoreIncomplete('owner-2', 'merge');
+    await markRestoreIncomplete('owner-2', 'merge');
     expect(() => assertRestoreIdle('owner-2')).toThrowError(/did not finish/);
   });
 

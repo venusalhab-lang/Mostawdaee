@@ -557,11 +557,105 @@ END;
 $$;
 REVOKE ALL ON FUNCTION public.assert_role_can_write(TEXT, TEXT, TEXT, TEXT, JSONB, JSONB) FROM PUBLIC, anon, authenticated;
 
+-- Owner-only lock while a backup restore did not finish. Clients have no direct grants; only DEFINER RPCs write.
+CREATE TABLE IF NOT EXISTS public.store_restore_locks (
+    owner_id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+    incomplete_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    mode TEXT NOT NULL CHECK (mode IN ('merge', 'replace'))
+);
+REVOKE ALL ON TABLE public.store_restore_locks FROM PUBLIC, anon, authenticated;
+
+CREATE OR REPLACE FUNCTION public.begin_store_restore(p_mode TEXT DEFAULT 'merge')
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+    actor UUID := auth.uid();
+    uid UUID;
+    locked_mode TEXT := CASE WHEN p_mode = 'replace' THEN 'replace' ELSE 'merge' END;
+BEGIN
+    IF actor IS NULL THEN
+        RAISE EXCEPTION 'not authenticated';
+    END IF;
+    uid := public.workspace_owner();
+    IF public.workspace_role() IS DISTINCT FROM 'owner' OR actor IS DISTINCT FROM uid THEN
+        RAISE EXCEPTION 'role not allowed';
+    END IF;
+    IF NOT public.has_access() THEN
+        RAISE EXCEPTION 'subscription required';
+    END IF;
+    INSERT INTO public.store_restore_locks (owner_id, incomplete_at, mode)
+    VALUES (uid, NOW(), locked_mode)
+    ON CONFLICT (owner_id) DO UPDATE
+       SET incomplete_at = EXCLUDED.incomplete_at,
+           mode = EXCLUDED.mode;
+END;
+$$;
+REVOKE ALL ON FUNCTION public.begin_store_restore(TEXT) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.begin_store_restore(TEXT) TO authenticated;
+
+CREATE OR REPLACE FUNCTION public.clear_store_restore()
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+    actor UUID := auth.uid();
+    uid UUID;
+BEGIN
+    IF actor IS NULL THEN
+        RAISE EXCEPTION 'not authenticated';
+    END IF;
+    uid := public.workspace_owner();
+    IF public.workspace_role() IS DISTINCT FROM 'owner' OR actor IS DISTINCT FROM uid THEN
+        RAISE EXCEPTION 'role not allowed';
+    END IF;
+    DELETE FROM public.store_restore_locks WHERE owner_id = uid;
+END;
+$$;
+REVOKE ALL ON FUNCTION public.clear_store_restore() FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.clear_store_restore() TO authenticated;
+
+CREATE OR REPLACE FUNCTION public.store_restore_incomplete()
+RETURNS JSONB
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+    uid UUID;
+    row_at TIMESTAMPTZ;
+    row_mode TEXT;
+BEGIN
+    IF auth.uid() IS NULL THEN
+        RETURN NULL;
+    END IF;
+    uid := public.workspace_owner();
+    SELECT l.incomplete_at, l.mode INTO row_at, row_mode
+      FROM public.store_restore_locks l WHERE l.owner_id = uid;
+    IF row_at IS NULL THEN
+        RETURN NULL;
+    END IF;
+    RETURN jsonb_build_object(
+        'at', (EXTRACT(EPOCH FROM row_at) * 1000)::bigint,
+        'mode', row_mode
+    );
+END;
+$$;
+REVOKE ALL ON FUNCTION public.store_restore_incomplete() FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.store_restore_incomplete() TO authenticated;
+
 -- Applies a batch atomically. Fails with 'conflict' if any document changed since the caller read it,
 -- so a sale cannot oversell stock or overdraw the vault when two devices write at once.
 -- SECURITY DEFINER because authenticated users have no direct write grant; every row is scoped to the
 -- caller's store (their own, or the owner's for staff) and checked against the caller's role.
-CREATE OR REPLACE FUNCTION public.merchant_commit(p_expected JSONB, p_ops JSONB)
+-- p_mode: 'live' (default) for day-to-day writes; 'restore' only while a store restore is in progress.
+DROP FUNCTION IF EXISTS public.merchant_commit(JSONB, JSONB);
+CREATE OR REPLACE FUNCTION public.merchant_commit(p_expected JSONB, p_ops JSONB, p_mode TEXT DEFAULT 'live')
 RETURNS VOID
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -584,6 +678,8 @@ DECLARE
     bal_key TEXT;
     audit_id TEXT;
     actor_email TEXT;
+    write_mode TEXT := lower(COALESCE(NULLIF(btrim(p_mode), ''), 'live'));
+    restore_locked BOOLEAN := FALSE;
     -- A cashier may lower stock or raise a debt only as far as the sale invoices in the same batch account for.
     cut_qty JSONB := '{}'::jsonb;
     sold_qty JSONB := '{}'::jsonb;
@@ -601,6 +697,18 @@ BEGIN
     member_role := public.workspace_role();
     IF NOT public.has_access() THEN
         RAISE EXCEPTION 'subscription required';
+    END IF;
+    IF write_mode NOT IN ('live', 'restore') THEN
+        RAISE EXCEPTION 'invalid commit mode';
+    END IF;
+    restore_locked := EXISTS (
+        SELECT 1 FROM public.store_restore_locks l WHERE l.owner_id = uid
+    );
+    IF restore_locked AND write_mode <> 'restore' THEN
+        RAISE EXCEPTION 'restore incomplete';
+    END IF;
+    IF write_mode = 'restore' AND member_role IS DISTINCT FROM 'owner' THEN
+        RAISE EXCEPTION 'role not allowed';
     END IF;
 
     PERFORM pg_advisory_xact_lock(hashtext(uid::text)::bigint);
@@ -749,6 +857,21 @@ BEGIN
                     payload := payload || jsonb_build_object('closedById', actor::text, 'closedByEmail', COALESCE(actor_email, ''));
                 END IF;
             END IF;
+            -- Money floors for every role (including owner): refuse negative stock or vault balances.
+            IF col = 'inventory' AND public.jsonb_num(payload, 'quantity') < 0 THEN
+                RAISE EXCEPTION 'negative stock';
+            END IF;
+            IF col = 'settings' AND did = 'vault' THEN
+                FOREACH bal_key IN ARRAY ARRAY[
+                    'currentBalance', 'balanceJOD', 'balanceILS', 'balanceUSD', 'balanceIQD',
+                    'balanceSAR', 'balanceAED', 'balanceLYD', 'balanceEGP'
+                ]
+                LOOP
+                    IF public.jsonb_num(payload, bal_key) < 0 THEN
+                        RAISE EXCEPTION 'vault overdrawn';
+                    END IF;
+                END LOOP;
+            END IF;
             INSERT INTO public.merchant_documents (user_id, collection, doc_id, data, updated_at)
             VALUES (uid, col, did, payload, stamp)
             ON CONFLICT (user_id, collection, doc_id)
@@ -813,8 +936,8 @@ BEGIN
 END;
 $$;
 
-REVOKE ALL ON FUNCTION public.merchant_commit(JSONB, JSONB) FROM PUBLIC, anon;
-GRANT EXECUTE ON FUNCTION public.merchant_commit(JSONB, JSONB) TO authenticated;
+REVOKE ALL ON FUNCTION public.merchant_commit(JSONB, JSONB, TEXT) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.merchant_commit(JSONB, JSONB, TEXT) TO authenticated;
 
 -- ---------------------------------------------------------------------------
 -- 4e. Team functions

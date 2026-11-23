@@ -1,4 +1,9 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+vi.mock('../../services/supabase', () => ({
+  getSupabaseClient: () => null,
+}));
+
 import {
   assertRestoreIdle,
   clearIncompleteRestore,
@@ -19,10 +24,10 @@ describe('restore guard', () => {
     (globalThis as any).localStorage = new MemoryStorage();
   });
 
-  it('blocks sales while a restore is incomplete and clears after success', () => {
+  it('blocks sales while a restore is incomplete and clears after success', async () => {
     expect(readIncompleteRestore('u1')).toBeNull();
     expect(() => assertRestoreIdle('u1')).not.toThrow();
-    markRestoreIncomplete('u1', 'replace', 42);
+    await markRestoreIncomplete('u1', 'replace', 42);
     expect(readIncompleteRestore('u1')).toEqual({ at: 42, mode: 'replace' });
     expect(() => assertRestoreIdle('u1')).toThrowError(/did not finish/);
     try {
@@ -30,7 +35,7 @@ describe('restore guard', () => {
     } catch (error: any) {
       expect(error.code).toBe('restore-incomplete');
     }
-    clearIncompleteRestore('u1');
+    await clearIncompleteRestore('u1');
     expect(readIncompleteRestore('u1')).toBeNull();
     expect(() => assertRestoreIdle('u1')).not.toThrow();
   });

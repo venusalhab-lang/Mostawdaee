@@ -26,6 +26,7 @@ GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role;
 
 export const SQL_FILES = [
   'supabase_production_setup.sql',
+  'supabase_money_floors_restore_lock.sql',
   'supabase_cheques.sql',
   'supabase_inventory_audit.sql',
   'supabase_einvoicing.sql',

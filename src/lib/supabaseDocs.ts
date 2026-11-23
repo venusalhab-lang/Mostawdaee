@@ -101,6 +101,15 @@ function schemaError(error: { message?: string; code?: string; details?: string 
   if (/vault is newer/i.test(text)) {
     return Object.assign(new Error('vault is newer'), { code: 'vault-newer' });
   }
+  if (/restore incomplete/i.test(text)) {
+    return Object.assign(new Error('A previous restore did not finish'), { code: 'restore-incomplete' });
+  }
+  if (/negative stock/i.test(text)) {
+    return Object.assign(new Error('Stock would go negative'), { code: 'negative-stock' });
+  }
+  if (/vault overdrawn/i.test(text)) {
+    return Object.assign(new Error('Insufficient vault funds'), { code: 'vault-insufficient' });
+  }
   if (/einvoice locked/i.test(text)) {
     return Object.assign(new Error('This invoice was accepted by the national e-invoicing system'), { code: 'einvoice-locked' });
   }
@@ -581,6 +590,21 @@ export function onSnapshot(
 /** Hung mobile networks must not leave the POS submit button locked forever. */
 const COMMIT_TIMEOUT_MS = 25_000;
 
+/** While > 0, merchant_commit runs with p_mode=restore so an incomplete-restore lock does not block the restore itself. */
+let restoreCommitDepth = 0;
+
+export function beginRestoreCommitSession(): void {
+  restoreCommitDepth += 1;
+}
+
+export function endRestoreCommitSession(): void {
+  restoreCommitDepth = Math.max(0, restoreCommitDepth - 1);
+}
+
+function commitMode(): 'live' | 'restore' {
+  return restoreCommitDepth > 0 ? 'restore' : 'live';
+}
+
 async function rpcWithTimeout(fn: () => PromiseLike<{ error: any }>): Promise<{ error: any }> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -604,6 +628,7 @@ async function writeOne(ref: DocRef, op: 'set' | 'delete', data?: Record<string,
     ({ error } = await rpcWithTimeout(() => supabase.rpc('merchant_commit', {
       p_expected: [],
       p_ops: [{ op, collection: ref.collection, id: ref.id, data: data ?? null, merge }],
+      p_mode: commitMode(),
     })));
   } catch (err) {
     const wrapped = schemaError(err as { message?: string; code?: string });
@@ -737,7 +762,11 @@ export async function runTransaction(_db: unknown, work: (transaction: any) => P
     if (ops.length === 0) return;
     let error: any;
     try {
-      ({ error } = await rpcWithTimeout(() => supabase.rpc('merchant_commit', { p_expected: expected, p_ops: ops })));
+      ({ error } = await rpcWithTimeout(() => supabase.rpc('merchant_commit', {
+        p_expected: expected,
+        p_ops: ops,
+        p_mode: commitMode(),
+      })));
     } catch (err) {
       const wrapped = schemaError(err as { message?: string; code?: string });
       reportProblem(wrapped);

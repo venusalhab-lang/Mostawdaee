@@ -3,6 +3,7 @@ import type {
   VaultTransaction, Warehouse,
 } from '../types';
 import { clearIncompleteRestore, markRestoreIncomplete } from './restoreGuard';
+import { beginRestoreCommitSession, endRestoreCommitSession } from './supabaseDocs';
 
 export const BACKUP_APP = 'Mostawdaee System';
 export const BACKUP_SCHEMA_VERSION = 1;
@@ -319,7 +320,9 @@ export async function restoreStoreBackup(
   if (mode === 'replace') assertReplaceAllowed(data, live);
 
   const uid = typeof options?.uid === 'string' ? options.uid : '';
-  if (uid) markRestoreIncomplete(uid, mode);
+  if (uid) await markRestoreIncomplete(uid, mode);
+  // Live merchant_commit is blocked by the server lock; restore writes must pass p_mode=restore.
+  beginRestoreCommitSession();
 
   // Sequential writes: any throw aborts the rest and leaves the incomplete flag set.
   // Callers must not toast success on failure. Vault balance is last so a mid-failure
@@ -411,10 +414,12 @@ export async function restoreStoreBackup(
     }
 
     if (data.vault && typeof data.vault === 'object') await actions.restoreVault(data.vault);
-    if (uid) clearIncompleteRestore(uid);
+    if (uid) await clearIncompleteRestore(uid);
   } catch (error) {
     // Incomplete flag stays until a later restore finishes — sales refuse meanwhile.
     throw error;
+  } finally {
+    endRestoreCommitSession();
   }
 }
 
