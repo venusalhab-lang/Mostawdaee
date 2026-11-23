@@ -3,9 +3,18 @@ import { userCacheKey } from './userStorage';
 
 const FLAG = 'restore_incomplete';
 
+export const RESTORE_LOCK_EVENT = 'mostawdaee-restore-lock';
+
 export interface IncompleteRestore {
   at: number;
   mode: 'merge' | 'replace';
+}
+
+function notifyRestoreLock(uid: string): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.dispatchEvent(new CustomEvent(RESTORE_LOCK_EVENT, { detail: { uid } }));
+  } catch { /* EventTarget unavailable */ }
 }
 
 function writeLocal(uid: string, value: IncompleteRestore | null): void {
@@ -14,6 +23,7 @@ function writeLocal(uid: string, value: IncompleteRestore | null): void {
     const key = userCacheKey(uid, FLAG);
     if (!value) localStorage.removeItem(key);
     else localStorage.setItem(key, JSON.stringify(value));
+    notifyRestoreLock(uid);
   } catch { /* quota */ }
 }
 

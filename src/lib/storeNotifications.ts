@@ -184,8 +184,8 @@ export function buildStoreNotices(input: StoreNoticesInput): StoreNotice[] {
       severity: 'critical',
       titleAr: 'مبيعات بانتظار الإرسال',
       titleEn: 'Sales waiting to sync',
-      detailAr: `${offline} عملية بيع محفوظة على هذا الجهاز لم تُرسل بعد.`,
-      detailEn: `${offline} sale(s) saved on this device have not been sent yet.`,
+      detailAr: `${offline} عملية بيع نقدي محفوظة على هذا الجهاز بانتظار المزامنة. ابقَ متصلاً حتى تُرسل.`,
+      detailEn: `${offline} cash sale(s) on this device are waiting to sync. Stay online until they send.`,
       screen: 'pos',
       count: offline,
     }));

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   applyQueuedSalesToProducts,
   applyQueuedSalesToVault,
@@ -6,12 +6,18 @@ import {
   canDeferSaleToQueue,
   canQueueOffline,
   enqueueInvoice,
+  hydrateDurableQueue,
   isOfflineError,
   localSaleShortages,
+  mergeQueueEntries,
   mergeQueuedInvoices,
   mergeQueuedVaultRecords,
+  preferQueuedEntry,
   readQueue,
+  setDurableQueueBackend,
   writeQueue,
+  type DurableQueueBackend,
+  type QueuedInvoice,
 } from '../offlineQueue';
 import { buildVaultDoc } from '../vaultMath';
 import type { Invoice, Product } from '../../types';
@@ -37,6 +43,11 @@ const product = (qty: number): Product => ({
 describe('offline queue', () => {
   beforeEach(() => {
     (globalThis as any).localStorage = new MemoryStorage();
+    setDurableQueueBackend(null);
+  });
+
+  afterEach(() => {
+    setDurableQueueBackend(undefined);
   });
 
   it('treats only connection failures as offline', () => {
@@ -168,5 +179,57 @@ describe('offline queue', () => {
     expect(applyQueuedSalesToProducts([product(10)], queue, 'owner-1', ['synced'])[0].quantity).toBe(9);
     expect(mergeQueuedInvoices([invoice({ id: 'synced' })], queue, 'owner-1').map((i) => i.id).sort())
       .toEqual(['still-offline', 'synced']);
+  });
+
+  it('merges durable and local queue entries by invoice id without dropping either side', () => {
+    const local: QueuedInvoice[] = [{ invoice: invoice({ id: 'a' }), queuedAt: 1, attempts: 0, storeId: 'owner-1' }];
+    const durable: QueuedInvoice[] = [
+      { invoice: invoice({ id: 'a' }), queuedAt: 2, attempts: 2, storeId: 'owner-1' },
+      { invoice: invoice({ id: 'b' }), queuedAt: 3, attempts: 0, storeId: 'owner-1' },
+    ];
+    const merged = mergeQueueEntries(local, durable);
+    expect(merged.map((e) => e.invoice.id).sort()).toEqual(['a', 'b']);
+    expect(preferQueuedEntry(local[0], durable[0]).attempts).toBe(2);
+    expect(merged.find((e) => e.invoice.id === 'a')?.attempts).toBe(2);
+  });
+
+  it('hydrates localStorage from the durable mirror when local is empty', async () => {
+    const durableRows: QueuedInvoice[] = [
+      { invoice: invoice({ id: 'from-disk' }), queuedAt: 9, attempts: 1, storeId: 'owner-1' },
+    ];
+    const backend: DurableQueueBackend = {
+      read: vi.fn(async () => durableRows),
+      write: vi.fn(async () => undefined),
+    };
+    setDurableQueueBackend(backend);
+    expect(readQueue('u1')).toHaveLength(0);
+    const hydrated = await hydrateDurableQueue('u1');
+    expect(hydrated).toHaveLength(1);
+    expect(hydrated[0].invoice.id).toBe('from-disk');
+    expect(readQueue('u1')[0].invoice.id).toBe('from-disk');
+    expect(backend.write).toHaveBeenCalled();
+  });
+
+  it('keeps local sales and adds missing durable ones on hydrate', async () => {
+    enqueueInvoice('u1', invoice({ id: 'local-only' }), 'owner-1');
+    const backend: DurableQueueBackend = {
+      read: vi.fn(async () => [
+        { invoice: invoice({ id: 'disk-only' }), queuedAt: 5, attempts: 0, storeId: 'owner-1' },
+      ]),
+      write: vi.fn(async () => undefined),
+    };
+    setDurableQueueBackend(backend);
+    const hydrated = await hydrateDurableQueue('u1');
+    expect(hydrated.map((e) => e.invoice.id).sort()).toEqual(['disk-only', 'local-only']);
+    expect(readQueue('u1').map((e) => e.invoice.id).sort()).toEqual(['disk-only', 'local-only']);
+  });
+
+  it('mirrors writes through the durable backend after a successful local write', () => {
+    const write = vi.fn(async () => undefined);
+    setDurableQueueBackend({ read: vi.fn(async () => []), write });
+    expect(writeQueue('u1', [{ invoice: invoice(), queuedAt: 1, attempts: 0, storeId: 'o' }])).toBe(true);
+    expect(write).toHaveBeenCalledWith('u1', expect.arrayContaining([
+      expect.objectContaining({ invoice: expect.objectContaining({ id: 'inv-1' }) }),
+    ]));
   });
 });

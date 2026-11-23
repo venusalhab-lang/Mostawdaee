@@ -1,3 +1,5 @@
+import { Capacitor } from '@capacitor/core';
+import { Directory, Encoding, Filesystem } from '@capacitor/filesystem';
 import type { Invoice, Product, VaultTransaction } from '../types';
 import { isAdhocLine } from './adhocLine';
 import { userCacheKey } from './userStorage';
@@ -6,6 +8,8 @@ import { computeStockStatus, roundQty } from './stock';
 import { applyVaultDelta, planInvoiceVaultEntry } from './vaultMath';
 
 export const OFFLINE_QUEUE_EVENT = 'mostawdaee-offline-queue';
+/** Fired when localStorage cannot keep a queued sale (quota / private mode). */
+export const OFFLINE_QUEUE_STORAGE_FULL_EVENT = 'mostawdaee-offline-queue-storage-full';
 
 /** True only for a missing connection. Conflicts, permissions and validation errors are not "offline". */
 export function isOfflineError(error: unknown): boolean {
@@ -57,8 +61,13 @@ export function belongsToStore(entry: Pick<QueuedInvoice, 'storeId'>, ownerId: s
 }
 
 const QUEUE_KEY = 'offline_invoices';
+const DURABLE_DIR = 'offline-queue';
 
-function normalize(entry: unknown): QueuedInvoice | null {
+function durablePath(uid: string): string {
+  return `${DURABLE_DIR}/${uid}.json`;
+}
+
+export function normalizeQueuedEntry(entry: unknown): QueuedInvoice | null {
   const e = entry as Partial<QueuedInvoice> & Partial<Invoice>;
   if (!e || typeof e !== 'object') return null;
   if (e.invoice && typeof e.invoice === 'object' && (e.invoice as Invoice).id) {
@@ -73,6 +82,98 @@ function normalize(entry: unknown): QueuedInvoice | null {
   return null;
 }
 
+/** Prefer the entry that has progressed further (attempts) or was queued later. */
+export function preferQueuedEntry(a: QueuedInvoice, b: QueuedInvoice): QueuedInvoice {
+  if (a.attempts !== b.attempts) return a.attempts >= b.attempts ? a : b;
+  return a.queuedAt >= b.queuedAt ? a : b;
+}
+
+/** Union by invoice id — used when hydrating localStorage from the durable native mirror. */
+export function mergeQueueEntries(local: QueuedInvoice[], durable: QueuedInvoice[]): QueuedInvoice[] {
+  const byId = new Map<string, QueuedInvoice>();
+  for (const entry of local) {
+    if (!entry?.invoice?.id) continue;
+    byId.set(entry.invoice.id, entry);
+  }
+  for (const entry of durable) {
+    if (!entry?.invoice?.id) continue;
+    const prev = byId.get(entry.invoice.id);
+    byId.set(entry.invoice.id, prev ? preferQueuedEntry(prev, entry) : entry);
+  }
+  return Array.from(byId.values()).sort((a, b) => (a.queuedAt || 0) - (b.queuedAt || 0));
+}
+
+export function parseQueuePayload(raw: unknown): QueuedInvoice[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map(normalizeQueuedEntry).filter((x): x is QueuedInvoice => !!x);
+}
+
+function queuesEqual(a: QueuedInvoice[], b: QueuedInvoice[]): boolean {
+  if (a.length !== b.length) return false;
+  const ids = (rows: QueuedInvoice[]) => rows.map((r) => `${r.invoice.id}:${r.attempts}:${r.queuedAt}`).sort().join('|');
+  return ids(a) === ids(b);
+}
+
+/** Test seam / native mirror. Web leaves this null — localStorage only. */
+export interface DurableQueueBackend {
+  read(uid: string): Promise<QueuedInvoice[] | null>;
+  write(uid: string, queue: QueuedInvoice[]): Promise<void>;
+}
+
+let durableBackendOverride: DurableQueueBackend | null | undefined;
+
+/** Inject a backend in tests; pass `null` to force no durable mirror. */
+export function setDurableQueueBackend(backend: DurableQueueBackend | null | undefined): void {
+  durableBackendOverride = backend;
+}
+
+function filesystemDurableBackend(): DurableQueueBackend | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    if (!Capacitor.isNativePlatform()) return null;
+  } catch {
+    return null;
+  }
+  return {
+    async read(uid: string) {
+      try {
+        const file = await Filesystem.readFile({
+          path: durablePath(uid),
+          directory: Directory.Data,
+          encoding: Encoding.UTF8,
+        });
+        const text = typeof file.data === 'string' ? file.data : '';
+        if (!text) return [];
+        return parseQueuePayload(JSON.parse(text));
+      } catch {
+        return null;
+      }
+    },
+    async write(uid: string, queue: QueuedInvoice[]) {
+      try {
+        await Filesystem.mkdir({ path: DURABLE_DIR, directory: Directory.Data, recursive: true });
+      } catch { /* exists */ }
+      if (queue.length === 0) {
+        try {
+          await Filesystem.deleteFile({ path: durablePath(uid), directory: Directory.Data });
+        } catch { /* missing */ }
+        return;
+      }
+      await Filesystem.writeFile({
+        path: durablePath(uid),
+        data: JSON.stringify(queue),
+        directory: Directory.Data,
+        encoding: Encoding.UTF8,
+      });
+    },
+  };
+}
+
+function activeDurableBackend(): DurableQueueBackend | null {
+  if (durableBackendOverride !== undefined) return durableBackendOverride;
+  return filesystemDurableBackend();
+}
+
 function notifyQueueChanged(uid: string) {
   if (typeof window === 'undefined') return;
   try {
@@ -80,25 +181,43 @@ function notifyQueueChanged(uid: string) {
   } catch { /* EventTarget unavailable */ }
 }
 
+function notifyStorageFull(uid: string) {
+  if (typeof window === 'undefined') return;
+  try {
+    window.dispatchEvent(new CustomEvent(OFFLINE_QUEUE_STORAGE_FULL_EVENT, { detail: { uid } }));
+  } catch { /* EventTarget unavailable */ }
+}
+
+function mirrorQueueAsync(uid: string, queue: QueuedInvoice[]): void {
+  const backend = activeDurableBackend();
+  if (!backend || !uid) return;
+  void backend.write(uid, queue).catch(() => undefined);
+}
+
 export function readQueue(uid: string): QueuedInvoice[] {
   if (typeof localStorage === 'undefined' || !uid) return [];
   try {
     const raw = JSON.parse(localStorage.getItem(userCacheKey(uid, QUEUE_KEY)) || '[]');
-    return Array.isArray(raw) ? raw.map(normalize).filter((x): x is QueuedInvoice => !!x) : [];
+    return parseQueuePayload(raw);
   } catch {
     return [];
   }
 }
 
-/** Written synchronously: a sale that was taken must survive a crash or a full storage. */
+/**
+ * Written synchronously to localStorage first (sale must not wait on disk I/O).
+ * On Android, also mirrors to app Data so a wiped WebView storage can recover pending cash sales.
+ */
 export function writeQueue(uid: string, queue: QueuedInvoice[]): boolean {
   if (typeof localStorage === 'undefined' || !uid) return false;
   try {
     if (queue.length === 0) localStorage.removeItem(userCacheKey(uid, QUEUE_KEY));
     else localStorage.setItem(userCacheKey(uid, QUEUE_KEY), JSON.stringify(queue));
     notifyQueueChanged(uid);
+    mirrorQueueAsync(uid, queue);
     return true;
   } catch {
+    notifyStorageFull(uid);
     return false;
   }
 }
@@ -107,6 +226,37 @@ export function enqueueInvoice(uid: string, invoice: Invoice, storeId?: string, 
   const queue = readQueue(uid);
   if (queue.some((q) => q.invoice.id === invoice.id)) return true;
   return writeQueue(uid, [...queue, { invoice, queuedAt: now, attempts: 0, ...(storeId ? { storeId } : {}) }]);
+}
+
+/**
+ * On native: merge durable mirror into localStorage when local is empty or missing sales.
+ * Safe to call on every login; no-op on web without an injected backend.
+ */
+export async function hydrateDurableQueue(uid: string): Promise<QueuedInvoice[]> {
+  if (!uid) return [];
+  const local = readQueue(uid);
+  const backend = activeDurableBackend();
+  if (!backend) return local;
+  let durable: QueuedInvoice[] | null = null;
+  try {
+    durable = await backend.read(uid);
+  } catch {
+    return local;
+  }
+  if (!durable || durable.length === 0) {
+    if (local.length > 0) mirrorQueueAsync(uid, local);
+    return local;
+  }
+  const merged = mergeQueueEntries(local, durable);
+  if (!queuesEqual(merged, local)) {
+    if (!writeQueue(uid, merged)) {
+      // localStorage full — keep returning what we could read so UI still shows risk.
+      return local.length > 0 ? local : durable;
+    }
+  } else if (local.length > 0) {
+    mirrorQueueAsync(uid, local);
+  }
+  return merged;
 }
 
 /** Sales still waiting for this store (or every entry when the owner is not known yet). */

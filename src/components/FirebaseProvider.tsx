@@ -32,6 +32,7 @@ import {
   canDeferSaleToQueue,
   canQueueOffline,
   enqueueInvoice,
+  hydrateDurableQueue,
   isOfflineError,
   localSaleShortages,
   mergeQueuedInvoices,
@@ -40,7 +41,7 @@ import {
   withQueueLock,
   writeQueue,
 } from '../lib/offlineQueue';
-import { assertRestoreIdle } from '../lib/restoreGuard';
+import { assertRestoreIdle, refreshIncompleteRestore } from '../lib/restoreGuard';
 import { type Workspace, currentWorkspace, ensureWorkspace, refreshWorkspace, subscribeWorkspace } from '../lib/workspace';
 import { type WorkspaceAction, can as roleCan, canOpenScreen as roleCanOpenScreen } from '../lib/roles';
 import type { PlatformRole } from '../lib/platformStaff';
@@ -1031,14 +1032,19 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const uid = user.uid;
     lastUidRef.current = uid;
     migrateLegacyUserCache(uid);
-    const bootQueue = readQueue(uid);
-    const bootOwnerId = currentWorkspace()?.ownerId;
-    const bootInvoices = readUserCache<Invoice[]>(uid, 'invoices', []);
-    const bootSyncedIds = bootInvoices.map((inv) => inv.id);
-    syncedInvoiceIdsRef.current = new Set(bootSyncedIds);
+    const applyBootQueue = (bootQueue: QueuedInvoice[]) => {
+      const bootOwnerId = currentWorkspace()?.ownerId;
+      const bootInvoices = readUserCache<Invoice[]>(uid, 'invoices', []);
+      const bootSyncedIds = bootInvoices.map((inv) => inv.id);
+      syncedInvoiceIdsRef.current = new Set(bootSyncedIds);
+      setProducts(applyQueuedSalesToProducts(readUserCache(uid, 'products', []), bootQueue, bootOwnerId, syncedInvoiceIdsRef.current));
+      setInvoices(mergeQueuedInvoices(bootInvoices, bootQueue, bootOwnerId));
+      const bootVault = readUserCache(uid, 'vault', null);
+      setVaultTransactions(mergeQueuedVaultRecords(readUserCache(uid, 'vault_records', []), bootQueue, bootOwnerId, bootVault, syncedInvoiceIdsRef.current));
+      setVault(applyQueuedSalesToVault(bootVault, bootQueue, bootOwnerId, syncedInvoiceIdsRef.current) as Vault | null);
+    };
+    applyBootQueue(readQueue(uid));
     setSettings(readUserCache(uid, 'settings', null));
-    setProducts(applyQueuedSalesToProducts(readUserCache(uid, 'products', []), bootQueue, bootOwnerId, syncedInvoiceIdsRef.current));
-    setInvoices(mergeQueuedInvoices(bootInvoices, bootQueue, bootOwnerId));
     setEmployees(readUserCache(uid, 'employees', []));
     setPayrollRecords(readUserCache(uid, 'payroll', []));
     setCustomers(readUserCache(uid, 'customers', []));
@@ -1048,12 +1054,15 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     setShifts(readUserCache(uid, 'shifts', []));
     setOrders(readUserCache(uid, 'orders', []));
     setStoreNotes(readUserCache(uid, 'store_notes', []));
-    const bootVault = readUserCache(uid, 'vault', null);
-    setVaultTransactions(mergeQueuedVaultRecords(readUserCache(uid, 'vault_records', []), bootQueue, bootOwnerId, bootVault, syncedInvoiceIdsRef.current));
     setWarehouses(readUserCache(uid, 'warehouses', []));
-    setVault(applyQueuedSalesToVault(bootVault, bootQueue, bootOwnerId, syncedInvoiceIdsRef.current) as Vault | null);
     setAuditLogs(readUserCache(uid, 'audit_logs', []).slice(0, 200));
     let isMounted = true;
+    // Recover pending cash sales from the durable native mirror; refresh restore lock from the server.
+    void hydrateDurableQueue(uid).then((hydrated) => {
+      if (!isMounted || lastUidRef.current !== uid) return;
+      applyBootQueue(hydrated);
+    }, () => undefined);
+    void refreshIncompleteRestore(uid).then(() => undefined, () => undefined);
     const onSyncProblem = (event: Event) => {
       const message = syncRejectionMessage((event as CustomEvent<string>).detail);
       if (message && isMounted) toast.error(message, { id: 'sync-problem', duration: 10000 });
@@ -1712,11 +1721,11 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         const ar = settings?.defaultLanguage !== 'en';
         const message = kind === 'invoice'
           ? (ar
-            ? 'توقفت استعادة سابقة قبل اكتمالها. أكمل الاستعادة من نسخة سليمة قبل تسجيل فواتير جديدة.'
-            : 'A previous restore did not finish. Complete a full restore before recording new invoices.')
+            ? 'توقفت استعادة سابقة قبل اكتمالها. افتح النسخ الاحتياطي ← نسخة على الجهاز وأعد الاستعادة من ملف سليم قبل تسجيل فواتير جديدة.'
+            : 'A previous restore did not finish. Open Backups → On this device and restore from a good file before recording new invoices.')
           : (ar
-            ? 'توقفت استعادة سابقة قبل اكتمالها. أكمل الاستعادة من نسخة سليمة قبل تسجيل عمليات مالية أو مخزنية.'
-            : 'A previous restore did not finish. Complete a full restore before recording money or stock changes.');
+            ? 'توقفت استعادة سابقة قبل اكتمالها. افتح النسخ الاحتياطي ← نسخة على الجهاز وأعد الاستعادة من ملف سليم قبل تسجيل عمليات مالية أو مخزنية.'
+            : 'A previous restore did not finish. Open Backups → On this device and restore from a good file before recording money or stock changes.');
         toast.error(message, { duration: 10000 });
         throw Object.assign(new Error(message), { code: 'restore-incomplete', notified: true });
       }

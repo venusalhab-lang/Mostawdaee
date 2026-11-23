@@ -5,7 +5,7 @@ import { toast } from 'sonner';
 import Logo from './Logo';
 import NotificationCenter from './NotificationCenter';
 import { useFirebase } from './FirebaseProvider';
-import { OFFLINE_QUEUE_EVENT, belongsToStore, readQueue } from '../lib/offlineQueue';
+import { OFFLINE_QUEUE_EVENT, OFFLINE_QUEUE_STORAGE_FULL_EVENT, belongsToStore, readQueue } from '../lib/offlineQueue';
 
 interface HeaderProps {
   isRtl: boolean;
@@ -117,14 +117,20 @@ export default function Header({
         { id: 'quota-exceeded', duration: 10000 });
     };
 
+    const handleQueueStorageFull = () => {
+      handleQuotaExceeded();
+    };
+
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
     window.addEventListener('firestore-quota-exceeded', handleQuotaExceeded);
+    window.addEventListener(OFFLINE_QUEUE_STORAGE_FULL_EVENT, handleQueueStorageFull);
 
     return () => {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
       window.removeEventListener('firestore-quota-exceeded', handleQuotaExceeded);
+      window.removeEventListener(OFFLINE_QUEUE_STORAGE_FULL_EVENT, handleQueueStorageFull);
     };
   }, [isRtl]);
 

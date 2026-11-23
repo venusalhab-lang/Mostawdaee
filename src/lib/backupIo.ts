@@ -45,8 +45,8 @@ export function restoreBlockedMessage(
   }
   if (error?.code === 'restore-incomplete') {
     return isRtl
-      ? 'توقفت استعادة سابقة قبل اكتمالها. أكمل الاستعادة من نسخة سليمة قبل تسجيل مبيعات جديدة.'
-      : 'A previous restore did not finish. Complete a full restore from a good backup before recording new sales.';
+      ? 'توقفت استعادة سابقة قبل اكتمالها. من النسخ الاحتياطي ← نسخة على الجهاز أعد الاستعادة من ملف سليم؛ المبيعات تبقى موقوفة حتى تكتمل.'
+      : 'A previous restore did not finish. In Backups → On this device, restore again from a good file; sales stay blocked until it completes.';
   }
   if (error?.code === 'backup-forbidden') {
     return isRtl

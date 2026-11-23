@@ -33,6 +33,7 @@ import { useSubscriptionSync } from './hooks/useSubscriptionSync';
 import { usePlayBillingSync } from './hooks/usePlayBillingSync';
 import SubscriptionExpired from './components/SubscriptionExpired';
 import { MembershipSettings, PendingInvites } from './components/TeamSettings';
+import RestoreLockBanner from './components/RestoreLockBanner';
 import { homeScreen } from './lib/roles';
 import { leaveStore, teamErrorMessage } from './lib/workspace';
 import { deviceLocalWorkMessage, switchStore } from './lib/storeSwitch';
@@ -1016,6 +1017,13 @@ export default function App() {
 
 
             <PendingInvites language={language} />
+            <RestoreLockBanner
+              language={language}
+              onOpenBackup={() => {
+                setBackupTab('local');
+                setActiveScreen('google-drive');
+              }}
+            />
 
             {/* Render Active Screen Content Stage with premium framer-motion transitions */}
             <div className={activeScreen === 'ai-assistant' ? 'hidden' : 'text-gray-900 dark:text-gray-100 pb-8'}>
