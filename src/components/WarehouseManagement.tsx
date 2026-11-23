@@ -6,6 +6,7 @@ import {
   Boxes,
   Building2,
   Calendar,
+  ChevronDown,
   Coins,
   Edit2,
   FileBox,
@@ -16,6 +17,7 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
+import { useIntentionalTap } from '../hooks/useIntentionalTap';
 import { toast } from 'sonner';
 import type { AppSettings, Language, Product, Warehouse } from '../types';
 import { useFirebase } from './FirebaseProvider';
@@ -46,6 +48,95 @@ import ShowMoreBar from './ui/ShowMoreBar';
 interface Props {
   language: Language;
   settings: AppSettings;
+}
+
+function WarehouseProductRow({
+  product: p,
+  isRtl,
+  defaultCurrency,
+  expanded,
+  onToggle,
+  onTransfer,
+  qtyText,
+}: {
+  product: Product;
+  isRtl: boolean;
+  defaultCurrency: string;
+  expanded: boolean;
+  onToggle: () => void;
+  onTransfer?: () => void;
+  qtyText: (n: number) => string;
+}) {
+  const tap = useIntentionalTap(onToggle);
+  const qty = Number(p.quantity) || 0;
+  const cost = Number(p.unitCost ?? p.costPrice) || 0;
+  const sell = Number(p.sellingPrice) || 0;
+
+  return (
+    <li className="px-3 py-2.5">
+      <div className="flex items-center justify-between gap-3">
+        <button
+          type="button"
+          {...tap}
+          className="min-w-0 flex-1 flex items-center gap-2 text-start rounded-lg hover:bg-slate-50 dark:hover:bg-white/[0.03] -ms-1 ps-1 py-0.5 transition-colors cursor-pointer"
+          aria-expanded={expanded}
+          aria-label={isRtl ? `تفاصيل ${p.name}` : `Details for ${p.name}`}
+        >
+          <ChevronDown
+            size={16}
+            className={`shrink-0 text-slate-400 transition-transform ${expanded ? 'rotate-180' : ''} ${isRtl ? 'scale-x-[-1]' : ''}`}
+            aria-hidden
+          />
+          <div className="min-w-0">
+            <div className="font-bold truncate">{p.name}</div>
+            <div className="text-[11px] font-mono text-slate-400 truncate" dir="ltr">{p.sku || '—'}</div>
+          </div>
+        </button>
+        <div className="text-end shrink-0">
+          <div className={`font-black tabular-nums ${qty > 0 ? 'text-slate-900 dark:text-white' : 'text-slate-300 dark:text-slate-600'}`}>{qtyText(qty)}</div>
+          <div className="text-[11px] text-slate-400 tabular-nums">
+            {qty > 0 && cost > 0 ? formatMoney(roundQty(qty) * cost, p.currency || defaultCurrency) : qty > 0 ? (isRtl ? 'بلا تكلفة' : 'no cost') : ''}
+          </div>
+        </div>
+        {qty > 0 && onTransfer && (
+          <button
+            type="button"
+            onClick={onTransfer}
+            className="shrink-0 p-2 rounded-lg text-slate-400 hover:bg-slate-100 hover:text-indigo-600 dark:hover:bg-white/5"
+            aria-label={isRtl ? `نقل ${p.name}` : `Move ${p.name}`}
+          >
+            <ArrowRightLeft size={15} />
+          </button>
+        )}
+      </div>
+      {expanded && (
+        <div className="mt-2 ms-6 rounded-xl border border-slate-100 dark:border-white/10 bg-slate-50/80 dark:bg-white/[0.03] px-3 py-2.5 space-y-1.5">
+          <div className="flex justify-between gap-2 text-xs">
+            <span className="text-slate-400 font-bold">{isRtl ? 'التصنيف' : 'Category'}</span>
+            <span className="font-bold text-slate-700 dark:text-slate-200">{p.category || (isRtl ? 'عام' : 'General')}</span>
+          </div>
+          <div className="flex justify-between gap-2 text-xs">
+            <span className="text-slate-400 font-bold">{isRtl ? 'تكلفة الوحدة' : 'Unit cost'}</span>
+            <span className="font-bold tabular-nums">{cost > 0 ? formatMoney(cost, p.currency || defaultCurrency) : (isRtl ? 'بلا تكلفة' : 'No cost')}</span>
+          </div>
+          <div className="flex justify-between gap-2 text-xs">
+            <span className="text-slate-400 font-bold">{isRtl ? 'سعر البيع' : 'Sell price'}</span>
+            <span className="font-bold tabular-nums">{sell > 0 ? formatMoney(sell, p.currency || defaultCurrency) : '—'}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              requestScreenSearch({ screen: 'inventory', query: p.sku || p.name, recordId: p.id });
+              window.dispatchEvent(new CustomEvent('change-screen', { detail: 'inventory' }));
+            }}
+            className="mt-1 w-full rounded-lg bg-indigo-600/90 text-white text-[11px] font-bold py-1.5"
+          >
+            {isRtl ? 'فتح في المخزون' : 'Open in Inventory'}
+          </button>
+        </div>
+      )}
+    </li>
+  );
 }
 
 type TypeFilter = 'ALL' | 'MAIN' | 'SUB';
@@ -85,7 +176,8 @@ export default function WarehouseManagement({ language, settings }: Props) {
   const [deleting, setDeleting] = useState<Warehouse | null>(null);
   const [detailId, setDetailId] = useState<string | null>(null);
   const [detailSearch, setDetailSearch] = useState('');
-  const [productDetailId, setProductDetailId] = useState<string | null>(null);
+  /** Inline peek for one product in the warehouse sheet — avoids modal pop on scroll. */
+  const [expandedProductId, setExpandedProductId] = useState<string | null>(null);
   const [transfer, setTransfer] = useState<TransferState | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -295,6 +387,7 @@ export default function WarehouseManagement({ language, settings }: Props) {
   const detailPage = useProgressiveList(detailProducts, `${detailId || ''}|${detailSearch}`);
 
   const openDetail = (id: string) => {
+    setExpandedProductId(null);
     setDetailSearch('');
     setDetailId(id);
   };
@@ -560,38 +653,18 @@ export default function WarehouseManagement({ language, settings }: Props) {
               ) : (
                 <>
                   <ul className="divide-y divide-slate-100 dark:divide-white/5 rounded-2xl border border-slate-100 dark:border-white/5">
-                    {detailPage.visible.map((p: Product) => {
-                      const qty = Number(p.quantity) || 0;
-                      const cost = Number(p.unitCost ?? p.costPrice) || 0;
-                      return (
-                        <li key={p.id} className="flex items-center justify-between gap-3 px-3 py-2.5">
-                          <button
-                            type="button"
-                            onClick={() => setProductDetailId(p.id)}
-                            className="min-w-0 flex-1 text-start rounded-lg hover:bg-slate-50 dark:hover:bg-white/[0.03] -ms-1 ps-1 py-0.5 transition-colors cursor-pointer"
-                          >
-                            <div className="font-bold truncate">{p.name}</div>
-                            <div className="text-[11px] font-mono text-slate-400 truncate" dir="ltr">{p.sku || '—'}</div>
-                          </button>
-                          <div className="text-end shrink-0">
-                            <div className={`font-black tabular-nums ${qty > 0 ? 'text-slate-900 dark:text-white' : 'text-slate-300 dark:text-slate-600'}`}>{qtyText(qty)}</div>
-                            <div className="text-[11px] text-slate-400 tabular-nums">
-                              {qty > 0 && cost > 0 ? formatMoney(roundQty(qty) * cost, p.currency || defaultCurrency) : qty > 0 ? (isRtl ? 'بلا تكلفة' : 'no cost') : ''}
-                            </div>
-                          </div>
-                          {qty > 0 && (
-                            <button
-                              type="button"
-                              onClick={() => openTransfer(detailId, p.id)}
-                              className="shrink-0 p-2 rounded-lg text-slate-400 hover:bg-slate-100 hover:text-indigo-600 dark:hover:bg-white/5"
-                              aria-label={isRtl ? `نقل ${p.name}` : `Move ${p.name}`}
-                            >
-                              <ArrowRightLeft size={15} />
-                            </button>
-                          )}
-                        </li>
-                      );
-                    })}
+                    {detailPage.visible.map((p: Product) => (
+                      <WarehouseProductRow
+                        key={p.id}
+                        product={p}
+                        isRtl={isRtl}
+                        defaultCurrency={defaultCurrency}
+                        expanded={expandedProductId === p.id}
+                        onToggle={() => setExpandedProductId((cur) => (cur === p.id ? null : p.id))}
+                        onTransfer={Number(p.quantity) > 0 ? () => openTransfer(detailId, p.id) : undefined}
+                        qtyText={qtyText}
+                      />
+                    ))}
                   </ul>
                   <ShowMoreBar
                     isRtl={isRtl}
@@ -831,61 +904,6 @@ export default function WarehouseManagement({ language, settings }: Props) {
           </div>
         </form>
       ), isRtl ? 'نقل مخزون' : 'Transfer stock')}
-
-      {productDetailId && (() => {
-        const p = products.find((x) => x.id === productDetailId);
-        if (!p) return null;
-        const qty = Number(p.quantity) || 0;
-        const cost = Number(p.unitCost ?? p.costPrice) || 0;
-        const sell = Number(p.sellingPrice) || 0;
-        const whName = nameOf(locationOf(p));
-        const rows = [
-          { label: isRtl ? 'الباركود / SKU' : 'Barcode / SKU', value: p.sku || '—' },
-          { label: isRtl ? 'التصنيف' : 'Category', value: p.category || (isRtl ? 'عام' : 'General') },
-          { label: isRtl ? 'المستودع' : 'Warehouse', value: whName },
-          { label: isRtl ? 'الكمية' : 'Quantity', value: qtyText(qty) },
-          { label: isRtl ? 'تكلفة الوحدة' : 'Unit cost', value: cost > 0 ? formatMoney(cost, p.currency || defaultCurrency) : (isRtl ? 'بلا تكلفة' : 'No cost') },
-          { label: isRtl ? 'سعر البيع' : 'Selling price', value: sell > 0 ? formatMoney(sell, p.currency || defaultCurrency) : '—' },
-          { label: isRtl ? 'قيمة الرصيد بالتكلفة' : 'Stock value at cost', value: qty > 0 && cost > 0 ? formatMoney(roundQty(qty) * cost, p.currency || defaultCurrency) : '—' },
-        ];
-        return modal(() => setProductDetailId(null), (
-          <>
-            {modalHeader(p.name, () => setProductDetailId(null))}
-            <div className="space-y-2.5">
-              {rows.map((row) => (
-                <div key={row.label} className="flex justify-between gap-3 border-b border-slate-50 dark:border-white/5 pb-2">
-                  <span className="text-xs font-bold text-slate-400 shrink-0">{row.label}</span>
-                  <span className="text-sm font-bold text-slate-800 dark:text-slate-100 text-end break-all" dir="auto">{row.value}</span>
-                </div>
-              ))}
-            </div>
-            <div className="flex flex-wrap gap-2 justify-end pt-2">
-              {qty > 0 && detailId !== null && (
-                <button
-                  type="button"
-                  onClick={() => { setProductDetailId(null); openTransfer(detailId, p.id); }}
-                  className="rounded-xl border border-slate-200 dark:border-white/10 px-3 py-2 text-xs font-bold inline-flex items-center gap-1.5"
-                >
-                  <ArrowRightLeft size={13} />
-                  {isRtl ? 'نقل هذا الصنف' : 'Transfer this item'}
-                </button>
-              )}
-              <button
-                type="button"
-                onClick={() => {
-                  setProductDetailId(null);
-                  setDetailId(null);
-                  requestScreenSearch({ screen: 'inventory', query: p.sku || p.name, recordId: p.id });
-                  window.dispatchEvent(new CustomEvent('change-screen', { detail: 'inventory' }));
-                }}
-                className="rounded-xl bg-indigo-600 text-white px-3 py-2 text-xs font-bold"
-              >
-                {isRtl ? 'فتح في المخزون' : 'Open in Inventory'}
-              </button>
-            </div>
-          </>
-        ), isRtl ? 'تفاصيل الصنف' : 'Item details');
-      })()}
     </div>
   );
 }

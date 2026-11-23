@@ -35,7 +35,7 @@ import { translations } from '../translations';
 import { motion, AnimatePresence } from 'motion/react';
 import SuccessVisual from './SuccessVisual';
 import ContextMenu3D from './ContextMenu3D';
-import useLongPress from '../hooks/useLongPress';
+import { useIntentionalTap } from '../hooks/useIntentionalTap';
 import { toast } from 'sonner';
 import { useFirebase } from './FirebaseProvider';
 import { usePreferredCurrency } from './CurrencyContext';
@@ -115,10 +115,8 @@ function ProductRow({
   onDelete,
   warehouses = []
 }: ProductRowProps) {
-  const longPressProps = useLongPress(
-    () => onShowContextMenu(product),
-    () => onShowContextMenu(product),
-  );
+  // Details open only via the explicit control or a still tap on the name — never from scroll.
+  const nameTap = useIntentionalTap(() => onShowContextMenu(product));
   // Always derived from the real quantity so a stale stored status can never contradict the number shown.
   const liveStatus: StockStatus = computeStockStatus(product.quantity, product.lowStockThreshold, lowStockDefault);
 
@@ -130,13 +128,17 @@ function ProductRow({
   return (
     <motion.tr 
       key={product.id}
-      {...longPressProps}
       variants={itemVariants}
-      className="group hover:bg-white/5 dark:hover:bg-slate-900/40 transition-colors select-none cursor-pointer"
+      className="group hover:bg-white/5 dark:hover:bg-slate-900/40 transition-colors"
     >
       {/* Product Details (المنتج) */}
       <td className="px-6 py-4.5 whitespace-nowrap">
-        <div className="flex items-center gap-3">
+        <button
+          type="button"
+          {...nameTap}
+          className="flex items-center gap-3 text-start max-w-full rounded-xl -ms-1 ps-1 py-0.5 hover:bg-slate-50/80 dark:hover:bg-white/[0.03] cursor-pointer"
+          aria-label={t.productDetails}
+        >
           <div className={`w-11 h-11 border border-slate-200/20 dark:border-white/10 rounded-xl flex items-center justify-center group-hover:scale-105 group-hover:border-cyan-400/30 transition-all shadow-inner ${productVisualTone(product.category, product.name)}`}>
             <ProductVisualIcon category={product.category} name={product.name} className="w-5 h-5" />
           </div>
@@ -182,7 +184,7 @@ function ProductRow({
               })()}
             </div>
           </div>
-        </div>
+        </button>
       </td>
 
       {/* Category (التصنيف) */}
@@ -300,42 +302,45 @@ function ProductMobileCard({
   onDelete,
   warehouses = [],
 }: ProductRowProps) {
-  const longPressProps = useLongPress(
-    () => onShowContextMenu(product),
-    () => onShowContextMenu(product),
-  );
+  const nameTap = useIntentionalTap(() => onShowContextMenu(product));
   const liveStatus: StockStatus = computeStockStatus(product.quantity, product.lowStockThreshold, lowStockDefault);
   const wh = warehouses.find((w) => w.id === product.warehouseId);
   const packs = formatPackStock(product.quantity, product, isRtl);
 
   return (
     <motion.article
-      {...longPressProps}
       layout
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
-      className="p-4 space-y-3 border-b border-slate-200/40 dark:border-white/5 last:border-b-0 select-none"
+      className="p-4 space-y-3 border-b border-slate-200/40 dark:border-white/5 last:border-b-0"
     >
       <div className="flex items-start gap-3">
-        <div className={`w-11 h-11 shrink-0 border border-slate-200/20 dark:border-white/10 rounded-xl flex items-center justify-center shadow-inner ${productVisualTone(product.category, product.name)}`}>
-          <ProductVisualIcon category={product.category} name={product.name} className="w-5 h-5" />
-        </div>
-        <div className="min-w-0 flex-1 space-y-1">
-          <p className="text-sm font-black text-slate-900 dark:text-slate-100 leading-snug break-words">{product.name}</p>
-          <div className="flex flex-wrap gap-1.5">
-            <span className="text-[10px] px-2 py-0.5 bg-cyan-500/10 text-cyan-500 dark:text-cyan-400 rounded-md font-mono font-black tracking-wide">
-              SKU: {product.sku}
-            </span>
-            <span className="text-[10px] px-2 py-0.5 bg-slate-100 dark:bg-white/5 text-slate-600 dark:text-slate-300 rounded-md font-black">
-              {product.category || (isRtl ? 'عام' : 'General')}
-            </span>
-            {wh && (
-              <span className="text-[9px] px-1.5 py-0.5 bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 rounded-md font-black">
-                {wh.name}
-              </span>
-            )}
+        <button
+          type="button"
+          {...nameTap}
+          className="flex items-start gap-3 min-w-0 flex-1 text-start rounded-xl -ms-1 ps-1 py-0.5 cursor-pointer"
+          aria-label={t.productDetails}
+        >
+          <div className={`w-11 h-11 shrink-0 border border-slate-200/20 dark:border-white/10 rounded-xl flex items-center justify-center shadow-inner ${productVisualTone(product.category, product.name)}`}>
+            <ProductVisualIcon category={product.category} name={product.name} className="w-5 h-5" />
           </div>
-        </div>
+          <div className="min-w-0 flex-1 space-y-1">
+            <p className="text-sm font-black text-slate-900 dark:text-slate-100 leading-snug break-words">{product.name}</p>
+            <div className="flex flex-wrap gap-1.5">
+              <span className="text-[10px] px-2 py-0.5 bg-cyan-500/10 text-cyan-500 dark:text-cyan-400 rounded-md font-mono font-black tracking-wide">
+                SKU: {product.sku}
+              </span>
+              <span className="text-[10px] px-2 py-0.5 bg-slate-100 dark:bg-white/5 text-slate-600 dark:text-slate-300 rounded-md font-black">
+                {product.category || (isRtl ? 'عام' : 'General')}
+              </span>
+              {wh && (
+                <span className="text-[9px] px-1.5 py-0.5 bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 rounded-md font-black">
+                  {wh.name}
+                </span>
+              )}
+            </div>
+          </div>
+        </button>
         <span className={`shrink-0 inline-flex items-center px-2.5 py-1 rounded-full text-[10px] font-black border ${statusStyles[liveStatus]}`}>
           {statusLabels[liveStatus]}
         </span>
